@@ -1,0 +1,215 @@
+"""Knowledge bases: persona + context + key facts + searchable documents, attachable to any campaign."""
+import io
+import re
+from pathlib import Path
+
+from . import db
+
+db.run("""CREATE TABLE IF NOT EXISTS knowledge_bases(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, agent_name TEXT DEFAULT '', persona TEXT DEFAULT '', context TEXT DEFAULT '',
+  key_facts TEXT DEFAULT '', next_steps TEXT DEFAULT '', contact TEXT DEFAULT '', created_at REAL)""")
+db.run("""CREATE TABLE IF NOT EXISTS kb_docs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, kb_id INTEGER, title TEXT, kind TEXT DEFAULT 'info', body TEXT, created_at REAL)""")
+db.run("CREATE INDEX IF NOT EXISTS idx_kbdocs ON kb_docs(kb_id)")
+db.run("CREATE TABLE IF NOT EXISTS kb_pron(id INTEGER PRIMARY KEY AUTOINCREMENT, kb_id INTEGER, term TEXT, language TEXT, respelling TEXT)")
+for _stmt in ("ALTER TABLE kb_docs ADD COLUMN category TEXT DEFAULT 'Other'", "ALTER TABLE kb_docs ADD COLUMN source TEXT"):
+    try:
+        db.run(_stmt)
+    except Exception:
+        pass
+
+CATEGORIES = ["Products & services", "Pricing & payment", "Requirements", "How to get started", "FAQ", "Policies", "Objection handling",
+              "Contact & locations", "Support", "Other"]
+
+
+def guess_category(title, body="", kind="info"):
+    """Keyword fallback used when the AI classifier is unavailable."""
+    t = f"{title}".lower()
+    b = body[:600].lower()
+    rules = [("How to get started", ("how to apply", "apply", "get started", "sign up", "signup", "order", "book", "enrol", "onboarding")),
+             ("Contact & locations", ("contact", "address", "location", "find us", "opening hours", "branch", "office")),
+             ("Pricing & payment", ("price", "pricing", "fee", "cost", "payment", "invoice", "subscription", "plan", "discount", "finance")),
+             ("Requirements", ("requirement", "eligib", "prerequisite", "what you need")),
+             ("Policies", ("policy", "policies", "procedure", "complaint", "refund", "terms", "privacy", "cancel")),
+             ("Support", ("support", "help", "warranty", "service desk", "training")),
+             ("FAQ", ("faq", "question")), ("Objection handling", ("objection", "too expensive", "not sure"))]
+    if kind in ("course", "product"):
+        return "Products & services"
+    for cat, kws in rules:
+        if any(k in t for k in kws):
+            return cat
+    for cat, kws in rules:
+        if any(k in b for k in kws):
+            return cat
+    return "Other"
+
+
+DEFAULT_PERSONA = ("Warm, quick and plain-spoken, like a helpful colleague. Short sentences, no jargon, no sales pressure. "
+                   "Never pushy; if the person isn't interested, thank them and end the call.")
+
+
+# one-off migration for knowledge bases created before categories existed
+for _d in db.q("SELECT id,title,kind,body FROM kb_docs WHERE source IS NULL"):
+    db.run("UPDATE kb_docs SET category=?, source='imported' WHERE id=?", (guess_category(_d["title"], _d["body"], _d["kind"]), _d["id"]))
+
+
+def list_kbs():
+    return db.q("""SELECT k.id, k.name, k.agent_name, (SELECT COUNT(*) FROM kb_docs d WHERE d.kb_id=k.id) docs,
+                   (SELECT COUNT(*) FROM campaigns c WHERE c.kb_id=k.id) campaigns FROM knowledge_bases k ORDER BY k.id""")
+
+
+def get_kb(kb_id):
+    if not kb_id:
+        return None
+    return db.q1("SELECT * FROM knowledge_bases WHERE id=?", (kb_id,))
+
+
+def kb_detail(kb_id):
+    kb = get_kb(kb_id)
+    if kb:
+        kb["docs"] = db.q("SELECT id,title,kind,category,source,length(body) size,created_at FROM kb_docs WHERE kb_id=? ORDER BY category, title", (kb_id,))
+        kb["categories"] = CATEGORIES
+    return kb
+
+
+def item_titles(kb_id, categories=None):
+    """Titles of the products/services documents, so the caller knows what the company offers."""
+    if categories and "Products & services" not in categories:
+        return []
+    return [d["title"] for d in db.q("SELECT title FROM kb_docs WHERE kb_id=? AND category='Products & services' ORDER BY title", (kb_id,))]
+
+
+def _chunks(doc):
+    parts, cur = [], ""
+    for block in re.split(r"\n(?=#{1,4} )", doc["body"]):
+        if len(cur) + len(block) > 1400 and cur:
+            parts.append(cur)
+            cur = ""
+        cur += block + "\n"
+    if cur.strip():
+        parts.append(cur)
+    return [f"[{doc['title']}]\n{p.strip()}" for p in parts]
+
+
+def _tok(s):
+    return set(re.findall(r"\w{3,}", s.lower()))
+
+
+def search(kb_id, query, k=3, categories=None, category=None):
+    q = _tok(query)
+    if not q or not kb_id:
+        return []
+    scored = []
+    for d in db.q("SELECT title,body,category FROM kb_docs WHERE kb_id=?", (kb_id,)):
+        if categories and d["category"] not in categories:
+            continue
+        if category and d["category"] != category:
+            continue
+        title_hit = len(q & _tok(d["title"]))
+        for c in _chunks(d):
+            score = len(q & _tok(c)) + 3 * title_hit
+            if score:
+                scored.append((score, c))
+    scored.sort(key=lambda x: -x[0])
+    return [c[:1500] for _, c in scored[:k]]
+
+
+def add_doc(kb_id, title, text, kind="info", category=None, source=None):
+    return db.run("INSERT INTO kb_docs(kb_id,title,kind,body,category,source,created_at) VALUES(?,?,?,?,?,?,?)",
+                  (kb_id, title.strip() or "Note", kind, text.strip(), category or guess_category(title, text, kind), source, db.now()))
+
+
+def segment_text(title, text, max_chars=1800):
+    """Split a long document into topic segments: by markdown/numbered headings first, else by paragraphs."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return [(title, text)]
+    parts = re.split(r"\n(?=#{1,3} |\d+[.)] [A-Z][^\n]{3,80}\n)", text)
+    by_heading = len(parts) >= 2
+    if not by_heading:
+        parts = re.split(r"\n{2,}", text)
+    segs, cur = [], ""
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        # headings stay separate segments (merge only tiny ones); plain paragraphs are packed up to max_chars
+        if cur and ((not by_heading and len(cur) + len(p) > max_chars) or (by_heading and len(cur) > 40)):
+            segs.append(cur)
+            cur = ""
+        cur += p + "\n\n"
+        if by_heading and len(cur) > max_chars:
+            segs.append(cur)
+            cur = ""
+    if cur.strip():
+        segs.append(cur)
+    out = []
+    for i, sgm in enumerate(segs, 1):
+        first = re.sub(r"^#+\s*", "", sgm.strip().split("\n", 1)[0]).strip()
+        label = first[:70] if 3 < len(first) <= 70 and not first.endswith(".") else f"part {i}"
+        out.append((f"{title}: {label}", sgm.strip()))
+    return out
+
+
+async def classify(items):
+    """items: [(title, body)] -> list of categories (AI when available, keywords otherwise)."""
+    cats = [guess_category(t, b) for t, b in items]
+    try:
+        from . import llm
+        if not llm.has_key() or not items:
+            return cats
+        payload = [{"i": i, "title": t, "text": b[:240]} for i, (t, b) in enumerate(items[:60])]
+        res = await llm.complete_json(
+            f"Sort knowledge-base snippets into exactly one category each. Categories: {CATEGORIES}. "
+            "Reply as JSON {\"categories\": [..one category per snippet, same order..]}.", __import__("json").dumps(payload, ensure_ascii=False))
+        got = res.get("categories") or []
+        for i, c in enumerate(got[:len(cats)]):
+            if c in CATEGORIES:
+                cats[i] = c
+    except Exception:
+        pass
+    return cats
+
+
+async def ingest(kb_id, title, text, source=None):
+    """Segment a document into topics, classify them, store them. Returns the number of segments."""
+    segs = segment_text(title, text)
+    cats = await classify(segs)
+    for (t, b), c in zip(segs, cats):
+        add_doc(kb_id, t, b, "info", c, source or title)
+    return len(segs)
+
+
+def extract_text(filename, data: bytes):
+    name = (filename or "").lower()
+    if name.endswith(".pdf"):
+        from pypdf import PdfReader
+        return "\n\n".join((p.extract_text() or "") for p in PdfReader(io.BytesIO(data)).pages[:300])
+    if name.endswith((".xlsx", ".xls")):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        out = []
+        for ws in wb.worksheets:
+            for r in ws.iter_rows(values_only=True):
+                if any(c not in (None, "") for c in r):
+                    out.append(" | ".join("" if c is None else str(c) for c in r))
+        return "\n".join(out)
+    return data.decode("utf-8", errors="replace")
+
+
+# ---------- pronunciation guide: how names/abbreviations must be WRITTEN so the voice says them right ----------
+def pronunciations(kb_id):
+    return db.q("SELECT id,term,language,respelling FROM kb_pron WHERE kb_id=? ORDER BY language, term", (kb_id,)) if kb_id else []
+
+
+def set_pronunciations(kb_id, rows):
+    db.run("DELETE FROM kb_pron WHERE kb_id=?", (kb_id,))
+    for r in rows:
+        if str(r.get("term", "")).strip() and str(r.get("respelling", "")).strip():
+            db.run("INSERT INTO kb_pron(kb_id,term,language,respelling) VALUES(?,?,?,?)",
+                   (kb_id, r["term"].strip()[:60], (r.get("language") or "English").strip(), r["respelling"].strip()[:80]))
+
+
+def pron_guide(kb_id, language):
+    rows = [r for r in pronunciations(kb_id) if (r["language"] or "").lower() == (language or "").lower()]
+    return "; ".join(f"{r['term']} -> write as \"{r['respelling']}\"" for r in rows)

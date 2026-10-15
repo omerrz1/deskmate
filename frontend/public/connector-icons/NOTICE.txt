@@ -1,0 +1,1 @@
+Brand icons from Simple Icons (https://simpleicons.org), released under CC0. The logos remain trademarks of their respective owners and are used here only to identify the service a connector talks to.

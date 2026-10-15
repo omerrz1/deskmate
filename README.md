@@ -1,0 +1,108 @@
+# Deskmates
+
+A team of AI employees for your business. Each one has a name, personality, email address, to-do list, calendar, files and phone, and can make calls, answer email, write documents and update spreadsheets. Meet them on a video-call style page, give them work, or let them get on with it. Phone calls are **simulated** on a Softphone page for now; Twilio comes later.
+
+## Run
+```bash
+# backend (Python 3.12+; older Pythons cannot install the patched libraries)
+cd backend
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env          # optional: keys are normally entered in the app (see below)
+.venv/bin/playwright install chromium    # only for the browser tool; skip it if Google Chrome is installed
+.venv/bin/uvicorn app.main:app --port 8000
+
+# frontend (second terminal)
+cd frontend && npm install && npm run dev     # http://localhost:5173
+```
+
+## Signing up and getting started
+Deskmates holds **many companies on one server**. Anyone who opens the app can **create a company workspace**; each one is fully separate (its own database, files, employees, keys and apps).
+1. **Create your workspace**: company name, your email (that is your sign-in), a password (12+ characters), and optionally a starter team.
+2. **Connect OpenAI**: paste your own API key. It is checked with OpenAI, then stored encrypted on the server and never shown again. Nothing else works until this is done.
+3. **Connect ElevenLabs** (phone-call voices): paste a key, or skip it for now; everything except live phone calls works without it.
+4. **Your team**: the team you picked (a manager, a caller and an assistant, or a ready-made sales, support, back-office, marketing or recruiting team) is waiting on the Team page; one click creates it, and each employee writes their own name and personality (a few cents of OpenAI usage). Connect apps from **Apps** when you need them.
+
+The person who signs up is that company's **owner**. The owner adds other admins under Settings → Account → Admins (a sign-in name and a temporary password), and can close the whole account under Settings → Company → **Close this account**.
+
+**Running it for yourself only?** Set `SIGNUPS_OPEN=false` (existing companies keep working, new ones cannot be created). The workspace that existed before multi-company support is kept as it was; its admins sign in as before, and any `OPENAI_API_KEY` / `ELEVENLABS_API_KEY` in `.env` is moved into the app on first start. There is no longer a setup token or a default password.
+
+**Platform owner:** the owner of the original workspace sees **Settings → Platform**: every company with its size and last activity, and a Suspend / Reactivate button (a suspended company's people cannot sign in or be served).
+
+**Limits and honest notes:** it is one server process with one SQLite database per company, so it suits dozens to a few hundred small companies, not thousands. `MAX_WORKSPACES` (default 1000) and `MAX_AGENTS_PER_WORKSPACE` (default 30) cap growth. There is no email verification at sign-up, no per-company storage quota and no billing; each company pays OpenAI and ElevenLabs directly with its own keys.
+
+## The public site
+Visitors who are not signed in see a home page at `/`: what Deskmates does, the **virtual computer every employee gets**, how it works, the safety controls, ready-made teams, our mission and an FAQ. There are also **Product**, **Security**, **About**, **Contact**, **Privacy** and **Terms** pages, open to everyone. Anyone signed in goes straight to their workspace at `/` (signing out returns to the home page). Sign-in and sign-up live at `/signin` and `/signup`.
+- **Contact form**: messages are kept in the central directory (not in any company's workspace) and read by the platform owner under Settings → Platform. It has a hidden spam trap and a limit of 5 messages per hour per address. Set `CONTACT_EMAIL` to also show a direct address on the Contact page.
+- **Wording is yours to edit**: all the copy, including the mission statement, lives in `frontend/src/site/pages.jsx` (styles in `site.css`). The Privacy policy and Terms are plain-language drafts that describe what the software actually does; have a lawyer review them and add your company details and governing law before you launch.
+- **Serving it**: when you serve the built frontend (`npm run build`), the web server must send unknown paths such as `/about` and `/signin` to `index.html` (the Vite dev server already does). The site is its own code chunk, so signed-in users never download it.
+
+## Security model
+- **Everything under `/api` requires a signed-in admin** except a bare health check and the sign-in/setup calls. That includes recordings, voice sessions and all uploads.
+- **Passwords**: Argon2id hashes, 12+ characters, common passwords rejected. Sessions are random tokens stored hashed on the server (revocable), `HttpOnly` + `SameSite=Strict` cookies, 12 h maximum and 2 h idle.
+- **Brute force**: 5 wrong passwords lock that username *from that IP* for 15 minutes (so a stranger cannot lock you out), plus a global backstop and a per-IP request limit. Unknown users get the same error as wrong passwords.
+- **Cross-site requests**: every state-changing request needs a per-session CSRF token and an allowed `Origin`. CORS only allows `ALLOWED_ORIGINS`.
+- **Hardening**: security headers on every response, upload size and type limits, row/page caps on spreadsheets and PDFs, no stack traces or API-key fragments in error messages, API docs disabled.
+- **Keys**: each company's OpenAI and ElevenLabs keys are validated with the provider, encrypted at rest (Fernet; the key file is `data/.keyfile`, mode `600`) and never returned by the API.
+- **Two-factor sign-in** (Account → Two-factor): authenticator-app codes plus one-time backup codes; the owner can reset another admin's.
+- **Companies are isolated**: a session cookie names its company and is checked against that company's own sessions; a cookie from one company is refused by every other. Live updates, files, webhooks and background jobs are all scoped per company.
+- **Audit**: sign-ins, failures, password changes, session revocations and deletions are recorded (Account → Security log, and Settings → Audit log with CSV export).
+- **Privacy**: data folder is owner-only (`700`/`600`); calls are **never recorded** (only transcripts and summaries are kept, with optional automatic transcript deletion under Account → Data retention); “Delete all data” erases one person’s details and calls.
+- **AI safety**: customer data, uploaded documents and what callers say are treated as untrusted data in prompts; the admin assistant must get explicit confirmation before starting a campaign of more than 25 calls.
+- **Dependencies**: `pip-audit` and `npm audit` report no known vulnerabilities (re-run them regularly). `requirements.lock` pins the tested versions.
+
+### Before exposing it beyond your own computer
+- Serve it over **HTTPS** and set `COOKIE_SECURE=true` and `ALLOWED_ORIGINS=https://your-domain`.
+- Behind a reverse proxy you control, set `TRUSTED_PROXY=true` so rate limits and the audit log see real client IPs.
+- **Rotate every API key** that has ever been pasted into a chat or committed anywhere (OpenAI, ElevenLabs).
+- Keep `backend/.env` and `backend/data/` out of version control and backed up securely.
+- Twilio webhooks (later) must verify Twilio's request signature.
+
+## Setting up for a company
+A new workspace starts empty: no agents, customers or knowledge. After the key steps the home page asks for the company (name, what it does, website, time zone) and creates your chosen starter team. Reading your website creates a knowledge base the callers use. **Templates** (Team page) add a whole team, a project plan or a playbook in one click. To wipe a workspace and start again, use **Settings → Company → Delete this company** (owner only; asks for the company name and your password); it removes every employee, customer, call, file, connected app and stored credential, keeps the admin accounts, and saves a backup in `data/backups/` first (delete it when you are sure). With the backend stopped, `python scripts/fresh_start.py --yes` does the same for the original workspace.
+
+## How it is organised
+- **Your team (home):** after signing in you see your agents. Click one for **Overview** (who they are, what they can do, to-dos, latest activity), **Computer** (their desktop: files, mail, to-dos, calendar, phone, browser, notes, projects, activity), **History** (everything they did, by day and type), **Train** (teach them a task) and **Settings** (profile, work email, abilities, manager).
+- **Overview and search:** the Team page opens with a live strip (who is working, open to-dos, what needs you, tasks finished today with a 7-day chart). Press **⌘K** (or **/**) anywhere to jump to a person, project, app or setting, start a meeting, hire someone or pause the team. The sidebar lists your managers with a live status light.
+- **Inbox:** a full mail client. Folders (Inbox, Sent, To approve) with counts, search across subject, sender and body, an Unread filter, emails grouped by day, bulk select (mark read or unread, delete), the whole conversation in the reading pane, Reply and Forward with the original quoted, links that open, attachments, and drafts that are kept on your device. Emails an employee wants to send outside the company, and texts or WhatsApp messages, wait in **To approve**, where you can edit an email before it goes. Keyboard: **j** and **k** move, **c** writes, **r** replies, **u** marks unread, **#** deletes. Each employee's own mailbox (read-only) opens from the mailbox picker or their Computer.
+- **Needs you:** meeting requests from agents (with email reminders), emails waiting for approval, new messages, things employees want to discuss with you (answer them right there), apps an employee asked for (with why they need it and step-by-step set-up), and a nudge to set up a manager.
+- **When a customer is on hold:** if a caller asks something the employee doesn't know, they put the customer on hold and ask you at once. A red bar appears across Deskmates (sound, flashing tab) with quick answers, typing or voice; you also get an email and, if you add your number and Twilio is connected, a text. If you don't answer in time (Settings → Calling) they tell the customer someone will call back and the question goes on their discussion list. Tick "remember" and the answer is kept for future callers. Calls are never recorded and callers are never told they are.
+- **Things to discuss:** each employee keeps a list of questions and unknowns (including ones raised by callers and report readers). They bring them up in your next meeting and email you if one waits too long.
+- **Meetings:** one voice at a time. A name picks that person only; "everyone" gets everyone, one after another; a request about someone's task or specialty goes to them; anything general goes to the manager. Anything the admin asks for during a meeting goes on the right person's to-do list and is done right after the meeting ends, unless the admin says "do it now" (or it's a tiny job like one email). Work the admin asked for that nobody wrote down is added to the lists when the meeting ends.
+- **How work flows:** meeting (the admin asks) → to-do list (queued on the right person's list) → **planning** (the employee writes a short plan, saved as a file, and its steps become the to-do's checklist) → **execution** (one plan step at a time, with a short pause between stages; "do it now" skips the pause) → wrap-up (result saved as a file, deliverables handed to the project drive). The board shows To do / Planning / Executing / Done and each task shows its step progress.
+- **Guardrails:** duplicate tasks are refused, a list holds at most 15 open items, employees can create only a limited number of tasks per hour, colleagues can send only 8 emails to each other per hour, and there are daily limits per employee and for the company (Settings → AI costs). A **Pause** button on the home page stops all work at once.
+- **Projects:** each project is a workspace: progress, the pipeline above, every task with its plan and steps, **deliverables** (the project drive) and **working files** (drafts on each teammate's own computer, in Projects/<name>), and an update feed. A project with no tasks gets a planning task for its manager so it never stays an empty shell.
+- **To-do lists:** every employee works through their own list by themselves, highest priority and earliest deadline first, as soon as they are free (repeating items wait for their next date). Anything they make is saved as a file on their own computer first; they email it (as an attachment), copy it to the shared drive, or deliver it to a project drive only when asked or when it is a finished project deliverable.
+- **Managers:** an agent can be made a manager. They can do anything the admin can do in the platform (hire, change or remove people, make managers, company details, settings, projects, apps, approvals, campaigns, and deleting: remove agents, delete projects, clear the inbox, or clear the whole team), except admin accounts and passwords, which stay with the human owner. When you tell a manager to delete something in a chat or meeting, that is the confirmation: it happens straight away (a full clear saves a backup first). Deletions are refused when they come from an email, a webhook or another employee's task, so nothing outside can trigger them; they do work from your chats and meetings and from to-dos you gave. They also hand out tasks, review the team and email you a daily report.
+- **Projects:** anyone (you or any agent) can start a project, invite teammates and share a project drive.
+- **Settings:** grouped in a side menu: Company, Connections (your OpenAI and ElevenLabs keys), Email, Files; Calling (customers, campaigns, call history and knowledge), Limits and spend, Browser; Email rules, Audit log, Backups, Account and sign-in; Notifications.
+
+## Safety, spend and backups (Settings)
+- **Limits and spend**: what each employee and the company spent today and this month (OpenAI and ElevenLabs, estimated from usage), with daily caps for the company and per employee; hitting a cap pauses the team until tomorrow.
+- **Email rules**: rules such as "more than 5 recipients needs approval", "mentions any of these words", "goes outside these company domains" or "has an attachment", plus a per-employee switch that holds every email to outside addresses; a held email says why and waits in Inbox → To approve.
+- **Audit log**: sign-ins, setting changes, deletions, approvals and key changes, searchable, with CSV export.
+- **Backups**: automatic daily backups (kept for a set number of days), a Back up now button, download, and **Restore** (asks for your password and saves the current state first).
+- **Notifications**: a daily digest and instant alerts (a held email, a cap reached, a failed task) by email, Slack, Discord or Telegram.
+- **Browser** (needs Playwright's Chromium or Google Chrome on the server): employees can read web pages in a real browser (mode *Read only*) or also click, type and fill forms (*Full*), with saved logins kept in an encrypted vault and typed in by the server, never shown to the model. Internal and private addresses are blocked; card numbers and passwords are never typed from model text. The default mode is *Read only*; switch it off or to *Full* under Settings → Browser.
+- **Performance** (Team page): a scorecard per employee over 7, 30 or 90 days: tasks done and how fast, on-time rate, actions and failures, emails sent and rejected, calls, meetings, and spend. Every number is a count you can check on the employee's own pages; there is no made-up score.
+
+## Connected apps
+Apps has a catalog of **212 connectable apps** in 26 categories, plus 40 built-in ones. Add an app with its key or sign-in details: texts and calls (Twilio, Vonage, Telnyx, Plivo, WhatsApp), team chat (Slack, Discord, Teams, Webex, Telegram), email (SendGrid, Mailgun, Postmark, Resend, Brevo, Mailchimp, Klaviyo, ActiveCampaign and more), CRM (HubSpot, Pipedrive, Salesforce, Zoho, Close, Attio, GoHighLevel), support (Zendesk, Freshdesk, Intercom, Front, Help Scout), work tools (Notion, Airtable, ClickUp, monday.com, Asana, Linear, Jira, Trello, Todoist), developer, hosting and monitoring (GitHub, GitLab, Sentry, PagerDuty, Datadog, New Relic, CircleCI, Statuspage, Heroku, Vercel, Cloudflare, Supabase, Vultr, Linode, Hetzner), payments and accounting (Stripe, PayPal, Square, Mollie, Razorpay, Paddle, Wise, GoCardless, Zoho Books and more), shops and shipping (Shopify, WooCommerce, BigCommerce, Printful, Shippo), calendars and meetings (Google, Microsoft 365, Zoom, Calendly, Cal.com), forms and signing, HR and hiring (BambooHR, Greenhouse, Lever), analytics and websites (Google Analytics, Plausible, PostHog, WordPress, Webflow, Contentful), social and video (X, Facebook Pages, Instagram, Mastodon, Twitch, Vimeo), maps and local business (Google Maps, Mapbox, Yelp), company and contact data (Companies House, Hunter, Apollo), news and markets (NewsAPI, Guardian, Alpha Vantage, Finnhub, FRED), AI and search (Exa, Perplexity, Firecrawl, SerpApi, DeepL, Deepgram, Replicate, OCR.space), security (VirusTotal, AbuseIPDB), plus webhooks and any custom API. MCP servers can be added too. The Add an app tab has search, category counts, a Popular section and a note on how much setup each needs (API key or account details). Employees see a short list and ask for an app's actions when they need them. Each app has an on/off switch and a "may make changes" switch. If an employee needs an app that isn't connected, they ask for it and you get a card explaining why they need it and how to set it up; "Set it up" opens that app's form. The apps are written from each service's public documentation. Every no-account app marked tested has had each of its actions run against the live service; for the rest, the addresses answer but no real account has been used, so use **Test** after connecting. Logos are shown where we have them; otherwise a coloured letter tile.
+
+**Built in, nothing to set up** (every employee has these by default; switch any off under Apps): weather and air quality, maps and driving times, UK and world postcodes, Wikipedia and dictionary, DNS and domain look-ups, IP location, public and UK bank holidays, currency rates, crypto prices, tech news, books, sunrise and sunset, countries, EU VAT and IBAN checks, food products and UK hygiene ratings, research papers (Crossref, OpenAlex, PubMed, Europe PMC), clinical trials, medicine labels, a web page reader, London transport status, UK flood warnings, Docker images, Stack Overflow, public GitHub, npm and PyPI, UK government guidance (GOV.UK), World Bank data, word finder and the Wayback Machine, plus native tools for web and news search, RSS feeds, time zones, date maths, phone-number info, unit conversion and finance calculations.
+
+Other ways in: **inbound webhooks** (an outside system creates a task for an employee), **texts and WhatsApp** (wait for your approval by default), **real video meetings** (an employee joins a Google Meet, Zoom or Teams call as a participant through a Recall.ai bot, listens, takes notes and speaks when spoken to), and built-in office tools (calculator, spreadsheet analysis, charts, export to Word, PDF, HTML, Excel and CSV).
+
+## Costs
+Each company uses its **own** OpenAI and ElevenLabs keys, so it pays those providers directly. ElevenLabs is used only for live phone calls. Everything else (meetings, email, to-dos, reports, training) uses cheap OpenAI models (`CHEAP_MODEL`, default `gpt-4.1-mini`; `MEETING_REALTIME_MODEL`, default `gpt-realtime-2.1-mini`).
+
+## Work email (Gmail)
+Open an agent → Settings → Work email and follow the on-screen guide to create a Google **app password** (2-Step Verification must be on). Use a separate mailbox per employee.
+
+## Try it
+1. Settings → Calling → Customers: upload your Excel sheet.
+2. Campaigns: pick a knowledge base and objective, then start calling.
+3. Open the **Softphone** (`/softphone`), answer and talk (headphones recommended).
+4. Calls shows summaries and transcripts (calls are not recorded).
+
+## Look and feel
+A light, refined dashboard (warm off-white surfaces, one orange accent) with a **dark mode** (the sun/moon button in the top bar, or follow the system), a **⌘K** command palette that also searches people, projects, emails, files and calls, a phone layout with a bottom tab bar, and live updates pushed to the page (no waiting for polling). All colours are tokens at the top of `frontend/src/styles.css`. Fonts are self-hosted in `frontend/public/fonts`, so the app makes no calls to font servers. Pages are code-split, so the first load stays small.

@@ -2,6 +2,24 @@
 
 A team of AI employees for your business. Each one has a name, personality, email address, to-do list, calendar, files and phone, and can make calls, answer email, write documents and update spreadsheets. Meet them on a video-call style page, give them work, or let them get on with it. Phone calls are **simulated** on a Softphone page for now; Twilio comes later.
 
+**[Visit the live website](https://deskmate.londoncbs.uk/)** · [Run locally](#run) · [Getting started](#signing-up-and-getting-started)
+
+## A look at Deskmates
+
+### Your AI team, in one workspace
+
+The home page introduces your team, their virtual computers, and the controls that keep you in charge.
+
+[![Deskmates home page with the AI team preview, email approval card, and call summary](docs/screenshots/home.png)](https://deskmate.londoncbs.uk/)
+
+### Connect the tools you already use
+
+Explore the connectors across CRM, email, payments, calendars, support and more, alongside built-in tools that need no setup.
+
+![Connected apps section showing the connector logo wall, 212 apps, 40 built-in tools, and 26 categories](docs/screenshots/connected-apps.png)
+
+<sub>Captured from the live website in October 2026. App availability and counts may change.</sub>
+
 ## Run
 ```bash
 # backend (Python 3.12+; older Pythons cannot install the patched libraries)

@@ -15,13 +15,14 @@ from typing import Any, Dict, List, Optional
 
 import asyncio
 
-from . import admin_agent, agent_tools, agents, alerts, apps_api, backups, browser_tools, bus, directory, templates, costs, scorecards, search, templates, secretbox, totp, keys, rules, setup_api, meeting_bot, auth, office, office_api, team, team_api, callengine, countries, crm, db, eleven_agents, importer, knowledge, llm, reports, schedule, security, voices, chats, chats_api, chat_hooks, wa_call
+from . import admin_agent, agent_tools, agents, alerts, apps_api, backups, browser_api, browser_tools, bus, directory, templates, costs, scorecards, search, templates, secretbox, totp, keys, rules, setup_api, meeting_bot, auth, office, office_api, team, team_api, callengine, countries, crm, db, eleven_agents, importer, knowledge, llm, reports, schedule, security, voices, chats, chats_api, chat_hooks, wa_call
 
 app = FastAPI(title="Deskmates", docs_url=None, redoc_url=None, openapi_url=None)  # no public API docs
 app.add_middleware(security.Security)
 app.include_router(office_api.router)
 app.include_router(team_api.router)
 app.include_router(apps_api.router)
+app.include_router(browser_api.router)
 app.include_router(chats_api.router)
 app.include_router(chat_hooks.router)
 app.include_router(setup_api.router)

@@ -3,6 +3,7 @@ Each employee gets their own private browser window (own cookies, closed after 1
 things to click; the admin sees screenshots on the employee's Computer. Safety: only public websites, no downloads, no password or card entry by the
 model (saved logins are typed in by the server and never shown to it), and a company switch: off, read only, or full."""
 import asyncio
+import base64
 import re
 import time
 from collections import deque
@@ -164,6 +165,7 @@ async def _session(aid):
 async def _drop(key):
     s = _sessions.pop(key, None)
     if s:
+        _cast_end(s)
         try:
             await s["ctx"].close()
         except Exception:
@@ -343,3 +345,177 @@ async def run_tool(agent, name, a):
         msg = str(e).split("\n")[0][:180]
         return {"error": f"The browser could not do that: {msg}. Look at the page again with browser_state."}, None
     return {"error": "Unknown browser action."}, None
+
+
+# ---------------- live view: what the admin watches on the employee's Computer ----------------
+# The window is streamed with the browser's own screencast, so what is shown is what the page really looks like, as it changes. The picture
+# is read-only: nothing here can click, type or navigate. One screencast per window is shared by everyone watching it and stops when the last viewer leaves.
+LIVE_FPS = 8            # the most frames a second one viewer is sent
+LIVE_SIZE = (1000, 625) # frames are scaled to fit this (the window itself stays 1280x800, same shape)
+LIVE_QUALITY = 60
+
+
+def _find(aid):
+    """The employee's open window in this workspace, or None. Looking never opens one and never keeps one from closing."""
+    s = _sessions.get((db.current(), aid))
+    return s if s and not s["page"].is_closed() else None
+
+
+def is_open(aid):
+    return _find(aid) is not None
+
+
+async def live_state(aid):
+    """What the address bar and tab strip show: the real page, its real tabs and whether it is still loading."""
+    out = {"open": False, "mode": mode()}
+    s = _find(aid)
+    if not s:
+        return out
+    page = s["page"]
+    tabs = []
+    for p in list(s["ctx"].pages)[:8]:
+        if p.is_closed():
+            continue
+        try:
+            title = await p.title()
+        except Exception:  # in the middle of a navigation
+            title = ""
+        tabs.append({"url": p.url, "title": title, "active": p is page})
+    try:
+        loading = await page.evaluate("document.readyState") != "complete"
+    except Exception:
+        loading = True
+    idle = max(0, int(time.time() - s["last"]))
+    return {**out, "open": True, "url": page.url, "loading": loading, "tabs": tabs, "idle_seconds": idle, "closes_in": max(0, IDLE_SECONDS - idle)}
+
+
+def _offer(q, frame):
+    """Hand a viewer the newest frame, dropping the one it has not picked up yet: a slow viewer skips ahead instead of falling behind."""
+    if q.full():
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+    q.put_nowait(frame)
+
+
+async def _cast_attach(s, live):
+    """Point the screencast at the window's current tab, and send everyone one frame at once (a still page would otherwise send none)."""
+    await _cast_detach(live)
+    page = s["page"]
+    cdp = await s["ctx"].new_cdp_session(page)
+
+    def on_frame(ev):
+        frame = base64.b64decode(ev["data"])
+        live["last"] = frame
+        for q in list(live["subs"]):
+            _offer(q, frame)
+        asyncio.ensure_future(_ack(cdp, ev["sessionId"]))
+    cdp.on("Page.screencastFrame", on_frame)
+    await cdp.send("Page.startScreencast", {"format": "jpeg", "quality": LIVE_QUALITY, "maxWidth": LIVE_SIZE[0], "maxHeight": LIVE_SIZE[1], "everyNthFrame": 1})
+    live["cdp"], live["page"] = cdp, page
+    try:
+        first = await page.screenshot(type="jpeg", quality=LIVE_QUALITY)
+        live["last"] = first
+        for q in list(live["subs"]):
+            _offer(q, first)
+    except Exception:
+        pass
+
+
+async def _ack(cdp, session_id):
+    try:
+        await cdp.send("Page.screencastFrameAck", {"sessionId": session_id})
+    except Exception:  # the window closed while a frame was in flight
+        pass
+
+
+async def _cast_detach(live):
+    cdp, live["cdp"], live["page"] = live.get("cdp"), None, None
+    if cdp:
+        for step in (lambda: cdp.send("Page.stopScreencast"), cdp.detach):
+            try:
+                await step()
+            except Exception:
+                pass
+
+
+def _cast_end(s):
+    """The window is closing: tell every viewer so their stream ends."""
+    live = s.get("live")
+    if live:
+        for q in list(live["subs"]):
+            _offer(q, None)
+
+
+async def _cast_join(s):
+    live = s.setdefault("live", {"subs": set(), "cdp": None, "page": None, "last": None, "lock": asyncio.Lock()})
+    q = asyncio.Queue(maxsize=1)
+    async with live["lock"]:
+        live["subs"].add(q)
+        try:
+            if live["last"]:
+                _offer(q, live["last"])
+            if live["cdp"] is None or live["page"] is not s["page"]:
+                await _cast_attach(s, live)
+        except Exception:  # the window closed while we were joining
+            live["subs"].discard(q)
+            raise
+    return q
+
+
+async def _cast_leave(s, q):
+    live = s.get("live")
+    if not live:
+        return
+    async with live["lock"]:
+        live["subs"].discard(q)
+        if not live["subs"]:
+            await _cast_detach(live)
+            live["last"] = None
+
+
+async def _cast_follow(s):
+    """The employee clicked a link that opened a new tab: move the screencast with them."""
+    live = s.get("live")
+    if live and live["subs"] and live["page"] is not s["page"] and not s["page"].is_closed():
+        async with live["lock"]:
+            if live["page"] is not s["page"] and live["subs"]:
+                await _cast_attach(s, live)
+
+
+def _part(frame):
+    return b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n" % len(frame) + frame + b"\r\n"
+
+
+async def mjpeg(aid, request):
+    """The window as a motion-JPEG stream (an <img> shows it). Ends when the window closes or the viewer leaves."""
+    s = _find(aid)
+    if not s:
+        return
+    try:
+        q = await _cast_join(s)
+    except Exception:
+        return
+    try:
+        gap, sent, last, quiet = 1 / LIVE_FPS, 0.0, None, 0
+        while not await request.is_disconnected():
+            await _cast_follow(s)
+            try:
+                frame = await asyncio.wait_for(q.get(), timeout=2)
+                quiet = 0
+            except asyncio.TimeoutError:
+                quiet += 2
+                if quiet < 10 or last is None:  # a page that is not changing sends nothing; every so often repeat the last frame so the connection is not dropped
+                    continue
+                frame, quiet = last, 0
+            if frame is None:
+                break
+            last = frame
+            wait = gap - (time.monotonic() - sent)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            sent = time.monotonic()
+            yield _part(frame)
+    finally:
+        await _cast_leave(s, q)

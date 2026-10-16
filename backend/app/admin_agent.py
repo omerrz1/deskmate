@@ -2,6 +2,8 @@
 import asyncio
 import json
 
+from harness import AFTER_TOOL, TOOL_ERROR, ChatModel, Harness, LoopConfig, RunContext
+
 from . import callengine, crm, db, llm, reports
 
 TOOLS = [
@@ -152,43 +154,24 @@ When you answer in a voice conversation keep replies under 3 sentences. Reply in
 Live snapshot: {s['contacts']} contacts, {s['calls_total']} calls, {s['live']} live, {s['queued']} queued, answer rate {s['answer_rate']}%, success rate {s['success_rate']}%, {s['active_campaigns']} active campaigns."""
 
 
+def _copilot():
+    """The copilot is a harness too: the same loop as the employees', with only the platform tools and no rules to apply."""
+    h = Harness(name="copilot", system_prompt=lambda ctx: system_prompt(),
+                model=ChatModel(lambda: llm.client(), lambda: llm.CHEAP_MODEL),
+                config=LoopConfig(max_steps=6, result_limit=6000, strip_final=False, report_tools=False, format_error=lambda e: {"error": str(e)}))
+
+    async def run(ctx, name, a):
+        return await run_tool(name, a)
+    h.registry.add_toolset(TOOLS, run, group="platform")
+    log_use = lambda ctx, inv, *_: db.log("agent", f"Copilot ran {inv.name}", args=inv.args)  # noqa: E731
+    h.hooks.on(AFTER_TOOL, log_use)
+    h.hooks.on(TOOL_ERROR, log_use)
+    return h
+
+
+COPILOT = _copilot()
+
+
 async def chat_events(history):
-    msgs = [{"role": "system", "content": system_prompt()}] + history
-    tools = [{"type": "function", "function": t} for t in TOOLS]
-    for _ in range(6):
-        stream = await llm.client().chat.completions.create(model=llm.CHEAP_MODEL, messages=msgs, tools=tools, stream=True)
-        content, calls = "", {}
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            d = chunk.choices[0].delta
-            if d.content:
-                content += d.content
-                yield {"type": "token", "text": d.content}
-            for tc in d.tool_calls or []:
-                slot = calls.setdefault(tc.index, {"id": "", "name": "", "args": ""})
-                if tc.id:
-                    slot["id"] = tc.id
-                if tc.function and tc.function.name:
-                    slot["name"] += tc.function.name
-                if tc.function and tc.function.arguments:
-                    slot["args"] += tc.function.arguments
-        if not calls:
-            yield {"type": "done", "text": content}
-            return
-        msgs.append({"role": "assistant", "content": content or None, "tool_calls": [
-            {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["args"] or "{}"}} for c in calls.values()]})
-        for c in calls.values():
-            try:
-                args = json.loads(c["args"] or "{}")
-            except Exception:
-                args = {}
-            yield {"type": "tool_start", "name": c["name"], "args": args}
-            try:
-                result, link = await run_tool(c["name"], args)
-            except Exception as e:
-                result, link = {"error": str(e)}, None
-            db.log("agent", f"Copilot ran {c['name']}", args=args)
-            yield {"type": "tool_result", "name": c["name"], "link": link, "ok": "error" not in (result if isinstance(result, dict) else {})}
-            msgs.append({"role": "tool", "tool_call_id": c["id"], "content": json.dumps(result, ensure_ascii=False, default=str)[:6000]})
-    yield {"type": "done", "text": ""}
+    async for event in COPILOT.run(RunContext(kind="copilot"), history):
+        yield event

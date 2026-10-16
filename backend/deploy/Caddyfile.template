@@ -1,0 +1,21 @@
+# Caddy gives the API its HTTPS certificate (automatic, free) and passes requests to the app on this machine.
+# setup.sh fills in __API_HOST__ and __TRUSTED__ (CloudFront's addresses, so the real visitor address is known).
+{
+	servers {
+		trusted_proxies static __TRUSTED__
+		trusted_proxies_strict
+		client_ip_headers X-Forwarded-For
+	}
+}
+
+__API_HOST__ {
+	request_body {
+		max_size 70MB
+	}
+	reverse_proxy 127.0.0.1:8000 {
+		# send each piece at once: live updates and the browser picture are streams, and must not be held back
+		flush_interval -1
+		# the app reads one address here; give it the real visitor, worked out from the trusted proxies only
+		header_up X-Forwarded-For {client_ip}
+	}
+}

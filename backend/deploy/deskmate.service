@@ -1,0 +1,27 @@
+[Unit]
+Description=Deskmates backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=deskmate
+Group=deskmate
+WorkingDirectory=/opt/deskmate/backend
+EnvironmentFile=/etc/deskmate/backend.env
+Environment=PYTHONUNBUFFERED=1
+Environment=DATA_DIR=/var/lib/deskmate
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/deskmate/browsers
+# Only Caddy (on this machine) talks to it.
+ExecStart=/opt/deskmate/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+# Hardening that keeps the browser tool working.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/deskmate /opt/deskmate
+
+[Install]
+WantedBy=multi-user.target

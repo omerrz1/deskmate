@@ -4,7 +4,7 @@ import os
 import time
 from collections import defaultdict, deque
 
-from . import auth, db, directory, keys
+from . import access, auth, db, directory, keys
 
 PUBLIC = {"/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/setup", "/api/auth/signup", "/api/contact"}
 NEEDS_NO_KEYS = ("/api/auth/", "/api/setup", "/api/status", "/api/stream", "/api/health")  # reachable before the company has connected its keys
@@ -109,6 +109,14 @@ class Security:
                 ok, wait = _allow(ip, "login")
                 if not ok:
                     return await deny(429, f"Too many attempts. Try again in {wait}s.", [(b"retry-after", str(wait).encode())])
+            elif path.startswith("/api/invites/"):  # the page an invited person opens before they have signed in: the link is the key, and it names the company
+                ws = path[len("/api/invites/"):].split("/")[0].split(".")[0]
+                if not (ws == db.MAIN or directory.ID_RE.match(ws)) or not directory.is_active(ws):
+                    return await deny(404, "This invitation is no longer valid. Ask the person who invited you for a new link.")
+                db.set_current(ws)
+                ok, wait = _allow(ip, "login")
+                if not ok:
+                    return await deny(429, f"Too many attempts. Try again in {wait}s.", [(b"retry-after", str(wait).encode())])
             elif path not in PUBLIC:
                 sess = auth.session_from_cookie(headers.get("cookie"))
                 if not sess:
@@ -118,7 +126,10 @@ class Security:
                     return await deny(403, "Please choose your own password first.")
                 if method not in SAFE and not _csrf_ok(headers.get("x-csrf-token", ""), sess["csrf"]):
                     return await deny(403, "Missing or invalid security token. Reload the page.")
-                if not path.startswith(NEEDS_NO_KEYS) and not keys.complete():
+                member = access.is_member(sess)
+                if member and not access.member_allowed(method, path):  # members are refused by default: only the routes listed in access.py are open to them
+                    return await deny(403, "That is not available to members. Ask an admin if you need access.")
+                if not path.startswith(NEEDS_NO_KEYS) and not member and not keys.complete():  # members never use the AI directly, so they do not wait for the keys
                     return await deny(428, "Connect your OpenAI key first (Settings → Connections).")
                 bucket = "expensive" if (method not in SAFE and path.startswith(EXPENSIVE)) or "/realtime" in path else "default"
                 ok, wait = _allow(f"{sess['ws']}:{sess['id']}", bucket)

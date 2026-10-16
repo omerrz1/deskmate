@@ -1,13 +1,14 @@
 import { createContext, lazy, Suspense, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { api } from './api'
+import PersonAvatar from './PersonAvatar'
 
 const Site = lazy(() => import('./site/Site'))  // the public home page, only downloaded by visitors who are not signed in
 
 const Ctx = createContext(null)
 export const useAuth = () => useContext(Ctx)
 
-function Card({ title, sub, children }) {
+export function Card({ title, sub, children }) {
   return (
     <main className="auth-wrap">
       <div className="auth-card">
@@ -147,5 +148,47 @@ export function AuthGate({ children }) {
     setTimeout(() => { leaving.current = false }, 1500)
   }
   if (st.must_change) return <MustChange username={st.username} onDone={load} onLeave={logout} />
-  return <Ctx.Provider value={{ username: st.username, role: st.role, isOwner: st.role === 'owner', workspace: st.workspace, platform: !!st.platform, logout }}>{children}</Ctx.Provider>
+  const isAdmin = st.role === 'owner' || st.role === 'admin'
+  return <Ctx.Provider value={{ username: st.username, name: st.name || st.username, title: st.title || '', role: st.role, isOwner: st.role === 'owner', isAdmin, isMember: !isAdmin, workspace: st.workspace, platform: !!st.platform, logout }}>{children}</Ctx.Provider>
+}
+
+const a = (word) => (/^[aeiou]/i.test(word) ? 'an' : 'a')
+
+/** The page an invitation link opens. Nobody is signed in yet: the link itself is the key. */
+export function JoinPage({ token }) {
+  const [info, setInfo] = useState(null)  // null while loading, false when the link is no good
+  const [f, setF] = useState({ name: '', password: '', again: '' })
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    api.get(`/invites/${encodeURIComponent(token)}`).then((i) => { setInfo(i); setF((x) => ({ ...x, name: i.name || '' })) }).catch(() => setInfo(false))
+  }, [token])
+  if (info === null) return <div className="auth-wrap" aria-busy="true" />
+  if (info === false) {
+    return (
+      <Card title="This invitation is no longer valid" sub="It may have been used already, cancelled, or it may have expired. Ask the person who invited you to send a new link.">
+        <Link className="btn solid" to="/signin">Go to sign in</Link>
+      </Card>
+    )
+  }
+  const submit = async (e) => {
+    e.preventDefault(); setErr('')
+    if (f.password !== f.again) return setErr('The two passwords do not match.')
+    setBusy(true)
+    try { await api.post(`/invites/${encodeURIComponent(token)}/accept`, { name: f.name, password: f.password }); window.location.assign('/') } catch (x) { setErr(x.message); setBusy(false) }
+  }
+  return (
+    <Card title={`Join ${info.company}`} sub={`${info.invited_by || 'An admin'} has invited you to ${info.company} on Deskmates.`}>
+      <div className="join-role"><PersonAvatar name={f.name || info.email} size={44} /><div><b>You will be {a(info.role_label)} {info.role_label}</b><p>{info.role_blurb}</p></div></div>
+      <form className="form" onSubmit={submit}>
+        <label>Your name<input autoFocus autoComplete="name" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="So the team knows who you are" /></label>
+        <label>Your email <span className="faint">(you sign in with it)</span><input value={info.email} readOnly /></label>
+        <label>Choose a password <span className="faint">(12+ characters)</span><input type="password" autoComplete="new-password" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} /></label>
+        <label>Repeat the password<input type="password" autoComplete="new-password" value={f.again} onChange={(e) => setF({ ...f, again: e.target.value })} /></label>
+        {err && <p className="warn" role="alert">{err}</p>}
+        <button className="btn solid" disabled={busy || !f.name.trim() || !f.password}>{busy ? 'Joining…' : `Join ${info.company}`}</button>
+        <p className="small muted">This link works once. After you join, you sign in with your email and this password.</p>
+      </form>
+    </Card>
+  )
 }

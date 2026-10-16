@@ -33,6 +33,8 @@ def is_member(project_id, agent_id):
 
 
 def can_use_owner(agent, owner):
+    if files.owner_kind(owner) == "person":
+        return False  # a person's own files are theirs alone: an AI employee, even a manager, is not let in
     if agent is None or agent.get("is_manager"):
         return True
     if owner == agent["id"] or owner == 0:

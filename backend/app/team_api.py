@@ -3,10 +3,10 @@ import json
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from . import agents, app_requests, capabilities, chats, connectors, db, discuss, files, live_help, llm, office, schedule, team, training, voices
+from . import access, agents, app_requests, capabilities, chats, connectors, db, discuss, files, live_help, llm, office, people, schedule, team, training, voices
 
 router = APIRouter(prefix="/api")
 
@@ -129,10 +129,21 @@ def agent_mail_clear(aid: int):
 
 
 # ---------- projects ----------
+def _project_access(request, pid):
+    """Admins can open any project; a member only the ones they were added to. A project a member may not open is 'not found'."""
+    s = request.state.session
+    if access.is_member(s) and not people.in_project(pid, s["admin_id"]):
+        raise HTTPException(404)
+
+
 @router.get("/projects")
-def projects_list():
+def projects_list(request: Request):
     out = []
+    s = request.state.session
+    mine = set(people.projects_of(s["admin_id"])) if access.is_member(s) else None
     for p in db.q("SELECT * FROM projects WHERE status<>'deleted' ORDER BY (status='done'), id DESC"):
+        if mine is not None and p["id"] not in mine:
+            continue
         members = db.q("SELECT g.id,g.name,g.color FROM project_members m JOIN agents g ON g.id=m.agent_id WHERE m.project_id=? AND g.archived=0", (p["id"],))
         n = db.q1("SELECT SUM(status<>'done') open, SUM(status='doing') doing, COUNT(*) total FROM duties WHERE project_id=?", (p["id"],))
         deliver = db.q1("SELECT COUNT(*) n FROM documents WHERE agent_id=?", (-p["id"],))["n"]
@@ -140,7 +151,7 @@ def projects_list():
         last = db.q1("SELECT MAX(ts) t FROM project_updates WHERE project_id=?", (p["id"],))["t"]
         total = n["total"] or 0
         out.append({**dict(p), "members": [dict(m) for m in members], "open_tasks": n["open"] or 0, "doing_tasks": n["doing"] or 0, "total_tasks": total, "progress": round(100 * (total - (n["open"] or 0)) / total) if total else 0,
-                    "deliverables": deliver, "working_files": work, "last_update": last})
+                    "deliverables": deliver, "working_files": work, "last_update": last, "people": people.people_of_project(p["id"])})
     return out
 
 
@@ -148,6 +159,7 @@ class ProjectIn(BaseModel):
     name: str
     goal: str = ""
     members: List[int] = []
+    people: List[int] = []  # the people who sign in (not AI employees) who work on it too
 
 
 @router.post("/projects")
@@ -162,20 +174,25 @@ def project_create(p: ProjectIn):
             db.run("INSERT OR IGNORE INTO project_members(project_id,agent_id,role,joined_at) VALUES(?,?,?,?)", (pid, aid, "member", db.now()))
             team.notify(aid, 0, f"You're invited to project: {p.name}", f"Goal: {p.goal}\n\nYou now have access to the project drive and tasks.")
             team.log_event(aid, "project", "projects", f"Added to project: {p.name}")
+    for person in p.people[:25]:
+        if db.q1("SELECT id FROM admins WHERE id=?", (person,)):
+            people.add_to_project(pid, person, by="admin")
     team.plan_project(pid)  # a new project starts with a planning task for the team
     return {"id": pid}
 
 
 @router.get("/projects/{pid}")
-def project_get(pid: int):
+def project_get(pid: int, request: Request):
+    _project_access(request, pid)
     p = db.q1("SELECT * FROM projects WHERE id=? AND status<>'deleted'", (pid,))
     if not p:
         raise HTTPException(404)
+    s = request.state.session
     members = db.q("SELECT g.id,g.name,g.color,g.role job,m.role FROM project_members m JOIN agents g ON g.id=m.agent_id WHERE m.project_id=? AND g.archived=0", (pid,))
     tasks = db.q("SELECT d.id,d.title,d.detail,d.status,d.stage,d.priority,d.due,d.result,d.checklist,d.plan_doc_id,d.agent_id,g.name who,g.color who_color FROM duties d LEFT JOIN agents g ON g.id=d.agent_id WHERE d.project_id=? ORDER BY d.status='done', d.id", (pid,))
-    ups = db.q("SELECT u.id,u.text,u.ts,g.name who,g.color who_color FROM project_updates u LEFT JOIN agents g ON g.id=u.agent_id WHERE u.project_id=? ORDER BY u.id DESC LIMIT 40", (pid,))
-    work = []  # drafts and working files live on each teammate's own computer, in Projects/<name>
-    for m in members:
+    ups = db.q("SELECT u.id,u.text,u.ts,u.person,g.name who,g.color who_color FROM project_updates u LEFT JOIN agents g ON g.id=u.agent_id WHERE u.project_id=? ORDER BY u.id DESC LIMIT 40", (pid,))
+    work = []  # drafts and working files live on each teammate's own computer, in Projects/<name>: the admins see them, a member sees the project drive only
+    for m in ([] if access.is_member(s) else members):
         for f in files.tree_docs(m["id"], f"Projects/{p['name']}"):
             work.append({**f, "owner_id": m["id"], "owner": m["name"], "owner_color": m["color"]})
     work.sort(key=lambda f: -(f["updated_at"] or 0))
@@ -186,7 +203,9 @@ def project_get(pid: int):
         out_tasks.append({**dict(t), "checklist": cl, "steps_done": sum(1 for c in cl if c.get("done")), "steps_total": len(cl)})
     total = len(out_tasks)
     done = sum(1 for t in out_tasks if t["status"] == "done")
-    return {**dict(p), "members": [dict(m) for m in members], "tasks": out_tasks, "updates": [dict(u) | {"who": u["who"] or "You"} for u in ups],
+    me_name = people.display_name(db.q1("SELECT username,display_name FROM admins WHERE id=?", (s["admin_id"],)) or {"username": ""})
+    return {**dict(p), "members": [dict(m) for m in members], "people": people.people_of_project(pid), "tasks": out_tasks,
+            "updates": [{**{k: v for k, v in dict(u).items() if k != "person"}, "who": u["who"] or u["person"] or "An admin", "mine": bool(not u["who"] and u["person"] and u["person"] == me_name), "by_person": bool(not u["who"])} for u in ups],
             "working_files": work[:80], "deliverables": deliverables, "progress": round(100 * done / total) if total else 0}
 
 
@@ -244,9 +263,41 @@ class UpdateIn(BaseModel):
 
 
 @router.post("/projects/{pid}/updates")
-def project_update(pid: int, u: UpdateIn):
-    db.run("INSERT INTO project_updates(project_id,agent_id,text,ts) VALUES(?,?,?,?)", (pid, 0, u.text[:1500], db.now()))
+def project_update(pid: int, u: UpdateIn, request: Request):
+    _project_access(request, pid)
+    if not db.q1("SELECT id FROM projects WHERE id=? AND status<>'deleted'", (pid,)):
+        raise HTTPException(404)
+    if not u.text.strip():
+        raise HTTPException(400, "Write something first.")
+    who = people.display_name(db.q1("SELECT username,display_name FROM admins WHERE id=?", (request.state.session["admin_id"],)) or {"username": ""})
+    db.run("INSERT INTO project_updates(project_id,agent_id,text,ts,person) VALUES(?,?,?,?,?)", (pid, 0, u.text.strip()[:1500], db.now(), who))
     return {"ok": True}
+
+
+class ProjectTaskIn(BaseModel):
+    agent_id: int
+    title: str
+    detail: str = ""
+
+
+@router.post("/projects/{pid}/tasks")
+def project_task_create(pid: int, t: ProjectTaskIn, request: Request):
+    """Ask an AI teammate on this project to do something. A member's request is a request, not an admin's order: it carries no admin authority."""
+    _project_access(request, pid)
+    s = request.state.session
+    if not db.q1("SELECT id FROM projects WHERE id=? AND status<>'deleted'", (pid,)):
+        raise HTTPException(404)
+    if not t.title.strip():
+        raise HTTPException(400, "Say what you need done.")
+    if not team.is_member(pid, t.agent_id) or not agents.get(t.agent_id):
+        raise HTTPException(400, "Pick someone who is on this project.")
+    who = people.display_name(db.q1("SELECT username,display_name FROM admins WHERE id=?", (s["admin_id"],)) or {"username": ""})
+    admin = access.is_admin(s)
+    did = db.run("INSERT INTO duties(agent_id,title,detail,source,created_by,created_at,project_id,auto) VALUES(?,?,?,?,?,?,?,1)",
+                 (t.agent_id, t.title.strip()[:200], (t.detail.strip()[:2000] + ("" if admin else f"\n\nAsked by {who}, who works on this project.")).strip(), "admin" if admin else "person", "admin" if admin else who, db.now(), pid))
+    team.log_event(t.agent_id, "task", "tasks", f"{who} asked for: {t.title.strip()[:80]}")
+    team.notify(t.agent_id, 0, f"New task from {who}: {t.title.strip()[:80]}", f"{t.detail}\nIt is on your to-do list (#{did}).")
+    return {"id": did}
 
 
 # ---------- meeting requests (agents asking the admin for a meeting) ----------

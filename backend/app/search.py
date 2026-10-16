@@ -1,7 +1,7 @@
 """One search across the company's work: tasks, emails, files, calendar entries and customers. Each hit says where to open it."""
 import re
 
-from . import db
+from . import db, files
 
 
 def _like(q):
@@ -17,7 +17,8 @@ def _snip(text, q, width=90):
     return ("…" if a else "") + t[a:a + width] + ("…" if a + width < len(t) else "")
 
 
-def search(q, limit=5):
+def search(q, limit=5, person=None):
+    """person: the sign-in id of whoever is searching, so their own files are found and nobody else's personal files are."""
     q = (q or "").strip()
     if len(q) < 2:
         return []
@@ -34,9 +35,9 @@ def search(q, limit=5):
     add("Emails", db.q("SELECT id,agent_id,folder,from_addr,to_addr,subject,body FROM emails WHERE (subject LIKE ?1 ESCAPE '\\' OR body LIKE ?1 ESCAPE '\\' OR from_addr LIKE ?1 ESCAPE '\\' OR to_addr LIKE ?1 ESCAPE '\\') AND folder IN ('inbox','sent') ORDER BY id DESC LIMIT ?2", (like, limit)),
         lambda r: {"id": r["id"], "title": r["subject"] or "(no subject)", "sub": f"{'Your inbox' if r['agent_id'] == 0 else names.get(r['agent_id'], 'Mailbox')} · {r['from_addr'] if r['folder'] == 'inbox' else 'to ' + r['to_addr']} · {_snip(r['body'], q, 60)}",
                    "to": f"/inbox?open={r['id']}" if r["agent_id"] == 0 else f"/agents/{r['agent_id']}?tab=computer"})
-    add("Files", db.q("SELECT id,agent_id,title,kind,body FROM documents WHERE (title LIKE ?1 ESCAPE '\\' OR (kind='doc' AND body LIKE ?1 ESCAPE '\\')) ORDER BY updated_at DESC LIMIT ?2", (like, limit)),
-        lambda r: {"id": r["id"], "title": r["title"], "sub": ("Project drive" if (r["agent_id"] or 0) < 0 else "Shared drive" if r["agent_id"] == 0 else f"{names.get(r['agent_id'], 'Someone')}'s computer") + (f" · {_snip(r['body'], q, 60)}" if r["kind"] == "doc" and q.lower() in (r["body"] or "").lower() else ""),
-                   "to": f"/projects/{-r['agent_id']}" if (r["agent_id"] or 0) < 0 else "/settings/files" if r["agent_id"] == 0 else f"/agents/{r['agent_id']}?tab=computer&doc={r['id']}"})
+    add("Files", db.q("SELECT id,agent_id,title,kind,body FROM documents WHERE (title LIKE ?1 ESCAPE '\\' OR (kind='doc' AND body LIKE ?1 ESCAPE '\\')) AND (agent_id<?3 OR agent_id=?4) ORDER BY updated_at DESC LIMIT ?2", (like, limit, files.PERSON_BASE, files.person_owner(person) if person else -1)),
+        lambda r: {"id": r["id"], "title": r["title"], "sub": ("Project drive" if (r["agent_id"] or 0) < 0 else "Your files" if r["agent_id"] >= files.PERSON_BASE else "Shared drive" if r["agent_id"] == 0 else f"{names.get(r['agent_id'], 'Someone')}'s computer") + (f" · {_snip(r['body'], q, 60)}" if r["kind"] == "doc" and q.lower() in (r["body"] or "").lower() else ""),
+                   "to": f"/projects/{-r['agent_id']}" if (r["agent_id"] or 0) < 0 else "/files" if r["agent_id"] >= files.PERSON_BASE else "/settings/files" if r["agent_id"] == 0 else f"/agents/{r['agent_id']}?tab=computer&doc={r['id']}"})
     add("Calendar", db.q("SELECT id,agent_id,title,start FROM events WHERE status='planned' AND (title LIKE ?1 ESCAPE '\\' OR notes LIKE ?1 ESCAPE '\\') ORDER BY start DESC LIMIT ?2", (like, limit)),
         lambda r: {"id": r["id"], "title": r["title"], "sub": f"{names.get(r['agent_id'], 'Shared')} · {re.sub(r' +', ' ', __import__('time').strftime('%a %d %b %H:%M', __import__('time').localtime(r['start'])))}", "to": f"/agents/{r['agent_id']}?tab=computer" if r["agent_id"] else "/"})
     add("Customers", db.q("SELECT id,name,company,email,phone FROM contacts WHERE (name LIKE ?1 ESCAPE '\\' OR company LIKE ?1 ESCAPE '\\' OR email LIKE ?1 ESCAPE '\\' OR phone LIKE ?1 ESCAPE '\\') LIMIT ?2", (like, limit)),

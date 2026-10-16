@@ -5,18 +5,50 @@ import re
 
 from . import db
 
-DEFAULT_FOLDERS = {"agent": ["Documents", "Reports", "Spreadsheets", "Downloads"], "shared": ["Company", "Reports"]}
+# Whose drive a file lives on is one number (documents.agent_id and folders.owner):
+#   0 = the company's shared drive, below 0 = a project's drive (minus the project id),
+#   1 .. PERSON_BASE-1 = an AI employee's computer (their id), PERSON_BASE and above = a person's own files (PERSON_BASE + their sign-in id).
+PERSON_BASE = 1_000_000
+DEFAULT_FOLDERS = {"agent": ["Documents", "Reports", "Spreadsheets", "Downloads"], "shared": ["Company", "Reports"], "person": ["Documents", "Spreadsheets", "Uploads"]}
+# folders the system keeps (and colours) so it is obvious where things for, and from, the admins go: name -> purpose
+PURPOSE_FOLDERS = {"agent": {"For admins": "admin", "From admins": "from_admin"}}
+PURPOSE_LABELS = {"admin": "For admins", "from_admin": "From admins"}
+# (folders.purpose is added in office.py, next to the table: this module is imported before the table exists)
 _S = {"type": "string"}
 _I = {"type": "integer"}
-_FOLDER = {**_S, "description": "folder path such as 'Reports/October' (created if missing). Default: Documents or Spreadsheets"}
+_FOLDER = {**_S, "description": "folder path such as 'Reports/October' (created if missing). Default: Documents or Spreadsheets. Put anything the admins should read, check or approve in 'For admins'."}
 _SHARED = {"type": "boolean", "description": "true = the shared company drive instead of your own computer"}
 _PROJECT = {"type": "string", "description": "a project name: use that project's shared drive instead (you must be a member)"}
 
 
 # ---------- folders ----------
+def owner_kind(owner):
+    """'shared', 'project', 'agent' (an AI employee's computer) or 'person' (a signed-in person's own files)."""
+    return "shared" if owner == 0 else "project" if owner < 0 else "person" if owner >= PERSON_BASE else "agent"
+
+
+def person_owner(admin_id):
+    return PERSON_BASE + int(admin_id)
+
+
+def person_of(owner):
+    """-> the sign-in id whose files these are, or None when the owner is not a person."""
+    return owner - PERSON_BASE if owner >= PERSON_BASE else None
+
+
 def ensure_folders(owner):
-    for name in DEFAULT_FOLDERS["shared" if owner == 0 else "agent"]:
+    """The usual folders of a drive, and the system folders that carry a purpose. Safe to call again: it only adds what is missing."""
+    kind = owner_kind(owner)
+    for name in DEFAULT_FOLDERS.get(kind, []):
         folder_id(owner, name, create=True)
+    for name, purpose in PURPOSE_FOLDERS.get(kind, {}).items():
+        fid = folder_id(owner, name, create=True)
+        db.run("UPDATE folders SET purpose=? WHERE id=? AND COALESCE(purpose,'')<>?", (purpose, fid, purpose))
+
+
+def purpose_of(fid):
+    r = db.q1("SELECT purpose FROM folders WHERE id=?", (fid,))
+    return (r or {}).get("purpose") or ""
 
 
 def folder_id(owner, path, create=True):
@@ -61,7 +93,7 @@ def resolve_owner(agent, a):
 
 
 def listing(owner, fid=None):
-    folders = db.q("SELECT id,name FROM folders WHERE owner=? AND parent_id IS ? ORDER BY lower(name)", (owner, fid))
+    folders = db.q("SELECT id,name,COALESCE(purpose,'') purpose FROM folders WHERE owner=? AND parent_id IS ? ORDER BY (COALESCE(purpose,'')='') , lower(name)", (owner, fid))
     docs = db.q("SELECT d.id,d.title,d.kind,d.updated_at,d.created_at,d.mime,d.file_path<>'' AS has_file, length(d.body) AS size FROM documents d WHERE d.agent_id=? AND d.folder_id IS ? ORDER BY lower(d.title)", (owner, fid))
     return {"folders": [dict(r) for r in folders], "files": [dict(r) for r in docs], "path": path_of(fid), "parent": (db.q1("SELECT parent_id FROM folders WHERE id=?", (fid,)) or {}).get("parent_id")}
 
@@ -79,6 +111,28 @@ def tree_docs(owner, path):
     q = ",".join("?" * len(ids))
     rows = db.q(f"SELECT id,title,kind,updated_at,folder_id FROM documents WHERE agent_id=? AND folder_id IN ({q}) ORDER BY updated_at DESC LIMIT 200", (owner, *ids))
     return [dict(r) | {"folder": path_of(r["folder_id"])} for r in rows]
+
+
+def transfer_drive(src, dst, label):
+    """Move everything on one drive into a new folder at the top of another (when a person leaves, their files go to whoever removed them)."""
+    top = folder_id(dst, str(label).replace("/", "-").replace("\\", "-"), create=True)
+    db.run("UPDATE folders SET parent_id=? WHERE owner=? AND parent_id IS NULL", (top, src))
+    db.run("UPDATE folders SET owner=? WHERE owner=?", (dst, src))
+    db.run("UPDATE documents SET folder_id=? WHERE agent_id=? AND folder_id IS NULL", (top, src))
+    db.run("UPDATE documents SET agent_id=? WHERE agent_id=?", (dst, src))
+    return top
+
+
+def wipe_drive(owner):
+    """Delete a whole drive: its folders, its files and the originals of anything uploaded."""
+    from pathlib import Path
+    for r in db.q("SELECT file_path FROM documents WHERE agent_id=? AND file_path<>''", (owner,)):
+        try:
+            (db.data_dir() / "files" / Path(r["file_path"]).name).unlink(missing_ok=True)
+        except OSError:
+            pass
+    db.run("DELETE FROM documents WHERE agent_id=?", (owner,))
+    db.run("DELETE FROM folders WHERE owner=?", (owner,))
 
 
 def descendants(fid):

@@ -20,7 +20,7 @@ SETUP_TOKEN_FILE = db.DATA_DIR / "SETUP_TOKEN"
 
 db.run("""CREATE TABLE IF NOT EXISTS admins(
   id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password_hash TEXT, created_at REAL, password_changed_at REAL)""")
-for _stmt in ("ALTER TABLE admins ADD COLUMN role TEXT DEFAULT 'admin'", "ALTER TABLE admins ADD COLUMN must_change INTEGER DEFAULT 0", "ALTER TABLE admins ADD COLUMN last_login REAL", "ALTER TABLE admins ADD COLUMN added_by TEXT DEFAULT ''",
+for _stmt in ("ALTER TABLE admins ADD COLUMN display_name TEXT DEFAULT ''", "ALTER TABLE admins ADD COLUMN title TEXT DEFAULT ''", "ALTER TABLE admins ADD COLUMN role TEXT DEFAULT 'admin'", "ALTER TABLE admins ADD COLUMN must_change INTEGER DEFAULT 0", "ALTER TABLE admins ADD COLUMN last_login REAL", "ALTER TABLE admins ADD COLUMN added_by TEXT DEFAULT ''",
               "ALTER TABLE admins ADD COLUMN totp_secret TEXT DEFAULT ''", "ALTER TABLE admins ADD COLUMN totp_on INTEGER DEFAULT 0", "ALTER TABLE admins ADD COLUMN totp_last INTEGER DEFAULT 0", "ALTER TABLE admins ADD COLUMN backup_codes TEXT DEFAULT '[]'"):
     try:
         db.run(_stmt)
@@ -100,10 +100,11 @@ def check_setup_token(token):
     return hmac.compare_digest(SETUP_TOKEN_FILE.read_text().strip().encode(), (token or "").strip().encode())
 
 
-def create_admin(username, password, role=None, must_change=False, added_by=""):
+def create_admin(username, password, role=None, must_change=False, added_by="", display_name="", title=""):
+    """Add a person who can sign in. role: owner, admin or member (see access.py)."""
     role = role or ("owner" if admin_count() == 0 else "admin")
-    db.run("INSERT INTO admins(username,password_hash,created_at,password_changed_at,role,must_change,added_by) VALUES(?,?,?,?,?,?,?)",
-           (username.strip(), hash_password(password), db.now(), db.now(), role, 1 if must_change else 0, added_by))
+    db.run("INSERT INTO admins(username,password_hash,created_at,password_changed_at,role,must_change,added_by,display_name,title) VALUES(?,?,?,?,?,?,?,?,?)",
+           (username.strip(), hash_password(password), db.now(), db.now(), role, 1 if must_change else 0, added_by, display_name.strip()[:60], title.strip()[:60]))
     if SETUP_TOKEN_FILE.exists():
         SETUP_TOKEN_FILE.unlink()
 
@@ -180,7 +181,7 @@ def session_from_cookie(cookie_header):
     if not ws or not directory.is_active(ws):
         return None
     with db.use(ws):
-        s = db.q1("SELECT s.*, a.username, a.role, a.must_change FROM sessions s JOIN admins a ON a.id=s.admin_id WHERE s.token_hash=?", (_hash_token(secret),))
+        s = db.q1("SELECT s.*, a.username, a.role, a.must_change, a.display_name, a.title FROM sessions s JOIN admins a ON a.id=s.admin_id WHERE s.token_hash=?", (_hash_token(secret),))
         t = db.now()
         if not s or s["expires_at"] < t or t - s["last_seen"] > IDLE_MINUTES * 60:
             if s:

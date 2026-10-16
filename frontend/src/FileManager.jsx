@@ -2,11 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, apiFetch, usePoll } from './api'
 import Icon from './Icon'
 import { useConfirm, usePrompt, useToast } from './Feedback'
+import { useAuth } from './Auth'
 
 const when = (ts) => (ts ? new Date(ts * 1000).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '')
 const size = (n) => (!n ? '' : n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`)
 const KIND = { doc: 'Document', sheet: 'Spreadsheet', chart: 'Chart', file: 'File' }
 const iconOf = (f) => (f.kind === 'sheet' ? 'sheet' : f.kind === 'chart' ? 'chart' : f.kind === 'file' ? 'file' : 'doc')
+// Where things are, by colour AND by word: person = your own files, shared = the company drive, project = a project's drive, ai = an AI employee's computer
+const PLACE_ICON = { person: 'person', shared: 'drive', project: 'projects', own: 'computer', agent: 'computer' }
+const PLACE_TONE = { person: 'person', shared: 'company', project: 'project', own: 'ai', agent: 'ai' }
+const PLACE_GROUP = { person: 'Mine', shared: 'Company', project: 'Projects', own: 'This computer', agent: 'AI team' }
+const PURPOSE_TONE = { admin: 'admin', from_admin: 'from' }  // folders the system keeps: what an employee leaves FOR the admins, and what the admins leave FOR them
 const extOf = (f) => (f.kind === 'sheet' ? 'XLS' : f.kind === 'chart' ? 'SVG' : f.kind === 'file' ? (f.title.split('.').pop() || 'FILE').slice(0, 4).toUpperCase() : 'DOC')
 
 /**
@@ -14,7 +20,8 @@ const extOf = (f) => (f.kind === 'sheet' ? 'XLS' : f.kind === 'chart' ? 'SVG' : 
  * Folder tree, icon and list views, search, drag and drop to move, quick preview with editing, copy to another drive.
  * Pass agentId to let people switch between that employee's drives.
  */
-export default function FileManager({ owner = 'shared', title, agentId, fill = false }) {
+export default function FileManager({ owner = 'shared', title, agentId, fill = false, places: placesProp = null }) {
+  const { isAdmin } = useAuth()
   const box = useRef(null)
   const fileInput = useRef(null)
   const confirm = useConfirm()
@@ -59,8 +66,11 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
   }, [q, place])
   useEffect(() => { const close = () => setMenu(null); window.addEventListener('click', close); return () => window.removeEventListener('click', close) }, [])
 
-  const places = drives || [{ owner, label: title || (owner === 'shared' ? 'Shared drive' : 'Files') }]
+  const places = placesProp || drives || [{ owner, label: title || (owner === 'shared' ? 'Shared drive' : 'Files'), kind: owner === 'shared' ? 'shared' : 'own' }]
   const placeLabel = (places.find((p) => p.owner === place) || places[0]).label
+  const groups = (() => { const m = new Map(); places.forEach((p) => { const g = p.group || PLACE_GROUP[p.kind] || 'Files'; if (!m.has(g)) m.set(g, []); m.get(g).push(p) }); return [...m] })()
+  const copyTargets = places.filter((p) => p.owner !== place && p.kind !== 'agent')  // copying onto an AI employee's computer is done from their own Computer
+  const tagOf = (purpose) => (purpose === 'admin' ? (isAdmin ? 'For you' : 'For admins') : purpose === 'from_admin' ? (isAdmin ? 'From you' : 'From admins') : '')
   const folders = tree || []
   const byId = useMemo(() => Object.fromEntries(folders.map((f) => [f.id, f])), [folders])
   const chain = useMemo(() => { const out = []; let c = byId[cur]; while (c) { out.unshift(c); c = byId[c.parent_id] } return out }, [byId, cur])
@@ -142,7 +152,7 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
   }
 
   const items = useMemo(() => {
-    const dirs = (kids[cur ?? 'root'] || []).map((f) => ({ t: 'f', id: f.id, name: f.name, kind: 'folder' }))
+    const dirs = (kids[cur ?? 'root'] || []).map((f) => ({ t: 'f', id: f.id, name: f.name, kind: 'folder', purpose: f.purpose || '' }))
     const docs = (ls?.files || []).map((f) => ({ t: 'd', id: f.id, name: f.title, kind: f.kind, updated_at: f.updated_at, size: f.size, raw: f }))
     const cmp = (a, b) => {
       const k = sort.by
@@ -150,7 +160,7 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
       const bv = k === 'modified' ? b.updated_at || 0 : k === 'kind' ? b.kind : k === 'size' ? b.size || 0 : b.name.toLowerCase()
       return (av > bv ? 1 : av < bv ? -1 : 0) * sort.dir
     }
-    return [...dirs.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())), ...docs.sort(cmp)]
+    return [...dirs.sort((a, b) => (!a.purpose - !b.purpose) || a.name.toLowerCase().localeCompare(b.name.toLowerCase())), ...docs.sort(cmp)]  // the folders for and from the admins come first
   }, [kids, cur, ls, sort])
   const isSel = (it) => sel && sel.t === it.t && sel.id === it.id
   const openMenu = (e, it) => { e.preventDefault(); e.stopPropagation(); if (it) (it.t === 'f' ? pickFolder({ id: it.id }) : pickFile({ id: it.id })); setMenu({ x: e.clientX, y: e.clientY, it }) }
@@ -168,7 +178,7 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
         <div className={`fx-node ${cur === f.id ? 'on' : ''} ${drop === 't' + f.id ? 'drop' : ''}`} style={{ paddingLeft: 8 + depth * 14 }} onClick={() => go(place, f.id)}
           {...accept('t' + f.id)} onDrop={(e) => dropOn(e, f.id)}>
           <button className="fx-tw" onClick={(e) => { e.stopPropagation(); setExp({ ...exp, [f.id]: !open_ }) }} style={{ visibility: has ? 'visible' : 'hidden' }}><Icon name={open_ ? 'chevD' : 'chevR'} size={12} /></button>
-          <Icon name="folder" size={15} /><span>{f.name}</span>
+          <Icon name="folder" size={15} className={f.purpose ? `fx-fi fx-k-${PURPOSE_TONE[f.purpose]}` : ''} /><span>{f.name}</span>{f.purpose && <em className={`fx-tag fx-k-${PURPOSE_TONE[f.purpose]}`}>{tagOf(f.purpose)}</em>}
         </div>
         {open_ && has && renderTree(f.id, depth + 1)}
       </div>
@@ -182,7 +192,7 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
       onKeyDown={(e) => {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return
         if (e.key === 'Backspace' || (e.altKey && e.key === 'ArrowUp')) { e.preventDefault(); up() }
-        if (e.key === 'Delete' && sel) { const it = items.find((i) => isSel(i)); if (it) remove(it.t, it.id, it.name) }
+        if (e.key === 'Delete' && sel) { const it = items.find((i) => isSel(i)); if (it && !it.purpose) remove(it.t, it.id, it.name) }
         if (e.key === 'Enter' && sel?.t === 'f') openFolder({ id: sel.id })
       }} tabIndex={0}>
       <div className="fx-bar">
@@ -208,14 +218,29 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
       <div className="fx-main">
         {!narrow && (
           <aside className="fx-side">
-            {places.map((p) => (
-              <div key={p.owner}>
-                <div className={`fx-place-row ${place === p.owner && !cur ? 'on' : ''} ${drop === 'p' + p.owner ? 'drop' : ''}`} onClick={() => go(p.owner, null)} {...accept('p' + p.owner)} onDrop={(e) => dropOn(e, null, p.owner, p.label)}>
-                  <Icon name={p.kind === 'own' ? 'computer' : p.kind === 'shared' ? 'drive' : p.kind === 'project' ? 'projects' : 'folder'} size={15} /><span>{p.label}</span>
-                </div>
-                {place === p.owner && renderTree('root', 0)}
+            {groups.map(([group, list]) => (
+              <div key={group} className="fx-group">
+                {(groups.length > 1 || list.length > 1) && <h5>{group}</h5>}
+                {list.map((p) => (
+                  <div key={p.owner}>
+                    <div className={`fx-place-row fx-k-${PLACE_TONE[p.kind] || 'ai'} ${place === p.owner && !cur ? 'on' : ''} ${drop === 'p' + p.owner ? 'drop' : ''}`} onClick={() => go(p.owner, null)} title={p.hint || ''}
+                      {...accept('p' + p.owner)} onDrop={(e) => dropOn(e, null, p.owner, p.label)}>
+                      <Icon name={PLACE_ICON[p.kind] || 'folder'} size={15} /><span>{p.label}</span>
+                    </div>
+                    {place === p.owner && renderTree('root', 0)}
+                  </div>
+                ))}
               </div>
             ))}
+            {places.length > 1 && (
+              <div className="fx-legend" aria-label="What the colours mean">
+                <h5>Colours</h5>
+                {places.some((p) => p.kind === 'agent' || p.kind === 'own') && <><span className="fx-k-admin"><i />Orange: for the admins to read</span><span className="fx-k-from"><i />Teal: what the admins gave them</span></>}
+                {places.some((p) => p.kind === 'person') && <span className="fx-k-person"><i />Green: your own files</span>}
+                {places.some((p) => p.kind === 'shared') && <span className="fx-k-company"><i />Blue: the company drive</span>}
+                {places.some((p) => p.kind === 'project') && <span className="fx-k-project"><i />Purple: a project</span>}
+              </div>
+            )}
           </aside>
         )}
 
@@ -238,8 +263,8 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
                 <div key={it.t + it.id} className={`fx-tile ${isSel(it) ? 'on' : ''} ${drop === 'f' + it.id && it.t === 'f' ? 'drop' : ''}`} draggable onDragStart={(e) => onDragStart(e, { t: it.t, id: it.id })}
                   onClick={(e) => { e.stopPropagation(); it.t === 'f' ? pickFolder(it) : pickFile(it.raw) }} onDoubleClick={() => it.t === 'f' && openFolder(it)} onContextMenu={(e) => openMenu(e, it)}
                   {...(it.t === 'f' ? { ...accept('f' + it.id), onDrop: (e) => dropOn(e, it.id) } : {})}>
-                  <div className={`fx-ico ${it.t === 'f' ? 'dir' : ''}`}><Icon name={it.t === 'f' ? 'folder' : iconOf(it.raw)} size={30} />{it.t === 'd' && <em>{extOf(it.raw)}</em>}</div>
-                  {nameCell(it, true)}
+                  <div className={`fx-ico ${it.t === 'f' ? 'dir' : ''} ${it.purpose ? `fx-k-${PURPOSE_TONE[it.purpose]}` : ''}`}><Icon name={it.t === 'f' ? 'folder' : iconOf(it.raw)} size={30} />{it.t === 'd' && <em>{extOf(it.raw)}</em>}</div>
+                  {nameCell(it, true)}{it.purpose && <span className={`fx-tag fx-k-${PURPOSE_TONE[it.purpose]}`}>{tagOf(it.purpose)}</span>}
                 </div>
               ))}
             </div>
@@ -253,8 +278,8 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
                 <div key={it.t + it.id} className={`fx-row ${isSel(it) ? 'on' : ''} ${drop === 'f' + it.id && it.t === 'f' ? 'drop' : ''}`} draggable onDragStart={(e) => onDragStart(e, { t: it.t, id: it.id })}
                   onClick={(e) => { e.stopPropagation(); it.t === 'f' ? pickFolder(it) : pickFile(it.raw) }} onDoubleClick={() => it.t === 'f' && openFolder(it)} onContextMenu={(e) => openMenu(e, it)}
                   {...(it.t === 'f' ? { ...accept('f' + it.id), onDrop: (e) => dropOn(e, it.id) } : {})}>
-                  <Icon name={it.t === 'f' ? 'folder' : iconOf(it.raw)} size={16} />{nameCell(it, false)}
-                  <span className="fx-c">{it.t === 'f' ? 'Folder' : KIND[it.kind] || 'File'}</span><span className="fx-c">{it.t === 'f' ? '' : when(it.updated_at)}</span><span className="fx-c r">{it.t === 'f' ? '' : size(it.size)}</span>
+                  <Icon name={it.t === 'f' ? 'folder' : iconOf(it.raw)} size={16} className={it.purpose ? `fx-fi fx-k-${PURPOSE_TONE[it.purpose]}` : ''} />{nameCell(it, false)}
+                  <span className="fx-c">{it.t === 'f' ? (it.purpose ? <em className={`fx-tag fx-k-${PURPOSE_TONE[it.purpose]}`}>{tagOf(it.purpose)}</em> : 'Folder') : KIND[it.kind] || 'File'}</span><span className="fx-c">{it.t === 'f' ? '' : when(it.updated_at)}</span><span className="fx-c r">{it.t === 'f' ? '' : size(it.size)}</span>
                 </div>
               ))}
             </div>
@@ -301,8 +326,8 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
                   <button className="btn small" onClick={() => setRenaming({ t: 'd', id: open.id, v: open.title })}>Rename</button>
                   <button className="btn small danger" onClick={() => remove('d', open.id, open.title)}>Delete</button>
                 </div>
-                {places.filter((p) => p.owner !== place).length > 0 && (
-                  <div className="fx-copy"><span className="muted small">Copy to</span>{places.filter((p) => p.owner !== place).map((p) => <button key={p.owner} className="chip" onClick={() => copyTo(open.id, p.owner, p.label)}>{p.label}</button>)}</div>
+                {copyTargets.length > 0 && (
+                  <div className="fx-copy"><span className="muted small">Copy to</span>{copyTargets.map((p) => <button key={p.owner} className="chip" onClick={() => copyTo(open.id, p.owner, p.label)}>{p.label}</button>)}</div>
                 )}
               </>
             )}
@@ -315,11 +340,12 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
           {menu.it ? (
             <>
               {menu.it.t === 'f' && <button onClick={() => { openFolder(menu.it); setMenu(null) }}>Open</button>}
-              <button onClick={() => { setRenaming({ t: menu.it.t, id: menu.it.id, v: menu.it.name }); setMenu(null) }}>Rename</button>
+              {!menu.it.purpose && <button onClick={() => { setRenaming({ t: menu.it.t, id: menu.it.id, v: menu.it.name }); setMenu(null) }}>Rename</button>}
               {menu.it.t === 'd' && <button onClick={() => { download({ id: menu.it.id, title: menu.it.name, kind: menu.it.kind }); setMenu(null) }}>Download</button>}
-              {menu.it.t === 'd' && places.filter((p) => p.owner !== place).map((p) => <button key={p.owner} onClick={() => { copyTo(menu.it.id, p.owner, p.label); setMenu(null) }}>Copy to {p.label}</button>)}
-              {cur && <button onClick={() => { move({ t: menu.it.t, id: menu.it.id }, byId[cur]?.parent_id ?? null); setMenu(null) }}>Move up a folder</button>}
-              <button className="bad" onClick={() => { remove(menu.it.t, menu.it.id, menu.it.name); setMenu(null) }}>Delete</button>
+              {menu.it.t === 'd' && copyTargets.map((p) => <button key={p.owner} onClick={() => { copyTo(menu.it.id, p.owner, p.label); setMenu(null) }}>Copy to {p.label}</button>)}
+              {cur && !menu.it.purpose && <button onClick={() => { move({ t: menu.it.t, id: menu.it.id }, byId[cur]?.parent_id ?? null); setMenu(null) }}>Move up a folder</button>}
+              {!menu.it.purpose && <button className="bad" onClick={() => { remove(menu.it.t, menu.it.id, menu.it.name); setMenu(null) }}>Delete</button>}
+              {menu.it.purpose && <span className="fx-note">Deskmates keeps this folder in place.</span>}
             </>
           ) : (
             <>

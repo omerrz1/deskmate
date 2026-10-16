@@ -31,6 +31,8 @@ const P = {
   list: <path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" />,
   computer: <><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></>,
   drive: <><path d="M4 14h16v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" /><path d="M4 14l2.5-8h11L20 14M8 17h.01" /></>,
+  person: <><circle cx="12" cy="8.2" r="3.6" /><path d="M5 20c0-3.7 3.1-6 7-6s7 2.3 7 6" /></>,
+  userplus: <><circle cx="10" cy="8.2" r="3.6" /><path d="M3 20c0-3.7 3.1-6 7-6M18 8v6M15 11h6" /></>,
   users: <><circle cx="9" cy="8" r="3.2" /><path d="M3 19c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5" /><circle cx="17" cy="9" r="2.4" /><path d="M16.5 14c2.6 0 4.5 1.7 4.5 4.5" /></>,
   inbox: <><path d="M3 13.5 5.8 5.8A1.5 1.5 0 0 1 7.2 5h9.6a1.5 1.5 0 0 1 1.4.8L21 13.5V18a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18z" /><path d="M3 13.5h5l1 2.5h6l1-2.5h5" /></>,
   apps: <><rect x="4" y="4" width="6.5" height="6.5" rx="1.5" /><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5" /><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5" /><path d="M16.75 13.5v6.5M13.5 16.75H20" /></>,

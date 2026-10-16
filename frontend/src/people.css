@@ -1,0 +1,95 @@
+/* ==========================================================================
+   People, roles and the file systems.
+   Two rules: colour is never the only signal (every coloured thing also carries a word), and people are round while AI employees are squares.
+   ========================================================================== */
+:root {
+  --k-admin: #e0560f;    /* a folder meant for the admins to read */
+  --k-from: #0e8a8c;     /* what the admins gave an employee */
+  --k-company: #2f6fed;  /* the company drive */
+  --k-project: #7a4fd6;  /* a project's drive */
+  --k-person: #2a9d62;   /* a person's own files */
+  --k-ai: #85857f;       /* an AI employee's computer */
+}
+:root[data-theme="dark"] { --k-admin: #ff8a4c; --k-from: #3fc7c9; --k-company: #6f9bff; --k-project: #a88af0; --k-person: #56c98b; --k-ai: #a3a39d; }
+.fx-k-admin { --tone: var(--k-admin); } .fx-k-from { --tone: var(--k-from); } .fx-k-company { --tone: var(--k-company); }
+.fx-k-project { --tone: var(--k-project); } .fx-k-person { --tone: var(--k-person); } .fx-k-ai { --tone: var(--k-ai); }
+
+/* ----- who is who ----- */
+.pav { display: inline-grid; place-items: center; flex: none; border-radius: 50%; font-weight: 600; letter-spacing: .01em; user-select: none;
+  color: var(--c); background: color-mix(in srgb, var(--c) 15%, var(--surface, #fff)); box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--c) 38%, transparent); }
+.pav.ghost { width: 40px; height: 40px; color: var(--text2); background: var(--soft); box-shadow: inset 0 0 0 1.5px var(--line2); border-style: none; }
+.ai-tag { display: inline-block; vertical-align: 1px; font-size: 10px; font-weight: 700; letter-spacing: .05em; line-height: 1; padding: 3px 5px; border-radius: 4px; color: var(--text2); background: var(--soft); box-shadow: inset 0 0 0 1px var(--line2); }
+.role-badge { display: inline-block; font-size: 12px; font-weight: 600; line-height: 1; padding: 4px 9px; border-radius: 99px; white-space: nowrap; }
+.role-badge.owner { background: var(--text); color: var(--bg); }
+.role-badge.admin { color: #2757c9; background: #e9f0ff; }
+.role-badge.member { color: #1f7a4a; background: #e6f5ec; }
+:root[data-theme="dark"] .role-badge.admin { color: #9bb9ff; background: rgba(111, 155, 255, .16); }
+:root[data-theme="dark"] .role-badge.member { color: #7fd9a6; background: rgba(86, 201, 139, .15); }
+
+/* ----- the page of people ----- */
+.pp-roles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+.pp-role { display: grid; gap: 8px; align-content: start; background: var(--surface, #fff); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.pp-role p { color: var(--text2); font-size: 13px; line-height: 1.45; } .pp-role .role-badge { justify-self: start; }
+.pp-card { background: var(--surface, #fff); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 18px; overflow: hidden; }
+.pp-card > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 14px 18px; }
+.pp-card > header h3 { font-size: 15px; } .pp-card > header h3 i, .pd-card h3 .cnt { font-style: normal; font-weight: 500; color: var(--text3); margin-left: 4px; font-size: 13px; }
+.pp-row { display: grid; grid-template-columns: 40px minmax(0, 1.5fr) auto minmax(0, 1.7fr) 108px auto; gap: 14px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--line); }
+.pp-row.invite { background: color-mix(in srgb, var(--soft) 60%, transparent); }
+.pp-who { min-width: 0; display: grid; gap: 1px; } .pp-who b { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pp-who small { color: var(--text3); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.you { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 99px; background: var(--soft); color: var(--text2); }
+.pp-meta { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; } .pp-note { font-size: 12px; color: var(--text3); }
+.pp-proj { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; } .pp-proj .chip { padding: 1px 9px; font-size: 12px; }
+.pp-act { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+.pp-foot { margin: -4px 4px 24px; }
+.pp-dialog { width: min(520px, 100%); } .pp-dialog.wide { width: min(620px, 100%); }
+.pp-dialog h3 { font-size: 18px; margin-bottom: 4px; }
+.actions.end { justify-content: flex-end; margin-top: 6px; }
+.pp-roleopts, .pp-projects { border: 0; margin: 0; padding: 0; display: grid; gap: 8px; } .pp-roleopts legend, .pp-projects legend { font-size: 13px; color: var(--text2); padding: 0; margin-bottom: 6px; }
+.form .pp-opt, .pp-opt { display: flex; gap: 11px; align-items: flex-start; border: 1px solid var(--line2); border-radius: 10px; padding: 11px 13px; cursor: pointer; color: var(--text); }
+.pp-opt.on { border-color: var(--accent); background: var(--accent-bg); } .pp-opt input, .pp-check input { width: 16px; height: 16px; flex: none; margin: 2px 0 0; padding: 0; accent-color: var(--accent); }
+.pp-opt span { display: grid; gap: 5px; justify-items: start; } .pp-opt small { color: var(--text2); font-size: 13px; line-height: 1.4; }
+.pp-projects { max-height: 150px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; } .pp-projects legend { padding: 0 4px; margin-left: -4px; }
+.form .pp-check, .pp-check { display: flex; gap: 9px; align-items: center; font-size: 14px; color: var(--text); cursor: pointer; }
+.pp-warn { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.4; color: var(--accent-text); background: var(--accent-bg); border-radius: 10px; padding: 10px 12px; } .pp-warn svg { flex: none; margin-top: 1px; }
+.pp-danger { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
+.pp-copy { margin: 12px 0; } .pp-copy-h { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--text2); margin-bottom: 6px; }
+.pp-copy input { width: 100%; font-family: var(--mono); font-size: 12.5px; }
+.pp-copy pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 13px/1.55 var(--sans); background: var(--soft); border-radius: 10px; padding: 12px 14px; max-height: 190px; overflow: auto; }
+
+/* ----- joining ----- */
+.join-role { display: flex; gap: 14px; align-items: center; background: var(--soft); border-radius: 12px; padding: 14px 16px; margin: 4px 0 16px; }
+.join-role b { font-size: 14.5px; } .join-role p { color: var(--text2); font-size: 13px; line-height: 1.45; margin-top: 2px; }
+
+/* ----- a member's home, and who is who ----- */
+.mw-hero { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 22px; } .mw-hero h1 { font-size: 26px; } .mw-hero .muted { margin-top: 4px; }
+.mw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; } .mw-grid .pj-card { height: 100%; }
+.dir-page .pp-card > header { padding-bottom: 8px; }
+.dir-row { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 11px 18px; border-top: 1px solid var(--line); }
+.dir-state { font-size: 12.5px; color: var(--text3); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .dir-state.live { color: var(--accent-text); }
+.acct-me { display: flex; gap: 14px; align-items: center; } .acct-me b { font-size: 16px; } .acct-me p { margin: 1px 0 6px; }
+.pd-person small { display: block; color: var(--text3); font-size: 12.5px; } .pd-person .role-badge { flex: none; }
+.member-shell .u-n { display: grid; line-height: 1.2; } .member-shell .u-n small { color: var(--text3); font-size: 11.5px; }
+
+/* ----- the file systems: where things are, by colour and by word ----- */
+.files-page { display: flex; flex-direction: column; } .files-box { height: calc(100vh - 210px); min-height: 460px; }
+.fx-group h5 { margin: 14px 10px 5px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text3); } .fx-group:first-child h5 { margin-top: 4px; }
+.fx-place-row { border-left: 3px solid transparent; } .fx-place-row svg { color: var(--tone, var(--text2)); }
+.fx-place-row.on { border-left-color: var(--tone, var(--accent)); background: color-mix(in srgb, var(--tone, var(--accent)) 10%, transparent); font-weight: 600; }
+.fx-ico.dir { background: var(--soft); color: var(--text2); }  /* an ordinary folder is quiet, so the folders that carry a colour stand out */
+.fx-fi, .fx-ico.dir.fx-k-admin svg, .fx-ico.dir.fx-k-from svg { color: var(--tone); fill: color-mix(in srgb, var(--tone) 22%, transparent); }
+.fx-ico.dir.fx-k-admin, .fx-ico.dir.fx-k-from { background: color-mix(in srgb, var(--tone) 13%, transparent); box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--tone) 45%, transparent); }
+.fx-tag { font-style: normal; font-size: 10.5px; font-weight: 700; line-height: 1; letter-spacing: .02em; padding: 3px 7px; border-radius: 99px; white-space: nowrap; color: var(--tone); background: color-mix(in srgb, var(--tone) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 35%, transparent); }
+.fx-tile > .fx-tag { align-self: center; margin-top: 4px; } .fx-node .fx-tag { margin-left: auto; padding: 2px 6px; font-size: 10px; }
+.fx-legend { margin: 18px 6px 6px; padding-top: 12px; border-top: 1px solid var(--line); display: grid; gap: 5px; font-size: 12px; color: var(--text2); }
+.fx-legend h5 { margin: 0 0 3px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text3); }
+.fx-legend span { display: flex; gap: 8px; align-items: center; } .fx-legend i { width: 10px; height: 10px; border-radius: 3px; background: var(--tone); flex: none; }
+.fx-node svg, .fx-place-row svg { flex: none; } .fx-place-row span, .fx-node span:not(.fx-tw) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.fx-note { display: block; padding: 7px 12px; font-size: 12px; color: var(--text3); }
+
+@media (max-width: 900px) {
+  .pp-roles { grid-template-columns: 1fr; }
+  .pp-row { grid-template-columns: 40px minmax(0, 1fr) auto; row-gap: 8px; }
+  .pp-row .pp-proj, .pp-row .pp-seen { display: none; } .pp-act { grid-column: 2 / -1; justify-content: flex-start; }
+  .files-box { height: calc(100vh - 190px); }
+}

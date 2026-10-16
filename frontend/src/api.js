@@ -72,6 +72,7 @@ export function usePoll(url, ms = 4000, deps = []) {
   const alive = useRef(true)
   const loadedAt = useRef(0)
   const load = useCallback(async () => {
+    if (!url) return  // no address: this data is not for this person (members are not shown admin-only data)
     try {
       const d = await api.get(url)
       loadedAt.current = Date.now()
@@ -81,7 +82,7 @@ export function usePoll(url, ms = 4000, deps = []) {
   useEffect(() => {
     alive.current = true
     load()
-    const topics = ms ? topicsFor(url) : []
+    const topics = ms && url ? topicsFor(url) : []
     let deb
     const off = topics.length ? onChange((t) => { if (t.some((x) => topics.includes(x))) { clearTimeout(deb); deb = setTimeout(load, 120) } }) : null
     const timer = ms ? setInterval(() => { if (topics.length && liveOk() && Date.now() - loadedAt.current < 25000) return; load() }, ms) : null

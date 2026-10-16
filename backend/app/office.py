@@ -571,7 +571,7 @@ async def run_tool(agent, name, a):
         return {"updated": True}, "/office?tab=files"
     if name == "list_documents":
         q = f"%{a.get('query', '')}%"
-        rows = db.q("SELECT d.id,d.title,d.kind,d.updated_at,g.name author FROM documents d LEFT JOIN agents g ON g.id=d.agent_id WHERE d.title LIKE ? ORDER BY d.id DESC LIMIT 25", (q,))
+        rows = db.q("SELECT d.id,d.title,d.kind,d.updated_at,g.name author FROM documents d LEFT JOIN agents g ON g.id=d.agent_id WHERE d.title LIKE ? AND d.agent_id<? ORDER BY d.id DESC LIMIT 25", (q, files.PERSON_BASE))
         return [dict(r) for r in rows], "/office?tab=files"
 
     if name == "create_event":
@@ -664,6 +664,7 @@ def init():
         "ALTER TABLE duties ADD COLUMN stage TEXT DEFAULT ''", "ALTER TABLE duties ADD COLUMN plan TEXT DEFAULT ''", "ALTER TABLE duties ADD COLUMN plan_doc_id INTEGER", "ALTER TABLE duties ADD COLUMN next_at REAL",
         "ALTER TABLE duties ADD COLUMN fast INTEGER DEFAULT 0", "ALTER TABLE duties ADD COLUMN step_log TEXT DEFAULT '[]'", "ALTER TABLE emails ADD COLUMN attachments TEXT DEFAULT '[]'",
         "ALTER TABLE documents ADD COLUMN folder_id INTEGER", "ALTER TABLE documents ADD COLUMN file_path TEXT DEFAULT ''", "ALTER TABLE documents ADD COLUMN mime TEXT DEFAULT ''",
+        "ALTER TABLE folders ADD COLUMN purpose TEXT DEFAULT ''",
     ):
         try:
             db.run(stmt)

@@ -109,6 +109,7 @@ def _company_pointer():
 
 FILE_RULES = ("YOUR COMPUTER: everything you produce (reports, analyses, drafts, lists, trackers, research, results) is saved as a FILE on your own computer first: create_document or create_spreadsheet, in a sensible folder "
               "(Reports, Documents, Spreadsheets, or Projects/<project name> for project work). Save it BEFORE you tell anyone it is done, and say where you saved it. "
+              "Work meant for the admins to read, check or approve goes in your 'For admins' folder (they see it highlighted); things the admins give you to use are in 'From admins'. "
               "Do NOT email it or put it on the shared drive or a project drive unless you were asked to, or it is a finished project deliverable. "
               "When asked to send it: send_email with attach=[the file id]. When asked to share it with the team or put it on the shared drive: copy_file with shared=true. "
               "PROJECTS: drafts and working files stay on your own computer in Projects/<name>; finished deliverables go to the project's drive with copy_file (project=<name>), then post_update to say what is there.")

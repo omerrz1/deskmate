@@ -1,7 +1,7 @@
 import { Component, lazy, Suspense, useEffect, useState } from 'react'
 import { Link, Navigate, NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import { api, usePoll } from './api'
-import { AuthGate, useAuth } from './Auth'
+import { AuthGate, JoinPage, useAuth } from './Auth'
 import Icon from './Icon'
 import { FeedbackProvider, useToast } from './Feedback'
 import LiveHelpBanner from './LiveHelpBanner'
@@ -9,6 +9,7 @@ import CommandPalette from './CommandPalette'
 import SetupGate from './SetupGate'
 import { useTheme } from './theme'
 import Avatar from './Avatar'
+import PersonAvatar from './PersonAvatar'
 import { Skeleton } from './ui'
 import { SITE_PAGES } from './site/routes'
 
@@ -32,9 +33,14 @@ const Calls = lazy(() => import('./pages/Calls'))
 const Clients = lazy(() => import('./pages/Clients'))
 const Activity = lazy(() => import('./pages/Activity'))
 const Knowledge = lazy(() => import('./pages/Knowledge'))
+const People = lazy(() => import('./pages/People'))
+const Files = lazy(() => import('./pages/Files'))
+const MyWork = lazy(() => import('./pages/MyWork'))
+const Directory = lazy(() => import('./pages/Directory'))
+const Account = lazy(() => import('./pages/Account'))
 
 const LEGACY = ['/data', '/campaigns', '/calls', '/clients', '/knowledge', '/overview', '/activity']
-const TITLES = { '/': 'Team', '/performance': 'Performance', '/templates': 'Templates', '/projects': 'Projects', '/apps': 'Apps', '/inbox': 'Inbox', '/chats': 'Chats', '/settings': 'Settings' }
+const TITLES = { '/': 'Team', '/performance': 'Performance', '/templates': 'Templates', '/projects': 'Projects', '/apps': 'Apps', '/inbox': 'Inbox', '/chats': 'Chats', '/settings': 'Settings', '/people': 'People', '/files': 'Files' }
 
 class Boundary extends Component {
   state = { err: null }
@@ -97,7 +103,9 @@ function Shell() {
         <Link to="/" className="brand"><span className="mark"><i /></span><span className="t"><b>Deskmates</b>{company?.name && <small>{company.name}</small>}</span></Link>
         <nav className="nav" aria-label="Main">
           {link('/', 'users', 'Team')}
+          {link('/people', 'person', 'People')}
           {link('/projects', 'projects', 'Projects')}
+          {link('/files', 'folder', 'Files')}
           {link('/inbox', 'inbox', 'Inbox', badge)}
           {link('/chats', 'chat', 'Chats', att ? att.chats_unread || 0 : 0)}
           {link('/apps', 'apps', 'Apps')}
@@ -118,7 +126,7 @@ function Shell() {
         <div className="side-foot">
           {health && !health.openai && <div className="mode"><Icon name="alert" size={14} /> No API key set</div>}
           {central && <button className={`pause ${paused ? 'paused' : ''}`} onClick={flip} title={paused ? 'Resume the team' : 'Pause all work'}><i className={`dot ${paused ? '' : 'ok'}`} />{paused ? 'Paused' : 'Team working'}<Icon name={paused ? 'play' : 'pause'} size={13} /></button>}
-          <div className="who-row"><span className="u-av">{(auth.username || '?').slice(0, 1).toUpperCase()}</span><span className="u-n">{auth.username}</span><button onClick={auth.logout} title="Sign out" aria-label="Sign out"><Icon name="logout" size={16} /></button></div>
+          <div className="who-row"><PersonAvatar name={auth.name || auth.username} size={26} /><span className="u-n">{auth.name || auth.username}</span><button onClick={auth.logout} title="Sign out" aria-label="Sign out"><Icon name="logout" size={16} /></button></div>
         </div>
       </aside>
       <main className="main">
@@ -140,6 +148,8 @@ function Shell() {
             <Route path="/templates" element={<Templates />} />
             <Route path="/projects" element={<Projects />} />
             <Route path="/projects/:id" element={<Project />} />
+            <Route path="/people" element={<People />} />
+            <Route path="/files" element={<Files />} />
             <Route path="/apps" element={<Apps />} />
             <Route path="/inbox" element={<Inbox />} />
             <Route path="/chats" element={<Chats />} />
@@ -164,25 +174,84 @@ function Shell() {
   )
 }
 
-export default function App() {
-  const { pathname } = useLocation()
-  const page = SITE_PAGES[pathname.replace(/\/+$/, '')]
-  // about, product, security, contact and the legal pages are open to everyone, signed in or not
-  if (page) return <Suspense fallback={<div className="auth-wrap" aria-busy="true" />}><Site page={page} /></Suspense>
+/** What a member sees: their own projects and files, who is who, and their account. Nothing else is reachable, and the server refuses it too. */
+function MemberShell() {
+  const auth = useAuth()
+  const loc = useLocation()
+  const [theme, setTheme] = useTheme()
+  const on = (p) => (p === '/' ? loc.pathname === '/' : loc.pathname.startsWith(p))
+  const link = (to, icon, label) => <NavLink to={to} className={on(to) ? 'on' : ''}><span><Icon name={icon} size={17} />{label}</span></NavLink>
+  const section = { '/': 'My work', '/projects': 'Projects', '/files': 'Files', '/team': 'Who is who', '/account': 'Account' }['/' + loc.pathname.split('/')[1]] || ''
   return (
-    <FeedbackProvider>
-      <AuthGate>
-        <SetupGate>
-        <LiveHelpBanner />
-        <Suspense fallback={<div className="page"><Skeleton rows={4} /></div>}>
+    <div className="shell member-shell">
+      <aside className="sidebar">
+        <Link to="/" className="brand"><span className="mark"><i /></span><span className="t"><b>Deskmates</b>{auth.workspace?.name && <small>{auth.workspace.name}</small>}</span></Link>
+        <nav className="nav" aria-label="Main">
+          {link('/', 'person', 'My work')}
+          {link('/projects', 'projects', 'Projects')}
+          {link('/files', 'folder', 'Files')}
+          {link('/team', 'users', 'Who is who')}
+          {link('/account', 'lock', 'Account')}
+        </nav>
+        <div className="side-foot">
+          <div className="who-row"><PersonAvatar name={auth.name || auth.username} size={26} /><span className="u-n">{auth.name || auth.username}<small>Member</small></span><button onClick={auth.logout} title="Sign out" aria-label="Sign out"><Icon name="logout" size={15} /></button></div>
+        </div>
+      </aside>
+      <main className="main">
+        <header className="topbar">
+          <div className="crumb"><span>{auth.workspace?.name || 'Deskmates'}</span>{section && <><i>/</i><b>{section}</b></>}</div>
+          <button className="bell" onClick={() => setTheme(theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system')} title={`Theme: ${theme === 'system' ? 'matches your computer' : theme}. Click to change.`} aria-label="Change theme"><Icon name={theme === 'dark' ? 'moon' : theme === 'light' ? 'sun' : 'monitor'} size={16} /></button>
+        </header>
+        <div className="content">
+          <Boundary key={loc.pathname}>
+            <Suspense fallback={<div className="page"><Skeleton rows={4} /></div>}>
+              <Routes>
+                <Route path="/" element={<MyWork />} />
+                <Route path="/projects" element={<Projects />} />
+                <Route path="/projects/:id" element={<Project />} />
+                <Route path="/files" element={<Files />} />
+                <Route path="/team" element={<Directory />} />
+                <Route path="/account" element={<Account />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </Suspense>
+          </Boundary>
+        </div>
+      </main>
+    </div>
+  )
+}
+
+/** Members get their own frame. Everyone else gets the admin app, behind the step that connects the company's AI keys. */
+function RoleSplit() {
+  const auth = useAuth()
+  if (auth.isMember) return <MemberShell />
+  return (
+    <SetupGate>
+      <LiveHelpBanner />
+      <Suspense fallback={<div className="page"><Skeleton rows={4} /></div>}>
         <Routes>
           <Route path="/softphone" element={<MockPhone />} />
           <Route path="/website-demo" element={<MockPhone website />} />
           <Route path="/meeting/:id" element={<Meeting />} />
           <Route path="*" element={<Shell />} />
         </Routes>
-        </Suspense>
-        </SetupGate>
+      </Suspense>
+    </SetupGate>
+  )
+}
+
+export default function App() {
+  const { pathname } = useLocation()
+  const page = SITE_PAGES[pathname.replace(/\/+$/, '')]
+  // about, product, security, contact and the legal pages are open to everyone, signed in or not
+  if (page) return <Suspense fallback={<div className="auth-wrap" aria-busy="true" />}><Site page={page} /></Suspense>
+  const join = pathname.match(/^\/join\/([^/]+)\/?$/)  // an invitation link: open to anyone who has it
+  if (join) return <JoinPage token={join[1]} />
+  return (
+    <FeedbackProvider>
+      <AuthGate>
+        <RoleSplit />
       </AuthGate>
     </FeedbackProvider>
   )

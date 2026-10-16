@@ -3,11 +3,11 @@ import io
 import json
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from . import agents, db, files, office, schedule, voices
+from . import access, agents, db, files, office, schedule, voices
 
 router = APIRouter(prefix="/api")
 
@@ -239,31 +239,63 @@ def _owner(o):
 
 
 def _check_owner(o):
-    if o > 0 and not agents.get(o):
+    kind = files.owner_kind(o)
+    if kind == "agent" and not agents.get(o):
         raise HTTPException(404, "agent not found")
-    if o < 0 and not db.q1("SELECT id FROM projects WHERE id=?", (-o,)):
+    if kind == "project" and not db.q1("SELECT id FROM projects WHERE id=?", (-o,)):
         raise HTTPException(404, "project not found")
+    if kind == "person" and not db.q1("SELECT id FROM admins WHERE id=?", (files.person_of(o),)):
+        raise HTTPException(404, "person not found")
+
+
+def _drive(request, owner):
+    """The drive a request names, after checking the person may open it (and that it has the usual folders)."""
+    o = _owner(owner)
+    _check_owner(o)
+    if not access.can_use_drive(request.state.session, o):
+        raise HTTPException(403, "You can't open that drive.")
+    if files.owner_kind(o) != "project":
+        files.ensure_folders(o)  # the folders every drive should have, added the first time anyone looks (older workspaces did not have all of them)
+    return o
+
+
+def _folder_in(o, fid):
+    """A folder id the caller sent must belong to the drive they named, or they could reach another drive through it."""
+    if fid is not None and not db.q1("SELECT 1 x FROM folders WHERE id=? AND owner=?", (fid, o)):
+        raise HTTPException(404, "folder not found")
+
+
+def _folder_row(request, fid):
+    r = db.q1("SELECT * FROM folders WHERE id=?", (fid,))
+    if not r or not access.can_use_folder(request.state.session, r):
+        raise HTTPException(404, "folder not found")  # not found, not forbidden: do not confirm that other people's folders exist
+    return r
+
+
+def _doc_row(request, did):
+    r = db.q1("SELECT * FROM documents WHERE id=?", (did,))
+    if not r or not access.can_use_doc(request.state.session, r):
+        raise HTTPException(404)
+    return r
 
 
 @router.get("/fs")
-def fs_list(owner: str = "shared", folder: Optional[int] = None):
-    o = _owner(owner)
-    _check_owner(o)
+def fs_list(request: Request, owner: str = "shared", folder: Optional[int] = None):
+    o = _drive(request, owner)
+    _folder_in(o, folder)
     return files.listing(o, folder)
 
 
 @router.get("/fs/folders")
-def fs_folders(owner: str = "shared"):
+def fs_folders(request: Request, owner: str = "shared"):
     """Every folder of one drive, flat: the browser builds the tree."""
-    o = _owner(owner)
-    _check_owner(o)
-    return [dict(r) for r in db.q("SELECT id,parent_id,name FROM folders WHERE owner=? ORDER BY lower(name)", (o,))]
+    o = _drive(request, owner)
+    return [dict(r) for r in db.q("SELECT id,parent_id,name,COALESCE(purpose,'') purpose FROM folders WHERE owner=? ORDER BY lower(name)", (o,))]
 
 
 @router.get("/fs/search")
-def fs_search(owner: str = "shared", q: str = ""):
-    o = _owner(owner)
-    _check_owner(o)
+def fs_search(request: Request, owner: str = "shared", q: str = ""):
+    o = _drive(request, owner)
     q = q.strip()
     if not q:
         return {"folders": [], "files": []}
@@ -280,9 +312,10 @@ def agent_drives(aid: int):
     a = agents.get(aid)
     if not a:
         raise HTTPException(404)
-    out = [{"owner": str(aid), "label": f"{a['name']}'s computer", "kind": "own"}, {"owner": "shared", "label": "Shared drive", "kind": "shared"}]
+    files.ensure_folders(aid)
+    out = [{"owner": str(aid), "label": f"{a['name']}'s computer", "kind": "own", "hint": "Where they keep their work"}, {"owner": "shared", "label": "Company drive", "kind": "shared", "hint": "Shared by everyone in the company"}]
     for p in db.q("SELECT p.id,p.name FROM project_members m JOIN projects p ON p.id=m.project_id WHERE m.agent_id=? AND p.status<>'deleted' ORDER BY p.name", (aid,)):
-        out.append({"owner": str(-p["id"]), "label": p["name"], "kind": "project"})
+        out.append({"owner": str(-p["id"]), "label": p["name"], "kind": "project", "hint": "A project's shared drive"})
     return out
 
 
@@ -293,11 +326,12 @@ class FolderIn(BaseModel):
 
 
 @router.post("/fs/folder")
-def fs_folder(f: FolderIn):
+def fs_folder(f: FolderIn, request: Request):
     name = f.name.strip().replace("/", "-").replace("\\", "-")[:60]
     if not name:
         raise HTTPException(400, "Give the folder a name")
-    o = _owner(f.owner)
+    o = _drive(request, f.owner)
+    _folder_in(o, f.parent_id)
     if db.q1("SELECT id FROM folders WHERE owner=? AND parent_id IS ? AND lower(name)=lower(?)", (o, f.parent_id, name)):
         raise HTTPException(400, "A folder with that name already exists here")
     return {"id": db.run("INSERT INTO folders(owner,parent_id,name,created_at) VALUES(?,?,?,?)", (o, f.parent_id, name, db.now()))}
@@ -310,13 +344,17 @@ class FolderPatch(BaseModel):
 
 
 @router.patch("/fs/folder/{fid}")
-def fs_folder_patch(fid: int, p: FolderPatch):
+def fs_folder_patch(fid: int, p: FolderPatch, request: Request):
+    row = _folder_row(request, fid)
+    if row.get("purpose") and (p.name is not None or p.to_root or p.parent_id is not None):
+        raise HTTPException(400, f"'{row['name']}' is a folder Deskmates keeps in place, so it can't be renamed or moved.")
     f = {}
     if p.name is not None:
         f["name"] = p.name.strip().replace("/", "-")[:60]
     if p.to_root:
         f["parent_id"] = None
     elif p.parent_id is not None and p.parent_id != fid:
+        _folder_in(row["owner"], p.parent_id)  # only into a folder of the same drive
         if p.parent_id in files.descendants(fid):
             raise HTTPException(400, "A folder can't go inside itself")
         f["parent_id"] = p.parent_id
@@ -326,7 +364,10 @@ def fs_folder_patch(fid: int, p: FolderPatch):
 
 
 @router.delete("/fs/folder/{fid}")
-def fs_folder_delete(fid: int):
+def fs_folder_delete(fid: int, request: Request):
+    row = _folder_row(request, fid)
+    if row.get("purpose"):
+        raise HTTPException(400, f"'{row['name']}' is a folder Deskmates keeps in place, so it can't be deleted.")
     files.delete_folder(fid)
     return {"ok": True}
 
@@ -341,8 +382,9 @@ class FileIn(BaseModel):
 
 
 @router.post("/fs/file")
-def fs_file(f: FileIn):
-    o = _owner(f.owner)
+def fs_file(f: FileIn, request: Request):
+    o = _drive(request, f.owner)
+    _folder_in(o, f.folder_id)
     if f.kind == "sheet":
         body = json.dumps({"columns": f.columns or ["A", "B", "C"], "rows": [[""] * max(1, len(f.columns or ["A", "B", "C"]))]})
     else:
@@ -351,7 +393,7 @@ def fs_file(f: FileIn):
 
 
 @router.post("/fs/upload")
-async def fs_upload(owner: str = Form("shared"), folder_id: Optional[int] = Form(None), file: UploadFile = File(...)):
+async def fs_upload(request: Request, owner: str = Form("shared"), folder_id: Optional[int] = Form(None), file: UploadFile = File(...)):
     """Admin drops a file onto an agent's computer: text is extracted so the agent can read it; the original can be downloaded."""
     from . import knowledge
     data = await file.read(15 * 1024 * 1024 + 1)
@@ -359,7 +401,8 @@ async def fs_upload(owner: str = Form("shared"), folder_id: Optional[int] = Form
         raise HTTPException(413, "File too large (15 MB max)")
     name = (file.filename or "file").replace("/", "_").replace("\\", "_")[:120]
     low = name.lower()
-    o = _owner(owner)
+    o = _drive(request, owner)
+    _folder_in(o, folder_id)
     kind, body = "doc", ""
     try:
         if low.endswith((".xlsx", ".xls", ".csv")):
@@ -385,9 +428,9 @@ async def fs_upload(owner: str = Form("shared"), folder_id: Optional[int] = Form
 
 
 @router.put("/docs/{did}/table")
-def doc_table(did: int, t: Dict[str, Any]):
-    d = db.q1("SELECT kind FROM documents WHERE id=?", (did,))
-    if not d or d["kind"] != "sheet":
+def doc_table(did: int, t: Dict[str, Any], request: Request):
+    d = _doc_row(request, did)
+    if d["kind"] != "sheet":
         raise HTTPException(404, "not a spreadsheet")
     cols = [str(c)[:80] for c in (t.get("columns") or [])][:40]
     rows = [[str(c)[:500] for c in r][:40] for r in (t.get("rows") or [])][:5000]
@@ -420,17 +463,15 @@ def agent_calls(aid: int):
 
 # ---------- documents ----------
 @router.get("/docs")
-def docs(q: str = ""):
-    rows = db.q("SELECT d.id,d.title,d.kind,d.updated_at,d.agent_id,g.name author FROM documents d LEFT JOIN agents g ON g.id=d.agent_id WHERE d.title LIKE ? ORDER BY d.updated_at DESC LIMIT 200", (f"%{q}%",))
+def docs(request: Request, q: str = ""):
+    rows = db.q("SELECT d.id,d.title,d.kind,d.updated_at,d.agent_id,g.name author FROM documents d LEFT JOIN agents g ON g.id=d.agent_id WHERE d.title LIKE ? AND (d.agent_id<? OR d.agent_id=?) ORDER BY d.updated_at DESC LIMIT 200", (f"%{q}%", files.PERSON_BASE, files.person_owner(request.state.session["admin_id"])))
     return [dict(r) for r in rows]
 
 
 @router.get("/docs/{did}")
-def doc_get(did: int):
-    r = db.q1("SELECT d.*, g.name author FROM documents d LEFT JOIN agents g ON g.id=d.agent_id WHERE d.id=?", (did,))
-    if not r:
-        raise HTTPException(404)
-    r = dict(r)
+def doc_get(did: int, request: Request):
+    _doc_row(request, did)
+    r = dict(db.q1("SELECT d.*, g.name author FROM documents d LEFT JOIN agents g ON g.id=d.agent_id WHERE d.id=?", (did,)))
     if r["kind"] == "sheet":
         r["table"] = json.loads(r["body"] or "{}")
     return r
@@ -455,7 +496,9 @@ class DocPatch(BaseModel):
 
 
 @router.patch("/docs/{did}")
-def doc_patch(did: int, p: DocPatch):
+def doc_patch(did: int, p: DocPatch, request: Request):
+    row = _doc_row(request, did)
+    _folder_in(row["agent_id"], p.folder_id)  # a file can only move to a folder of its own drive
     f = {k: v for k, v in p.model_dump().items() if v is not None and k != "to_root"}
     if p.to_root:
         f["folder_id"] = None
@@ -470,27 +513,24 @@ class CopyIn(BaseModel):
 
 
 @router.post("/docs/{did}/copy")
-def doc_copy(did: int, c: CopyIn):
+def doc_copy(did: int, c: CopyIn, request: Request):
     """Copy a file to another drive or folder (your own copy stays)."""
-    d = db.q1("SELECT * FROM documents WHERE id=?", (did,))
-    if not d:
-        raise HTTPException(404)
-    o = _owner(c.owner)
-    _check_owner(o)
+    d = _doc_row(request, did)
+    o = _drive(request, c.owner)
+    _folder_in(o, c.folder_id)
     return {"id": files.copy_doc(d, o, c.folder_id)}
 
 
 @router.delete("/docs/{did}")
-def doc_delete(did: int):
+def doc_delete(did: int, request: Request):
+    _doc_row(request, did)
     db.run("DELETE FROM documents WHERE id=?", (did,))
     return {"ok": True}
 
 
 @router.get("/docs/{did}/download")
-def doc_download(did: int):
-    r = db.q1("SELECT * FROM documents WHERE id=?", (did,))
-    if not r:
-        raise HTTPException(404)
+def doc_download(did: int, request: Request):
+    r = _doc_row(request, did)
     try:
         name, mime, data = files.download_parts(r)
     except FileNotFoundError:

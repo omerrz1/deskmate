@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import asyncio
 
-from . import admin_agent, agent_tools, agents, alerts, apps_api, backups, browser_api, browser_tools, bus, directory, templates, costs, scorecards, search, templates, secretbox, totp, keys, rules, setup_api, meeting_bot, auth, office, office_api, team, team_api, callengine, countries, crm, db, eleven_agents, importer, knowledge, llm, reports, schedule, security, voices, chats, chats_api, chat_hooks, wa_call
+from . import access, admin_agent, agent_tools, agents, alerts, apps_api, backups, browser_api, browser_tools, people, people_api, bus, directory, templates, costs, scorecards, search, templates, secretbox, totp, keys, rules, setup_api, meeting_bot, auth, office, office_api, team, team_api, callengine, countries, crm, db, eleven_agents, importer, knowledge, llm, reports, schedule, security, voices, chats, chats_api, chat_hooks, wa_call
 
 app = FastAPI(title="Deskmates", docs_url=None, redoc_url=None, openapi_url=None)  # no public API docs
 app.add_middleware(security.Security)
@@ -23,6 +23,7 @@ app.include_router(office_api.router)
 app.include_router(team_api.router)
 app.include_router(apps_api.router)
 app.include_router(browser_api.router)
+app.include_router(people_api.router)
 app.include_router(chats_api.router)
 app.include_router(chat_hooks.router)
 app.include_router(setup_api.router)
@@ -329,8 +330,8 @@ def scorecards_get(days: int = 30):
 
 
 @app.get("/api/search")
-def search_all(q: str = ""):
-    return search.search(q)
+def search_all(request: Request, q: str = ""):
+    return search.search(q, person=request.state.session["admin_id"])
 
 
 @app.get("/api/templates")
@@ -764,7 +765,9 @@ class AgentIn(BaseModel):
 
 
 @app.get("/api/agents")
-def agents_list():
+def agents_list(request: Request):
+    if access.is_member(request.state.session):  # a member sees who is on the AI team, and what they are doing, and nothing else about them
+        return [{k: a.get(k) for k in ("id", "name", "role", "color", "gender", "working", "current_task", "is_manager")} for a in agents.listing()]
     return [{k: v for k, v in a.items() if k != "mail_password"} for a in agents.listing()]
 
 
@@ -1599,6 +1602,7 @@ def auth_status(request: Request):
         ws = {"id": sess["ws"], "name": w.get("name", "")}
     return {"needs_setup": False, "signup_open": directory.SIGNUPS_OPEN, "contact_email": os.getenv("CONTACT_EMAIL", "").strip(), "authenticated": bool(sess), "username": sess["username"] if sess else None,
             "role": sess["role"] if sess else None, "must_change": bool(sess and sess["must_change"]), "workspace": ws,
+            "name": people.display_name(sess) if sess else None, "title": (sess.get("title") or "") if sess else "",
             "platform": bool(sess and sess["ws"] == db.MAIN and sess["role"] == "owner")}
 
 
@@ -1928,9 +1932,10 @@ def admins_remove(aid: int, request: Request):
         raise HTTPException(400, "You can't remove yourself.")
     if not _can_manage(request, row):
         raise HTTPException(403, "Only the owner, or the person who added them, can do that.")
-    db.run("DELETE FROM sessions WHERE admin_id=?", (aid,))
-    db.run("DELETE FROM admins WHERE id=?", (aid,))
-    directory.remove_member(row["username"])
+    try:
+        people.remove(request.state.session, aid, keep_files=True)  # their project places are cleared and their files go to whoever removes them
+    except people.PeopleError as e:
+        raise HTTPException(400, str(e))
     auth.sec_log(f"'{row['username']}' was removed by '{request.state.session['username']}'", request.state.ip, request.state.ua)
     return {"ok": True}
 

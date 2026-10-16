@@ -59,9 +59,9 @@ def queue_campaign(campaign_id, limit=None):
 
 def _expire():
     t = db.now()
-    for c in db.q("SELECT id FROM calls WHERE status='ringing' AND ringing_at<?", (t - RING_TIMEOUT,)):
+    for c in db.q("SELECT id FROM calls WHERE status='ringing' AND ringing_at<? AND COALESCE(mode,'')!='whatsapp'", (t - RING_TIMEOUT,)):
         mark_missed(c["id"], "no_answer")
-    for c in db.q("SELECT id,answered_at,transcript FROM calls WHERE status='in_progress'"):
+    for c in db.q("SELECT id,answered_at,transcript FROM calls WHERE status='in_progress' AND COALESCE(mode,'')!='whatsapp'"):  # WhatsApp calls end themselves (wa_call.py)
         tr = db.jload(c["transcript"], [])
         last = (c["answered_at"] or t) + (tr[-1]["t"] if tr else 0)
         if t - last > (IDLE_TIMEOUT if tr else 150):  # no one ever spoke: the browser tab was closed or the connection failed
@@ -188,8 +188,11 @@ def system_prompt(call, contact, camp, realtime=False, external=None):
     data = {k: v for k, v in {
         "name": contact.get("name"), "status": contact.get("status"), "stage": contact.get("tags"), "notes": contact.get("notes"),
         "previous_outcome": contact.get("last_outcome"), **(contact.get("extra") or {})}.items() if v}
-    obj = (camp or {}).get("objective") or "Follow up with the customer and see how we can help."
+    obj = (call or {}).get("objective") or (camp or {}).get("objective") or "Follow up with the customer and see how we can help."
     extra = (camp or {}).get("instructions") or ""
+    if (call or {}).get("mode") == "whatsapp":
+        extra = ("THIS IS A WHATSAPP VOICE CALL. " + ("The customer called us, so open with a warm greeting such as 'Hello, thanks for calling, how can I help?' instead of 'Hi, is this ...?'. " if call.get("direction") == "in"
+                 else "The customer messaged us on WhatsApp and allowed this call; mention that naturally if it helps. ") + "Calls on WhatsApp are never recorded. Keep your usual short banter style. " + extra).strip()
     kb = knowledge.get_kb((camp or {}).get("kb_id")) or {}
     agent = profile.get("agent_name") or kb.get("agent_name") or AGENT_NAME
     _kbn = re.sub(r"^Website:\s*", "", kb.get("name") or "") or llm.company_name()

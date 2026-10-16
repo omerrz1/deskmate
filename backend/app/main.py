@@ -15,13 +15,15 @@ from typing import Any, Dict, List, Optional
 
 import asyncio
 
-from . import admin_agent, agent_tools, agents, alerts, apps_api, backups, browser_tools, bus, directory, templates, costs, scorecards, search, templates, secretbox, totp, keys, rules, setup_api, meeting_bot, auth, office, office_api, team, team_api, callengine, countries, crm, db, eleven_agents, importer, knowledge, llm, reports, schedule, security, voices
+from . import admin_agent, agent_tools, agents, alerts, apps_api, backups, browser_tools, bus, directory, templates, costs, scorecards, search, templates, secretbox, totp, keys, rules, setup_api, meeting_bot, auth, office, office_api, team, team_api, callengine, countries, crm, db, eleven_agents, importer, knowledge, llm, reports, schedule, security, voices, chats, chats_api, chat_hooks, wa_call
 
 app = FastAPI(title="Deskmates", docs_url=None, redoc_url=None, openapi_url=None)  # no public API docs
 app.add_middleware(security.Security)
 app.include_router(office_api.router)
 app.include_router(team_api.router)
 app.include_router(apps_api.router)
+app.include_router(chats_api.router)
+app.include_router(chat_hooks.router)
 app.include_router(setup_api.router)
 app.add_middleware(CORSMiddleware, allow_origins=sorted(security.ALLOWED_ORIGINS), allow_credentials=True,
                    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token"])
@@ -1769,7 +1771,7 @@ def _owner(request):
 
 class NewAdmin(BaseModel):
     username: str
-    password: str
+    password: str = ""
 
 
 # ---------- two-factor sign-in ----------
@@ -1855,16 +1857,34 @@ def twofa_reset(aid: int, request: Request):
 
 @app.get("/api/admins")
 def admins_list(request: Request):
-    rows = db.q("SELECT id,username,role,must_change,created_at,last_login FROM admins ORDER BY id")
+    rows = db.q("SELECT id,username,role,must_change,created_at,last_login,added_by,totp_on FROM admins ORDER BY id")
     last = {r["admin_id"]: r["m"] for r in db.q("SELECT admin_id, MAX(last_seen) m FROM sessions GROUP BY admin_id")}
     me = request.state.session["admin_id"]
-    return [dict(r) | {"last_seen": max(last.get(r["id"]) or 0, r["last_login"] or 0) or None, "you": r["id"] == me} for r in rows]
+    return [dict(r) | {"last_seen": max(last.get(r["id"]) or 0, r["last_login"] or 0) or None, "you": r["id"] == me, "can_manage": _can_manage(request, r)} for r in rows]
+
+
+MAX_USERS = int(os.getenv("MAX_USERS_PER_WORKSPACE", "25"))
+_PW_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+
+
+def _can_manage(request, row):
+    """The owner manages everyone (except themselves); an admin manages the people they added."""
+    s = request.state.session
+    if row["role"] == "owner" or row["id"] == s["admin_id"]:
+        return False
+    return s.get("role") == "owner" or (row.get("added_by") or "") == s["username"]
 
 
 @app.post("/api/admins")
 def admins_add(b: NewAdmin, request: Request):
-    _owner(request)
+    """Any admin of the company can add people who can then sign in to it."""
+    if db.q1("SELECT COUNT(*) n FROM admins")["n"] >= MAX_USERS:
+        raise HTTPException(400, f"A company can have up to {MAX_USERS} people who sign in.")
     username = b.username.strip()
+    generated = not b.password
+    if generated:
+        import secrets as _sec
+        b.password = "".join(_sec.choice(_PW_CHARS) for _ in range(16))
     if not re.fullmatch(r"[A-Za-z0-9._%+@-]{3,80}", username):
         raise HTTPException(400, "Use an email address, or 3-80 letters, numbers or . _ @ - + %")
     if db.q1("SELECT id FROM admins WHERE lower(username)=lower(?)", (username,)) or directory.find(username):
@@ -1872,10 +1892,10 @@ def admins_add(b: NewAdmin, request: Request):
     err = auth.check_policy(b.password, username)
     if err:
         raise HTTPException(400, err)
-    auth.create_admin(username, b.password, role="admin", must_change=True)
+    auth.create_admin(username, b.password, role="admin", must_change=True, added_by=request.state.session["username"])
     directory.add_member(username, db.current())
-    auth.sec_log(f"Admin '{username}' added by '{request.state.session['username']}'", request.state.ip, request.state.ua)
-    return {"ok": True}
+    auth.sec_log(f"'{username}' was added by '{request.state.session['username']}' and can now sign in", request.state.ip, request.state.ua)
+    return {"ok": True, "username": username, "temporary_password": b.password if generated else None}
 
 
 class AdminReset(BaseModel):
@@ -1884,29 +1904,33 @@ class AdminReset(BaseModel):
 
 @app.put("/api/admins/{aid}/password")
 def admins_reset(aid: int, b: AdminReset, request: Request):
-    _owner(request)
     row = db.q1("SELECT * FROM admins WHERE id=?", (aid,))
     if not row or row["role"] == "owner":
         raise HTTPException(404, "Not found")
+    if not _can_manage(request, row):
+        raise HTTPException(403, "Only the owner, or the person who added them, can do that.")
     err = auth.check_policy(b.password, row["username"])
     if err:
         raise HTTPException(400, err)
     auth.change_password(aid, b.password, must_change=True)
     db.run("DELETE FROM sessions WHERE admin_id=?", (aid,))
-    auth.sec_log(f"Password of '{row['username']}' reset by the owner", request.state.ip, request.state.ua)
+    auth.sec_log(f"Password of '{row['username']}' reset by '{request.state.session['username']}'", request.state.ip, request.state.ua)
     return {"ok": True}
 
 
 @app.delete("/api/admins/{aid}")
 def admins_remove(aid: int, request: Request):
-    _owner(request)
     row = db.q1("SELECT * FROM admins WHERE id=?", (aid,))
     if not row or row["role"] == "owner":
         raise HTTPException(400, "The owner can't be removed.")
+    if row["id"] == request.state.session["admin_id"]:
+        raise HTTPException(400, "You can't remove yourself.")
+    if not _can_manage(request, row):
+        raise HTTPException(403, "Only the owner, or the person who added them, can do that.")
     db.run("DELETE FROM sessions WHERE admin_id=?", (aid,))
     db.run("DELETE FROM admins WHERE id=?", (aid,))
     directory.remove_member(row["username"])
-    auth.sec_log(f"Admin '{row['username']}' removed", request.state.ip, request.state.ua)
+    auth.sec_log(f"'{row['username']}' was removed by '{request.state.session['username']}'", request.state.ip, request.state.ua)
     return {"ok": True}
 
 

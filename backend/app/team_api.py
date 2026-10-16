@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from . import agents, app_requests, capabilities, connectors, db, discuss, files, live_help, llm, office, schedule, team, training, voices
+from . import agents, app_requests, capabilities, chats, connectors, db, discuss, files, live_help, llm, office, schedule, team, training, voices
 
 router = APIRouter(prefix="/api")
 
@@ -257,7 +257,8 @@ def attention():
                    WHERE r.status IN ('pending','scheduled') ORDER BY (r.urgency='urgent') DESC, COALESCE(r.scheduled_at, r.created_at)""")
     return {
         "meetings": [dict(r) | {"due_soon": bool(r["scheduled_at"] and r["scheduled_at"] - now < 3600)} for r in reqs],
-        "approvals": db.q1("SELECT COUNT(*) n FROM emails WHERE status='pending_approval'")["n"] + db.q1("SELECT COUNT(*) n FROM outbox WHERE status='pending_approval'")["n"],
+        "approvals": db.q1("SELECT COUNT(*) n FROM emails WHERE status='pending_approval'")["n"] + db.q1("SELECT COUNT(*) n FROM outbox WHERE status='pending_approval'")["n"] + chats.counts()["approvals"],
+        "chats_unread": chats.counts()["unread"],
         "unread": db.q1("SELECT COUNT(*) n FROM emails WHERE agent_id=0 AND folder='inbox' AND status='unread'")["n"],
         "connectors_to_review": db.q1("SELECT COUNT(*) n FROM connectors WHERE added_by LIKE '%(manager)' AND checked_at>?", (now - 86400 * 2,))["n"],
         "live_questions": len(live_help.listing("open")),

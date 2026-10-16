@@ -20,7 +20,7 @@ SETUP_TOKEN_FILE = db.DATA_DIR / "SETUP_TOKEN"
 
 db.run("""CREATE TABLE IF NOT EXISTS admins(
   id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password_hash TEXT, created_at REAL, password_changed_at REAL)""")
-for _stmt in ("ALTER TABLE admins ADD COLUMN role TEXT DEFAULT 'admin'", "ALTER TABLE admins ADD COLUMN must_change INTEGER DEFAULT 0", "ALTER TABLE admins ADD COLUMN last_login REAL",
+for _stmt in ("ALTER TABLE admins ADD COLUMN role TEXT DEFAULT 'admin'", "ALTER TABLE admins ADD COLUMN must_change INTEGER DEFAULT 0", "ALTER TABLE admins ADD COLUMN last_login REAL", "ALTER TABLE admins ADD COLUMN added_by TEXT DEFAULT ''",
               "ALTER TABLE admins ADD COLUMN totp_secret TEXT DEFAULT ''", "ALTER TABLE admins ADD COLUMN totp_on INTEGER DEFAULT 0", "ALTER TABLE admins ADD COLUMN totp_last INTEGER DEFAULT 0", "ALTER TABLE admins ADD COLUMN backup_codes TEXT DEFAULT '[]'"):
     try:
         db.run(_stmt)
@@ -100,10 +100,10 @@ def check_setup_token(token):
     return hmac.compare_digest(SETUP_TOKEN_FILE.read_text().strip().encode(), (token or "").strip().encode())
 
 
-def create_admin(username, password, role=None, must_change=False):
+def create_admin(username, password, role=None, must_change=False, added_by=""):
     role = role or ("owner" if admin_count() == 0 else "admin")
-    db.run("INSERT INTO admins(username,password_hash,created_at,password_changed_at,role,must_change) VALUES(?,?,?,?,?,?)",
-           (username.strip(), hash_password(password), db.now(), db.now(), role, 1 if must_change else 0))
+    db.run("INSERT INTO admins(username,password_hash,created_at,password_changed_at,role,must_change,added_by) VALUES(?,?,?,?,?,?,?)",
+           (username.strip(), hash_password(password), db.now(), db.now(), role, 1 if must_change else 0, added_by))
     if SETUP_TOKEN_FILE.exists():
         SETUP_TOKEN_FILE.unlink()
 

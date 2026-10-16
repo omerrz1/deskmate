@@ -66,29 +66,6 @@ _ADF = lambda var: {"type": "doc", "version": 1, "content": [{"type": "paragraph
 
 APPS = [
     # ---------------- messaging ----------------
-    app("twilio", "Twilio (SMS and WhatsApp)", "Messaging", "💬", "Send text messages and WhatsApp messages to customers, and read recent ones.",
-        [F("account_sid", "Account SID", "Starts with AC. Twilio Console → Account info.", validate=r"AC[0-9a-fA-F]{32}"),
-         F("auth_token", "Auth token", "Twilio Console → Account info.", secret=True),
-         F("from_number", "Your Twilio phone number", "In international format, e.g. +14155550123.", validate=r"\+[1-9]\d{6,14}"),
-         F("whatsapp_from", "WhatsApp sender number (optional)", "Your approved WhatsApp number or the Twilio sandbox number, e.g. +14155238886.", required=False)],
-        {"type": "basic", "user": "{cfg.account_sid}", "pass": "{cfg.auth_token}"}, "https://api.twilio.com/2010-04-01/Accounts/{cfg.account_sid}",
-        [T("send_sms", "Send a text message.", {"to": P("Phone number in international format"), "body": P("Message text")}, ["to", "body"], True,
-           method="POST", path="/Messages.json", encoding="form", body={"From": "{cfg.from_number}", "To": "{to}", "Body": "{body}"}, pick="sid"),
-         T("send_whatsapp", "Send a WhatsApp message.", {"to": P("Phone number in international format"), "body": P("Message text")}, ["to", "body"], True,
-           method="POST", path="/Messages.json", encoding="form", body={"From": "whatsapp:{cfg.whatsapp_from}", "To": "whatsapp:{to}", "Body": "{body}"}, pick="sid"),
-         T("list_messages", "List recent messages.", {"to": P("Only messages to this number (optional)"), "limit": P("How many (max 50)", "integer")}, [],
-           method="GET", path="/Messages.json", query={"PageSize": "{limit}", "To": "{to}"}, pick={"path": "messages[]", "fields": ["to", "from", "body", "status", "date_sent"]})],
-        test={"method": "GET", "path": ".json"}, help="Find your Account SID and Auth token on the Twilio Console home page."),
-    app("whatsapp_cloud", "WhatsApp Business (Meta)", "Messaging", "🟢", "Send WhatsApp messages through Meta's WhatsApp Business Cloud API.",
-        [F("access_token", "Access token", "A permanent token from a System User in Meta Business settings.", secret=True),
-         F("phone_number_id", "Phone number ID", "Meta for Developers → WhatsApp → API setup.", validate=r"\d{6,20}"),
-         F("api_version", "API version", "Use a current Graph API version.", default="v23.0", required=False)],
-        {"type": "bearer", "field": "access_token"}, "https://graph.facebook.com/{cfg.api_version}/{cfg.phone_number_id}",
-        [T("send_text", "Send a WhatsApp text (only works within 24 hours of the customer's last message).", {"to": P("Number, international format without +"), "text": P("Message")}, ["to", "text"], True,
-           method="POST", path="/messages", body={"messaging_product": "whatsapp", "to": "{to}", "type": "text", "text": {"body": "{text}"}}),
-         T("send_template", "Send an approved message template (needed to start a conversation).", {"to": P("Number, international format without +"), "template": P("Template name"), "language": P("Language code, e.g. en_US")}, ["to", "template", "language"], True,
-           method="POST", path="/messages", body={"messaging_product": "whatsapp", "to": "{to}", "type": "template", "template": {"name": "{template}", "language": {"code": "{language}"}}})],
-        test={"method": "GET", "path": ""}),
     app("slack", "Slack", "Messaging", "🟣", "Post messages to Slack channels and read recent ones.",
         [F("token", "Bot token", "Starts with xoxb-. Create a Slack app, add chat:write, channels:read and channels:history, install it, copy the Bot User OAuth Token.", secret=True)],
         {"type": "bearer", "field": "token"}, "https://slack.com/api",
@@ -96,12 +73,6 @@ APPS = [
          T("list_channels", "List public channels.", {}, [], method="GET", path="/conversations.list", query={"limit": "100", "types": "public_channel"}, pick={"path": "channels[]", "fields": ["id", "name"]}),
          T("read_channel", "Read the latest messages in a channel (by channel ID).", {"channel_id": P("Channel ID"), "limit": P("How many", "integer")}, ["channel_id"], method="GET", path="/conversations.history", query={"channel": "{channel_id}", "limit": "{limit}"}, pick={"path": "messages[]", "fields": ["user", "text", "ts"]})],
         test={"method": "POST", "path": "/auth.test"}),
-    app("telegram", "Telegram", "Messaging", "✈️", "Send messages through a Telegram bot.",
-        [F("token", "Bot token", "Talk to @BotFather on Telegram, create a bot, copy the token.", secret=True)],
-        {"type": "none"}, "https://api.telegram.org/bot{cfg.token}",
-        [T("send_message", "Send a message to a chat.", {"chat_id": P("Chat ID"), "text": P("Message")}, ["chat_id", "text"], True, method="POST", path="/sendMessage", body={"chat_id": "{chat_id}", "text": "{text}"}),
-         T("get_updates", "See recent messages sent to the bot.", {}, [], method="GET", path="/getUpdates", pick="result")],
-        test={"method": "GET", "path": "/getMe"}),
     app("discord", "Discord (webhook)", "Messaging", "🎮", "Post messages into a Discord channel.",
         [F("url", "Webhook URL", "Channel settings → Integrations → Webhooks → Copy URL.", secret=True, validate=r"https://(canary\.|ptb\.)?(discord|discordapp)\.com/api/webhooks/.+")],
         {"type": "none"}, "{cfg.url}", [T("post_message", "Post a message.", {"text": P("Message")}, ["text"], True, method="POST", path="", body={"content": "{text}"})]),
@@ -400,9 +371,9 @@ APPS = [
 
 
 # the extended catalogue lives in separate files to keep each one readable
-from . import catalog_more, catalog_more2, catalog_more3, catalog_more4, catalog_more5  # noqa: E402
+from . import catalog_more, catalog_more2, catalog_more3, catalog_more4, catalog_more5, catalog_social  # noqa: E402
 
-APPS.extend(catalog_more.APPS + catalog_more2.APPS + catalog_more3.APPS + catalog_more4.APPS + catalog_more5.APPS)
+APPS.extend(catalog_social.APPS + catalog_more.APPS + catalog_more2.APPS + catalog_more3.APPS + catalog_more4.APPS + catalog_more5.APPS)
 
 # the ones most teams reach for first: shown at the top of Add an app
 _POPULAR = {"google_calendar", "google_sheets", "google_drive", "slack", "stripe", "hubspot", "notion", "github", "shopify", "zoom", "twilio", "jira", "trello", "airtable", "mailchimp",
@@ -452,7 +423,7 @@ def lint():
                 if m not in keys:
                     bad.append(f"{a['id']}.{tn}: unknown setting {m}")
             if t.get("name"):
-                params = set(t.get("params", {}))
+                params = set(t.get("params", {})) | set(t.get("derived", []))
                 for m in re.findall(r"\{\+?([A-Za-z0-9_]+)\}", blob):
                     if m not in params and m not in ("now", "uuid") and not re.match(r"^s\d+$", m) and m != "cfg":
                         bad.append(f"{a['id']}.{tn}: input {m} is not declared")

@@ -15,10 +15,11 @@ import Backups from './settings/Backups'
 import Notifications from './settings/Notifications'
 import Safety from './settings/Safety'
 import Spend from './settings/Spend'
+import ChatsSettings from './settings/ChatsSettings'
 
 const GROUPS = [
   ['Workspace', [['company', 'Company'], ['connections', 'Connections'], ['email', 'Email'], ['files', 'Files']]],
-  ['Work', [['calling', 'Calling'], ['costs', 'Limits and spend'], ['browser', 'Browser']]],
+  ['Work', [['calling', 'Calling'], ['chats', 'Chats and WhatsApp'], ['costs', 'Limits and spend'], ['browser', 'Browser']]],
   ['Safety', [['safety', 'Email rules'], ['audit', 'Audit log'], ['backups', 'Backups'], ['account', 'Account and sign-in']]],
   ['Alerts', [['notifications', 'Notifications']]],
 ]
@@ -45,6 +46,7 @@ export default function SettingsHub() {
           {tab === 'company' && <><CompanyForm /><DangerZone /><CloseWorkspace /></>}
           {tab === 'connections' && <Connections />}
           {tab === 'calling' && <Calling />}
+          {tab === 'chats' && <ChatsSettings />}
           {tab === 'email' && <MailSettings />}
           {tab === 'costs' && <><Spend /><WorkLimits /><Costs /></>}
           {tab === 'safety' && <Safety />}

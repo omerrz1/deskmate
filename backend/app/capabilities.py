@@ -26,6 +26,8 @@ GROUPS = [
     ("video", "Real video meetings", "Join real Google Meet, Zoom or Teams meetings as a participant, listen, take notes and speak when spoken to (needs the meeting bot connected).",
      ["join_video_meeting", "say_in_video_meeting", "leave_video_meeting", "video_meeting_notes"]),
     ("messaging", "Texts and WhatsApp", "Send text and WhatsApp messages to customers (needs a messaging app connected).", ["send_sms", "send_whatsapp"]),
+    ("chats", "Customer chats and WhatsApp calls", "Answer customers who write on WhatsApp, Instagram, Messenger, text or Telegram, ask permission to call them on WhatsApp, and call them (needs the messaging apps connected).",
+     ["list_chats", "read_chat", "reply_chat", "close_chat", "ask_call_permission", "call_on_whatsapp"]),
     ("data", "Data and analysis", "Calculate, summarise and query spreadsheets, make charts, and turn a sheet into customers.", ["calculate", "sheet_summary", "sheet_query", "sheet_to_customers", "make_chart"]),
 ]
 MANAGER = ("platform", "Run the platform", "Manager powers: manage the team, set tasks, change settings, add connectors and approve emails, like the admin, and report back.",

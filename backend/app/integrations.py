@@ -270,6 +270,13 @@ async def execute(inst, tool, args):
     for req in tool.get("required", []):
         if ctx["args"].get(req) in (None, ""):
             raise AppError(f"Missing: {req}")
+    if tool.get("prepare"):  # build arrays and objects (buttons, template parameters) from the simple inputs the model gives
+        try:
+            ctx["args"] = tool["prepare"](dict(ctx["args"]))
+        except ValueError as e:
+            raise AppError(str(e))
+        except Exception:
+            raise AppError("Those inputs don't look right.")
     if spec.get("dynamic_url"):
         from . import connectors
         try:

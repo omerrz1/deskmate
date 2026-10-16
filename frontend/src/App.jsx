@@ -21,6 +21,7 @@ const Project = lazy(() => import('./pages/Project'))
 const Scorecards = lazy(() => import('./pages/Scorecards'))
 const Templates = lazy(() => import('./pages/Templates'))
 const Inbox = lazy(() => import('./pages/Inbox'))
+const Chats = lazy(() => import('./pages/Chats'))
 const SettingsHub = lazy(() => import('./pages/SettingsHub'))
 const Meeting = lazy(() => import('./pages/Meeting'))
 const MockPhone = lazy(() => import('./pages/MockPhone'))
@@ -33,7 +34,7 @@ const Activity = lazy(() => import('./pages/Activity'))
 const Knowledge = lazy(() => import('./pages/Knowledge'))
 
 const LEGACY = ['/data', '/campaigns', '/calls', '/clients', '/knowledge', '/overview', '/activity']
-const TITLES = { '/': 'Team', '/performance': 'Performance', '/templates': 'Templates', '/projects': 'Projects', '/apps': 'Apps', '/inbox': 'Inbox', '/settings': 'Settings' }
+const TITLES = { '/': 'Team', '/performance': 'Performance', '/templates': 'Templates', '/projects': 'Projects', '/apps': 'Apps', '/inbox': 'Inbox', '/chats': 'Chats', '/settings': 'Settings' }
 
 class Boundary extends Component {
   state = { err: null }
@@ -98,6 +99,7 @@ function Shell() {
           {link('/', 'users', 'Team')}
           {link('/projects', 'projects', 'Projects')}
           {link('/inbox', 'inbox', 'Inbox', badge)}
+          {link('/chats', 'chat', 'Chats', att ? att.chats_unread || 0 : 0)}
           {link('/apps', 'apps', 'Apps')}
           {link('/settings', 'sliders', 'Settings')}
         </nav>
@@ -140,6 +142,7 @@ function Shell() {
             <Route path="/projects/:id" element={<Project />} />
             <Route path="/apps" element={<Apps />} />
             <Route path="/inbox" element={<Inbox />} />
+            <Route path="/chats" element={<Chats />} />
             <Route path="/settings" element={<SettingsHub />} />
             <Route path="/settings/connectors" element={<Navigate to={`/apps${loc.search}`} replace />} />
             <Route path="/settings/:tab" element={<SettingsHub />} />

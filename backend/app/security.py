@@ -13,7 +13,7 @@ ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("ALLOWED_ORIGINS", "
 TRUST_PROXY = os.getenv("TRUSTED_PROXY", "false").lower() == "true"
 MAX_BODY = int(os.getenv("MAX_BODY_MB", "60")) * 1024 * 1024
 EXPENSIVE = ("/api/tts", "/api/chat", "/api/transcribe", "/api/knowledge", "/api/kb/", "/api/datasets", "/api/voices/search", "/api/demo/website", "/api/meetings", "/api/agents", "/api/trainings", "/api/connectors", "/api/apps")
-LIMITS = {"login": (10, 60), "signup": (5, 3600), "contact": (5, 3600), "expensive": (60, 60), "default": (900, 60), "hook": (120, 60)}  # (requests, per seconds)
+LIMITS = {"login": (10, 60), "signup": (5, 3600), "contact": (5, 3600), "expensive": (60, 60), "default": (900, 60), "hook": (120, 60), "chathook": (900, 60)}  # (requests, per seconds)
 _hits = defaultdict(deque)
 
 
@@ -72,7 +72,7 @@ class Security:
             except ValueError:
                 return await deny(400, "Bad request.")
             # cross-site request protection for anything that changes state
-            if method not in SAFE and not path.startswith("/api/hooks/in/"):
+            if method not in SAFE and not path.startswith(("/api/hooks/in/", "/api/hooks/chat/")):
                 origin = headers.get("origin", "").rstrip("/")
                 if origin and origin not in ALLOWED_ORIGINS:
                     return await deny(403, "Cross-site request blocked.")
@@ -85,6 +85,16 @@ class Security:
                 if not keys.complete():
                     return await deny(428, "This workspace has not connected its AI keys yet.")
                 ok, wait = _allow(ip, "hook")
+                if not ok:
+                    return await deny(429, "Too many requests.", [(b"retry-after", str(wait).encode())])
+            elif path.startswith("/api/hooks/chat/"):  # customers' messages and WhatsApp calls: the secret in the address is the key; the company is named in it
+                ws = path[len("/api/hooks/chat/"):].split("/")[0]
+                if not (ws == db.MAIN or directory.ID_RE.match(ws)) or not directory.is_active(ws):
+                    return await deny(404, "Not found.")
+                db.set_current(ws)
+                if not keys.complete():
+                    return await deny(428, "This workspace has not connected its AI keys yet.")
+                ok, wait = _allow(ip, "chathook")
                 if not ok:
                     return await deny(429, "Too many requests.", [(b"retry-after", str(wait).encode())])
             elif path == "/api/auth/signup":

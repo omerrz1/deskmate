@@ -6,7 +6,7 @@ import { AppIcon } from './ui'
 import { useToast } from './Feedback'
 
 const PAGES = [
-  ['Team', '/', 'users'], ['Performance (scorecards)', '/performance', 'activity'], ['Templates (teams, projects, playbooks)', '/templates', 'copy'], ['Projects', '/projects', 'projects'], ['Inbox', '/inbox', 'inbox'], ['Apps', '/apps', 'apps'], ['Settings', '/settings', 'sliders'],
+  ['Team', '/', 'users'], ['Performance (scorecards)', '/performance', 'activity'], ['Templates (teams, projects, playbooks)', '/templates', 'copy'], ['Projects', '/projects', 'projects'], ['Inbox', '/inbox', 'inbox'], ['Chats (WhatsApp, Instagram, Messenger)', '/chats', 'chat'], ['Chat and WhatsApp call settings', '/settings/chats', 'sliders'], ['Apps', '/apps', 'apps'], ['Settings', '/settings', 'sliders'],
   ['Settings: Company', '/settings/company', 'sliders'], ['Settings: Calling', '/settings/calling', 'phone'], ['Settings: Email', '/settings/email', 'mail'],
   ['Settings: Limits and AI costs', '/settings/costs', 'sliders'], ['Settings: Files', '/settings/files', 'folder'], ['Settings: Account and team admins', '/settings/account', 'users'],
 ]

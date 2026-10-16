@@ -72,6 +72,12 @@ async def _dispatch(row):
     ok = "error" not in res
     db.update("outbox", row["id"], status="sent" if ok else "failed", error="" if ok else str(res["error"])[:300], provider=key, sent_at=db.now() if ok else None)
     db.log("agent", f"{row['channel'].upper()} {'sent' if ok else 'FAILED'} to {row['to_addr']}")
+    if ok:
+        try:  # keep it in the person's chat, so their reply continues the same conversation
+            from . import agents, chats
+            chats.record_outbound(key, row["channel"], row["to_addr"], row["body"], agents.get(row["agent_id"]) if row["agent_id"] else None)
+        except Exception:
+            pass
     return ok
 
 

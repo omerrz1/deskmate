@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api'
 import Avatar from '../Avatar'
 import Icon from '../Icon'
+import APPS from './apps.json'  // counts, categories and logos; made by backend/scripts/export_site_apps.py
 
 /* ---------- shared pieces ---------- */
 
@@ -127,6 +128,47 @@ const DESK_POINTS = [
   ['lock', 'Nothing hidden', 'You can open any employee’s computer at any time and check what was done, and why.'],
 ]
 
+
+const shortName = (n) => n.replace(/\s*\(.*?\)\s*/g, ' ').trim()
+
+/** One scrolling line of app logos. The list is repeated once so the loop has no gap. */
+function LogoRow({ items, reverse, seconds }) {
+  const tile = (l, k) => <span className="s-logo" key={k} title={shortName(l.name)}><img src={`/connector-icons/${l.id}.svg`} alt="" width="32" height="32" loading="lazy" decoding="async" /></span>
+  return (
+    <div className="s-marq">
+      <div className={`s-track ${reverse ? 'rev' : ''}`} style={{ '--dur': `${seconds}s` }}>
+        {items.map((l) => tile(l, l.id))}
+        <span className="s-dupe">{items.map((l) => tile(l, `d-${l.id}`))}</span>
+      </div>
+    </div>
+  )
+}
+
+function AppsSection() {
+  const rows = [[], [], []]
+  APPS.logos.forEach((l, i) => rows[i % 3].push(l))
+  return (
+    <section className="s-sec s-apps"><div className="s-wrap">
+      <Head eyebrow="Connected apps" title="200+ apps, ready to connect." sub="Your team works inside the tools you already use: CRMs, support desks, payments, calendars, chat and more. Add an app with a key or a sign-in, and switch it on or off whenever you like." center />
+      <ul className="s-stats">
+        <li><b>{APPS.connectable}</b><span>apps to connect</span></li>
+        <li><b>{APPS.builtin}</b><span>built-in tools, no setup</span></li>
+        <li><b>{APPS.categories.length}</b><span>categories</span></li>
+      </ul>
+    </div>
+    <div className="s-wall" aria-hidden="true">
+      {rows.map((r, i) => <LogoRow key={i} items={r} reverse={i === 1} seconds={[95, 80, 105][i]} />)}
+    </div>
+    <div className="s-wrap">
+      <ul className="s-cats" aria-label="App categories">
+        {APPS.categories.map((c) => <li key={c.name}>{c.name}<i>{c.count}</i><span className="s-sr">, {c.count} apps, including {c.examples.join(', ')}</span></li>)}
+      </ul>
+      <p className="s-apps-note">And anything else through webhooks, MCP servers or a custom API. <Link to="/product">See what your team can do with them <Icon name="arrow" size={14} /></Link></p>
+      <p className="s-fine">Logos are trademarks of their respective owners, shown only to identify the service each app connects to.</p>
+    </div></section>
+  )
+}
+
 const DOES = [
   ['mail', 'Email', 'Each employee has their own mailbox. They read, reply and follow up, and anything sensitive can wait for your approval first.'],
   ['phone', 'Voice conversations', 'Natural, short calls on behalf of your company. They say who is calling, never claim to be human, and calls are never recorded.'],
@@ -203,6 +245,8 @@ export function Home({ st }) {
         </div>
         <p className="s-more"><Link to="/product">Explore everything it can do <Icon name="arrow" size={15} /></Link></p>
       </div></section>
+
+      <AppsSection />
 
       <section className="s-sec s-alt"><div className="s-wrap">
         <Head eyebrow="How it works" title="Up and running in three steps." center />

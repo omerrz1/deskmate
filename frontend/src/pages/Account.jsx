@@ -84,37 +84,46 @@ export default function Account({ embedded = false }) {
   )
 }
 
+const PW_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+const makePassword = () => { const a = new Uint32Array(16); crypto.getRandomValues(a); return Array.from(a, (n) => PW_CHARS[n % PW_CHARS.length]).join('') }
+
 function Admins({ isOwner }) {
   const confirm = useConfirm()
+  const auth = useAuth()
   const [list, reload] = usePoll('/admins', 0)
-  const [f, setF] = useState({ username: '', password: '' })
+  const [f, setF] = useState({ username: '', password: makePassword() })
   const [msg, setMsg] = useState({ ok: '', err: '' })
+  const [made, setMade] = useState(null)  // the person just added, with the temporary password to hand over
+  const [copied, setCopied] = useState(false)
   const [reset, setReset] = useState(null)  // { id, password }
   const note = (ok, err = '') => setMsg({ ok, err })
   const add = async (e) => {
-    e.preventDefault(); note('')
-    try { await api.post('/admins', f); note(`${f.username} can sign in now. They will be asked to choose their own password.`); setF({ username: '', password: '' }); reload() } catch (x) { note('', x.message) }
+    e.preventDefault(); note(''); setMade(null)
+    try { const r = await api.post('/admins', f); setMade({ username: r.username, password: f.password }); setF({ username: '', password: makePassword() }); setCopied(false); reload() } catch (x) { note('', x.message) }
   }
   const doReset = async () => {
     note('')
-    try { await api.put(`/admins/${reset.id}/password`, { password: reset.password }); note('Temporary password set. They were signed out and must choose a new one.'); setReset(null); reload() } catch (x) { note('', x.message) }
+    try { await api.put(`/admins/${reset.id}/password`, { password: reset.password }); setMade({ username: reset.name, password: reset.password, reset: true }); setCopied(false); setReset(null); reload() } catch (x) { note('', x.message) }
   }
   const remove = async (a) => {
-    if (!(await confirm({ title: `Remove ${a.username}?`, body: 'They are signed out straight away.', confirm: 'Remove', danger: true }))) return
+    if (!(await confirm({ title: `Remove ${a.username}?`, body: 'They are signed out straight away and can no longer sign in to the company.', confirm: 'Remove', danger: true }))) return
     note(''); try { await api.del(`/admins/${a.id}`); reload() } catch (x) { note('', x.message) }
   }
+  const company = auth.workspace?.name || 'the company'
+  const invite = made ? `You have been added to ${company} on Deskmates.\nSign in at ${window.location.origin}\nEmail or username: ${made.username}\nTemporary password: ${made.password}\nYou will choose your own password the first time you sign in.` : ''
+  const copy = async () => { try { await navigator.clipboard.writeText(invite); setCopied(true) } catch { setCopied(false) } }
   return (
-    <Panel title="Admins" pad={false}>
+    <Panel title="People who can sign in" pad={false}>
       <div className="panel-b">
-        <p className="muted small">Everyone here can run the whole company: your team, projects, connected apps and settings. Only the owner can add or remove admins, or delete the company.</p>
+        <p className="muted small">Add the people who work with you. They sign in with the email or username you give them and choose their own password the first time. Everyone here can run the whole company: your team, projects, connected apps and settings. {isOwner ? 'As the owner you can also reset or remove anyone, and delete the company.' : 'You can reset or remove the people you add; the owner can manage everyone.'}</p>
       </div>
       <table className="tbl"><tbody>
         {(list || []).map((a) => (
           <tr key={a.id} style={{ cursor: 'default' }}>
-            <td className="strong">{a.username} {a.role === 'owner' && <Badge kind="good">owner</Badge>} {a.you && <Badge>you</Badge>}{a.must_change ? <small>has not chosen a password yet</small> : <small>{a.last_seen ? `last active ${clock(a.last_seen)}` : 'never signed in'}</small>}</td>
+            <td className="strong">{a.username} {a.role === 'owner' && <Badge kind="good">owner</Badge>} {a.you && <Badge>you</Badge>}{a.must_change ? <small>has not signed in yet</small> : <small>{a.last_seen ? `last active ${clock(a.last_seen)}` : 'never signed in'}{a.added_by ? ` · added by ${a.added_by}` : ''}{a.totp_on ? ' · two-factor on' : ''}</small>}</td>
             <td className="num">
-              {isOwner && a.role !== 'owner' && <>
-                <button className="link" onClick={() => setReset({ id: a.id, name: a.username, password: '' })}>Reset password</button>{' · '}
+              {a.can_manage && <>
+                <button className="link" onClick={() => setReset({ id: a.id, name: a.username, password: makePassword() })}>Reset password</button>{' · '}
                 <button className="link" onClick={() => remove(a)}>Remove</button>
               </>}
             </td>
@@ -123,19 +132,25 @@ function Admins({ isOwner }) {
       </tbody></table>
       {reset && (
         <div className="panel-b form">
-          <label>Temporary password for {reset.name} <span className="faint">(12+ characters; they choose their own at next sign-in)</span><input type="text" autoComplete="off" value={reset.password} onChange={(e) => setReset({ ...reset, password: e.target.value })} /></label>
+          <label>New temporary password for {reset.name} <span className="faint">(12+ characters; they choose their own at next sign-in)</span><input type="text" autoComplete="off" value={reset.password} onChange={(e) => setReset({ ...reset, password: e.target.value })} /></label>
           <div className="actions"><button className="btn solid" disabled={reset.password.length < 12} onClick={doReset}>Set temporary password</button><button className="btn" onClick={() => setReset(null)}>Cancel</button></div>
         </div>
       )}
-      {isOwner && (
-        <form className="panel-b form" onSubmit={add}>
-          <h4 style={{ margin: 0 }}>Add an admin</h4>
-          <label>Username<input autoComplete="off" value={f.username} onChange={(e) => setF({ ...f, username: e.target.value })} placeholder="e.g. sam" /></label>
-          <label>Temporary password <span className="faint">(12+ characters; tell them in person, they change it at first sign-in)</span><input type="text" autoComplete="off" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} /></label>
-          <div className="actions"><button className="btn solid" disabled={f.username.trim().length < 3 || f.password.length < 12}>Add admin</button></div>
-        </form>
+      <form className="panel-b form" onSubmit={add}>
+        <h4 style={{ margin: 0 }}>Add a person</h4>
+        <label>Email or username<input autoComplete="off" value={f.username} onChange={(e) => setF({ ...f, username: e.target.value })} placeholder="e.g. sam@yourcompany.com" /></label>
+        <label>Temporary password <span className="faint">(made for you; they change it when they first sign in)</span>
+          <span style={{ display: 'flex', gap: 8 }}><input type="text" autoComplete="off" style={{ flex: 1 }} value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} /><button type="button" className="btn" onClick={() => setF({ ...f, password: makePassword() })}>Make another</button></span></label>
+        <div className="actions"><button className="btn solid" disabled={f.username.trim().length < 3 || f.password.length < 12}>Add person</button></div>
+      </form>
+      {made && (
+        <div className="panel-b">
+          <p className="ok" style={{ marginTop: 0 }}>{made.reset ? `A new temporary password is set for ${made.username}.` : `${made.username} can sign in now.`} Send them this. The password is shown only now.</p>
+          <pre className="docview" style={{ whiteSpace: 'pre-wrap' }}>{invite}</pre>
+          <div className="actions"><button className="btn" onClick={copy}>{copied ? 'Copied' : 'Copy message'}</button><button className="btn" onClick={() => setMade(null)}>Done</button></div>
+        </div>
       )}
-      {(msg.err || msg.ok) && <div className="panel-b">{msg.err && <p className="warn">{msg.err}</p>}{msg.ok && <p className="ok">{msg.ok}</p>}</div>}
+      {msg.err && <div className="panel-b"><p className="warn">{msg.err}</p></div>}
     </Panel>
   )
 }

@@ -57,6 +57,9 @@
 .pp-copy input { width: 100%; font-family: var(--mono); font-size: 12.5px; }
 .pp-copy pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 13px/1.55 var(--sans); background: var(--soft); border-radius: 10px; padding: 12px 14px; max-height: 190px; overflow: auto; }
 
+/* ----- a soft note on the sign-in pages ----- */
+.notice-soft { background: var(--soft); border-radius: 10px; padding: 11px 13px; font-size: 13px; line-height: 1.45; color: var(--text2); } .notice-soft b { color: var(--text); display: block; margin-bottom: 2px; } .notice-soft a { color: var(--accent-text); text-decoration: underline; }
+
 /* ----- joining ----- */
 .join-role { display: flex; gap: 14px; align-items: center; background: var(--soft); border-radius: 12px; padding: 14px 16px; margin: 4px 0 16px; }
 .join-role b { font-size: 14.5px; } .join-role p { color: var(--text2); font-size: 13px; line-height: 1.45; margin-top: 2px; }

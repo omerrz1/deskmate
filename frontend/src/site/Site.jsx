@@ -41,7 +41,7 @@ function Header({ st }) {
   }, [open])
   const next = theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system'
   const signedIn = !!st?.authenticated
-  const canSignup = st ? st.signup_open !== false : true
+  const canSignup = st ? (st.signup_public ?? st.signup_open) !== false : true  // public sign-up buttons are hidden while a team access code is needed
   return (
     <header className="s-head">
       <div className="s-wrap s-head-in">
@@ -76,7 +76,7 @@ function Footer({ st }) {
           <nav aria-label="Product"><h2>Product</h2><Link to="/product">What it does</Link><Link to="/security">Security</Link></nav>
           <nav aria-label="Company"><h2>Company</h2><Link to="/about">About</Link><Link to="/contact">Contact</Link></nav>
           <nav aria-label="Legal"><h2>Legal</h2><Link to="/privacy">Privacy</Link><Link to="/terms">Terms</Link></nav>
-          <nav aria-label="Account"><h2>Account</h2>{signedIn ? <Link to="/">Open your workspace</Link> : <><Link to="/signin">Sign in</Link>{st?.signup_open !== false && <Link to="/signup">Create workspace</Link>}</>}</nav>
+          <nav aria-label="Account"><h2>Account</h2>{signedIn ? <Link to="/">Open your workspace</Link> : <><Link to="/signin">Sign in</Link>{(st?.signup_public ?? st?.signup_open) !== false && <Link to="/signup">Create workspace</Link>}</>}</nav>
         </div>
         <p className="s-copy">© {new Date().getFullYear()} Deskmates. Calls are never recorded.</p>
       </div>

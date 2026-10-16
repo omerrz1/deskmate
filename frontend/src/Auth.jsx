@@ -59,8 +59,8 @@ function Login({ onDone, notice, onSignup }) {
 
 const TEAMS = [['', 'No team yet, I will add people myself'], ['starter', 'A starter trio: manager, caller and assistant'], ['sales', 'Sales team'], ['support', 'Customer support'], ['backoffice', 'Back office'], ['marketing', 'Marketing team'], ['recruiting', 'Recruiting team']]
 
-function Signup({ onDone, onBack }) {
-  const [f, setF] = useState({ company: '', email: '', password: '', again: '', team: 'starter' })
+function Signup({ onDone, onBack, codeRequired = false }) {
+  const [f, setF] = useState({ company: '', email: '', password: '', again: '', team: 'starter', code: '' })
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value })
@@ -68,19 +68,21 @@ function Signup({ onDone, onBack }) {
     e.preventDefault(); setErr('')
     if (f.password !== f.again) return setErr('The two passwords do not match.')
     setBusy(true)
-    try { await api.post('/auth/signup', { company: f.company, email: f.email, password: f.password, team: f.team }); onDone() } catch (x) { setErr(x.message) }
+    try { await api.post('/auth/signup', { company: f.company, email: f.email, password: f.password, team: f.team, code: f.code }); onDone() } catch (x) { setErr(x.message) }
     setBusy(false)
   }
   return (
     <Card title="Create your workspace" sub="Your own company space: your team of AI employees, files, apps and keys, private to you.">
       <form className="form" onSubmit={submit}>
-        <label>Company name<input autoFocus autoComplete="organization" value={f.company} onChange={set('company')} placeholder="e.g. Northwind Plumbing" /></label>
+        {codeRequired && <div className="notice-soft"><b>Companies are created by our team for now.</b> Enter the access code you were given. Do not have one? <Link to="/contact">Contact us</Link>.</div>}
+        {codeRequired && <label>Access code<input autoFocus autoComplete="off" autoCapitalize="none" spellCheck={false} value={f.code} onChange={set('code')} /></label>}
+        <label>Company name<input autoFocus={!codeRequired} autoComplete="organization" value={f.company} onChange={set('company')} placeholder="e.g. Northwind Plumbing" /></label>
         <label>Your email <span className="faint">(you sign in with it)</span><input type="email" autoComplete="username" value={f.email} onChange={set('email')} /></label>
         <label>Password <span className="faint">(12+ characters)</span><input type="password" autoComplete="new-password" value={f.password} onChange={set('password')} /></label>
         <label>Repeat password<input type="password" autoComplete="new-password" value={f.again} onChange={set('again')} /></label>
         <label>Start with<select value={f.team} onChange={set('team')}>{TEAMS.map(([k, n]) => <option key={k} value={k}>{n}</option>)}</select></label>
         {err && <p className="warn" role="alert">{err}</p>}
-        <button className="btn solid" disabled={busy || !f.company.trim() || !f.email || !f.password}>{busy ? 'Creating…' : 'Create workspace'}</button>
+        <button className="btn solid" disabled={busy || !f.company.trim() || !f.email || !f.password || (codeRequired && !f.code.trim())}>{busy ? 'Creating…' : 'Create workspace'}</button>
         <p className="small muted">Next you connect your own OpenAI account (and ElevenLabs for phone calls), then your team is set up for you.</p>
         <button type="button" className="link" onClick={onBack}>I already have an account</button>
       </form>
@@ -138,8 +140,8 @@ export function AuthGate({ children }) {
   if (!st.authenticated) {
     // visitors see the public home page at "/", the sign-in or sign-up form at /signin and /signup, and the sign-in form anywhere else
     if (path === '/' && !notice) return <Suspense fallback={<div className="auth-wrap" aria-busy="true" />}><Site page="home" status={st} /></Suspense>
-    if (path === '/signup' && st.signup_open) return <Signup onDone={() => { setNotice(''); leaving.current = false; load() }} onBack={() => nav('/signin')} />
-    return <Login notice={notice} onSignup={st.signup_open ? () => nav('/signup') : null} onDone={() => { setNotice(''); leaving.current = false; load() }} />
+    if (path === '/signup' && st.signup_open) return <Signup codeRequired={!!st.signup_code_required} onDone={() => { setNotice(''); leaving.current = false; load() }} onBack={() => nav('/signin')} />
+    return <Login notice={notice} onSignup={(st.signup_public ?? st.signup_open) ? () => nav('/signup') : null} onDone={() => { setNotice(''); leaving.current = false; load() }} />
   }
   const logout = async () => {
     leaving.current = true

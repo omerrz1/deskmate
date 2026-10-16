@@ -10,7 +10,7 @@ import APPS from './apps.json'  // counts, categories and logos; made by backend
 /** The main call to action: create a workspace, or sign in when sign-up is closed, or open the workspace when already signed in. */
 function Primary({ st, children, className = '' }) {
   if (st?.authenticated) return <Link className={`s-btn solid big ${className}`} to="/">Open your workspace <Icon name="arrow" size={16} /></Link>
-  if (st && st.signup_open === false) return <Link className={`s-btn solid big ${className}`} to="/signin">Sign in</Link>
+  if (st && (st.signup_public ?? st.signup_open) === false) return <Link className={`s-btn solid big ${className}`} to="/signin">Sign in</Link>
   return <Link className={`s-btn solid big ${className}`} to="/signup">{children || 'Create your workspace'} <Icon name="arrow" size={16} /></Link>
 }
 
@@ -351,11 +351,6 @@ export function Security({ st }) {
             <ul>{list.map((x) => <li key={x}><Icon name="check" size={14} />{x}</li>)}</ul>
           </article>
         ))}
-      </div></section>
-      <section className="s-sec s-alt"><div className="s-wrap s-narrow">
-        <Head eyebrow="Being straight with you" title="What we have not done yet." />
-        <p className="s-prose">Deskmates has not been through a formal third-party certification such as SOC 2 or ISO 27001. The AI features run on OpenAI and, for phone voices, ElevenLabs, using your own accounts with them, so what your team reads and writes is sent to those providers under your agreement with them. Read the <Link to="/privacy">privacy policy</Link> for the details.</p>
-        <p className="s-prose">Found a vulnerability? Please tell us through the <Link to="/contact">contact form</Link> and choose “Security report”. We read those first.</p>
       </div></section>
       <Closing st={st} title="Safe to start small." sub="Create a workspace, set your rules and your limits, then let the team in gradually." />
     </>

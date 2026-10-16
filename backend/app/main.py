@@ -1,3 +1,5 @@
+import hmac
+import logging
 import json
 import math
 import os
@@ -1600,7 +1602,9 @@ def auth_status(request: Request):
     if sess:
         w = directory.get(sess["ws"]) or {}
         ws = {"id": sess["ws"], "name": w.get("name", "")}
-    return {"needs_setup": False, "signup_open": directory.SIGNUPS_OPEN, "contact_email": os.getenv("CONTACT_EMAIL", "").strip(), "authenticated": bool(sess), "username": sess["username"] if sess else None,
+    return {"needs_setup": False, "signup_open": directory.SIGNUPS_OPEN, "signup_code_required": bool(directory.SIGNUP_CODE),
+            "signup_public": directory.SIGNUPS_OPEN and not directory.SIGNUP_CODE,  # whether the public site should offer "create a workspace" at all
+            "contact_email": os.getenv("CONTACT_EMAIL", "").strip(), "authenticated": bool(sess), "username": sess["username"] if sess else None,
             "role": sess["role"] if sess else None, "must_change": bool(sess and sess["must_change"]), "workspace": ws,
             "name": people.display_name(sess) if sess else None, "title": (sess.get("title") or "") if sess else "",
             "platform": bool(sess and sess["ws"] == db.MAIN and sess["role"] == "owner")}
@@ -1611,6 +1615,7 @@ class SignupIn(BaseModel):
     email: str
     password: str
     team: str = ""
+    code: str = ""  # the team's access code, when the server asks for one
 
 
 EMAIL_OK = re.compile(r"^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,200}\.[A-Za-z]{2,}$")
@@ -1622,6 +1627,9 @@ def auth_signup(b: SignupIn, request: Request):
     ip, ua = request.state.ip, request.state.ua
     if not directory.SIGNUPS_OPEN:
         raise HTTPException(403, "Sign-ups are closed on this server.")
+    if directory.SIGNUP_CODE and not hmac.compare_digest((b.code or "").strip().encode(), directory.SIGNUP_CODE.encode()):
+        logging.getLogger("deskmates.security").warning("company sign-up refused: missing or wrong access code (from %s)", ip)
+        raise HTTPException(403, "Creating a company needs an access code from the Deskmates team. Contact us if you would like one.")
     email = b.email.strip().lower()
     company = b.company.strip()[:80]
     if not company:

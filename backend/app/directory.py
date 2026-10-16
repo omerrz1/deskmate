@@ -11,6 +11,8 @@ from . import db
 
 PATH = db.DATA_DIR / "directory.db"
 SIGNUPS_OPEN = os.getenv("SIGNUPS_OPEN", "true").lower() == "true"
+# When set, creating a company needs this code (only the team that runs the server knows it). Delete the setting to open sign-up again. Anyone who is invited into an existing company is not affected.
+SIGNUP_CODE = os.getenv("SIGNUP_CODE", "").strip()
 MAX_WORKSPACES = int(os.getenv("MAX_WORKSPACES", "1000"))
 _lock = threading.RLock()
 _c = sqlite3.connect(str(PATH), check_same_thread=False)

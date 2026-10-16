@@ -159,6 +159,10 @@ async def _get(client, url):
 async def _reader(client, url):
     """Fallback for sites that need JavaScript or block plain requests: a public reader service renders the page and returns clean text.
     Only the public URL is sent to it, and only after the address passed the public-address check."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise Blocked("Only http and https links work.")
+    await asyncio.get_running_loop().run_in_executor(None, _check_host, parsed.hostname)
     r = await client.get("https://r.jina.ai/" + url, headers={"Accept": "text/plain", "X-Return-Format": "markdown"}, timeout=40)
     if r.status_code != 200 or len(r.text) < 200:
         raise Blocked("The website blocked automated readers.")
@@ -181,6 +185,9 @@ async def crawl(url):
         except Blocked as e:
             final, html = url, ""
             blocked_msg = str(e)
+        except httpx.RequestError:
+            final, html = url, ""
+            blocked_msg = "The website disconnected or could not be reached. Please try again shortly."
         else:
             blocked_msg = ""
         host = urlparse(final).hostname

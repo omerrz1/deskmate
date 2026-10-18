@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 from . import access, auth, db, directory, keys
 
 PUBLIC = {"/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/setup", "/api/auth/signup", "/api/contact"}
-NEEDS_NO_KEYS = ("/api/auth/", "/api/setup", "/api/status", "/api/stream", "/api/health")  # reachable before the company has connected its keys
+NEEDS_NO_KEYS = ("/api/workspaces", "/api/auth/", "/api/setup", "/api/status", "/api/stream", "/api/health")  # reachable before the company has connected its keys
 SAFE = {"GET", "HEAD", "OPTIONS"}
 ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000").split(",") if o.strip()}
 TRUST_PROXY = os.getenv("TRUSTED_PROXY", "false").lower() == "true"
@@ -118,7 +118,8 @@ class Security:
                 if not ok:
                     return await deny(429, f"Too many attempts. Try again in {wait}s.", [(b"retry-after", str(wait).encode())])
             elif path not in PUBLIC:
-                sess = auth.session_from_cookie(headers.get("cookie"))
+                company_route = path.startswith(("/api/auth/", "/api/workspaces"))
+                sess = auth.session_from_cookie(headers.get("cookie"), resolve_workspace=not company_route)
                 if not sess:
                     return await deny(401, "Please sign in.")
                 db.set_current(sess["ws"])
@@ -126,6 +127,8 @@ class Security:
                     return await deny(403, "Please choose your own password first.")
                 if method not in SAFE and not _csrf_ok(headers.get("x-csrf-token", ""), sess["csrf"]):
                     return await deny(403, "Missing or invalid security token. Reload the page.")
+                if sess.get("company_ws") and path != "/api/people/directory" and path.startswith(("/api/people", "/api/admins", "/api/platform", "/api/company/delete", "/api/workspace")):
+                    return await deny(403, "Manage company people and settings from the company workspace.")
                 member = access.is_member(sess)
                 if member and not access.member_allowed(method, path):  # members are refused by default: only the routes listed in access.py are open to them
                     return await deny(403, "That is not available to members. Ask an admin if you need access.")

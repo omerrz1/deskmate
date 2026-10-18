@@ -13,15 +13,22 @@ HEAVY = {"create_document", "create_spreadsheet", "export_document", "make_chart
 NOW_WORDS = re.compile(r"\b(now|right now|right away|straight away|straightaway|immediately|asap|at once|this minute|this second|go ahead and do)\b", re.I)
 
 
-def meeting_gate(mid, name):
-    """-> an error for the agent when it starts heavy work during a meeting without being told to do it now, else None."""
-    if not mid or name not in HEAVY:
+def meeting_gate(mid, name, args=None):
+    """Changes need a timing choice in the current admin turn, never an old 'now'."""
+    if not mid or (training.is_readonly(name) and name not in HEAVY):
         return None
-    for r in db.q("SELECT text,created_at FROM meeting_msgs WHERE meeting_id=? AND role='admin' ORDER BY id DESC LIMIT 3", (mid,)):
-        if db.now() - r["created_at"] < 300 and NOW_WORDS.search(r["text"]):
+    if name == "use_app" and not apps.is_write((args or {}).get("app"), (args or {}).get("action")):
+        return None
+    r = db.q1("SELECT text FROM meeting_msgs WHERE meeting_id=? AND role='admin' ORDER BY id DESC LIMIT 1", (mid,))
+    text = (r or {}).get("text", "")
+    later = re.search(r"\b(after (?:the |this )?meeting|later|afterwards)\b", text, re.I)
+    negative = re.search(r"\b(don't|do not|not now|cancel|hold off|wait)\b", text, re.I)
+    if later:
+        if name == "add_todo" and not (args or {}).get("do_now") and not re.search(r"\b(don't|do not|cancel)\b", text, re.I):
             return None
-    return {"error": "You are in a meeting: don't do this work now. Put it on the right person's to-do list with add_todo (they start right after the meeting) and tell the admin in one short sentence that it is on the list (no need to email anyone). "
-                     "Only if the admin says to do it right now: call add_todo with do_now=true, or just do it."}
+    elif not negative and NOW_WORDS.search(text):
+        return None
+    return {"error": "You are in a meeting. Before changing anything or adding a task, ask: Would you like me to do that now or after the meeting? Wait for the admin's timing choice. If they chose later, only use add_todo with do_now=false. Do not perform the work yet."}
 
 
 def _writes_to_app(inv):
@@ -35,7 +42,7 @@ class MeetingGate(Policy):
     def check(self, ctx, inv):
         if ctx.kind not in LIVE_KINDS:
             return None
-        gate = meeting_gate(ctx.get("meeting_id"), inv.name)
+        gate = meeting_gate(ctx.get("meeting_id"), inv.name, inv.args)
         return Decision.deny(gate, "heavy work during a meeting") if gate else None
 
 

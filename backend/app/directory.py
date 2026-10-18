@@ -30,6 +30,12 @@ try:
 except OSError:
     pass
 
+try:
+    _c.execute("ALTER TABLE workspaces ADD COLUMN parent_id TEXT DEFAULT ''")
+    _c.commit()
+except sqlite3.OperationalError:
+    pass
+
 ID_RE = re.compile(r"^[a-f0-9]{12}$")
 
 
@@ -57,11 +63,11 @@ def get(wid):
 
 def is_active(wid):
     w = get(wid)
-    return bool(w and w["status"] == "active")
+    return bool(w and w["status"] == "active" and (not w.get("parent_id") or is_active(w["parent_id"])))
 
 
 def active_ids():
-    return [w["id"] for w in _q("SELECT id FROM workspaces WHERE status='active' ORDER BY created_at")]
+    return [w["id"] for w in _q("SELECT id FROM workspaces WHERE status='active' ORDER BY created_at") if is_active(w["id"])]
 
 
 def count():

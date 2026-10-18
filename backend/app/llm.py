@@ -325,18 +325,18 @@ async def tts_agent(text, voice="marin", instructions=""):
     return resp.content
 
 
-async def realtime_meeting_secret(instructions, voice, tools, listener=True, auto_reply=True):
+async def realtime_meeting_secret(instructions, voice, tools, listener=True, auto_reply=False):
     """A live speech-to-speech session for one team member in a meeting (OpenAI Realtime over WebRTC)."""
     import httpx
     if not api_key():
         raise NoKeyError("Connect your OpenAI key in Settings → Connections.")
     voice = voice if voice in REALTIME_VOICES else "marin"
-    inp = {"turn_detection": {"type": "semantic_vad", "eagerness": "medium", "create_response": auto_reply}, "noise_reduction": {"type": "near_field"}}
+    inp = {"turn_detection": {"type": "semantic_vad", "eagerness": "low", "create_response": False, "interrupt_response": False}, "noise_reduction": {"type": "near_field"}}
     if listener:
         inp["transcription"] = {"model": "gpt-4o-mini-transcribe", "language": "en"}
     body = {"session": {"type": "realtime", "model": MEETING_REALTIME_MODEL, "instructions": instructions, "output_modalities": ["audio"],
                         "audio": {"input": inp, "output": {"voice": voice, "speed": 1.05}},
-                        "max_output_tokens": 700, "tools": tools, "tool_choice": "auto"}}
+                        "max_output_tokens": 250, "tools": tools, "tool_choice": "auto"}}
     async with httpx.AsyncClient(timeout=20) as h:
         r = await h.post("https://api.openai.com/v1/realtime/client_secrets", headers={"Authorization": f"Bearer {api_key()}"}, json=body)
         if r.status_code != 200:

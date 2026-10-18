@@ -151,7 +151,7 @@ export function AuthGate({ children }) {
   }
   if (st.must_change) return <MustChange username={st.username} onDone={load} onLeave={logout} />
   const isAdmin = st.role === 'owner' || st.role === 'admin'
-  return <Ctx.Provider value={{ username: st.username, name: st.name || st.username, title: st.title || '', role: st.role, isOwner: st.role === 'owner', isAdmin, isMember: !isAdmin, workspace: st.workspace, platform: !!st.platform, logout }}>{children}</Ctx.Provider>
+  return <Ctx.Provider value={{ username: st.username, name: st.name || st.username, title: st.title || '', role: st.role, isOwner: st.role === 'owner', isAdmin, isMember: !isAdmin, workspace: st.workspace, subworkspace: !!st.subworkspace, platform: !!st.platform, logout }}>{children}</Ctx.Provider>
 }
 
 const a = (word) => (/^[aeiou]/i.test(word) ? 'an' : 'a')

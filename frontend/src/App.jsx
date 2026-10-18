@@ -1,3 +1,4 @@
+import WorkspaceSwitcher from './WorkspaceSwitcher'
 import { Component, lazy, Suspense, useEffect, useState } from 'react'
 import { Link, Navigate, NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import { api, usePoll } from './api'
@@ -22,6 +23,7 @@ const Project = lazy(() => import('./pages/Project'))
 const Scorecards = lazy(() => import('./pages/Scorecards'))
 const Templates = lazy(() => import('./pages/Templates'))
 const Inbox = lazy(() => import('./pages/Inbox'))
+const TeamChat = lazy(() => import('./pages/TeamChat'))
 const Chats = lazy(() => import('./pages/Chats'))
 const SettingsHub = lazy(() => import('./pages/SettingsHub'))
 const Meeting = lazy(() => import('./pages/Meeting'))
@@ -40,7 +42,7 @@ const Directory = lazy(() => import('./pages/Directory'))
 const Account = lazy(() => import('./pages/Account'))
 
 const LEGACY = ['/data', '/campaigns', '/calls', '/clients', '/knowledge', '/overview', '/activity']
-const TITLES = { '/': 'Team', '/performance': 'Performance', '/templates': 'Templates', '/projects': 'Projects', '/apps': 'Apps', '/inbox': 'Inbox', '/chats': 'Chats', '/settings': 'Settings', '/people': 'People', '/files': 'Files' }
+const TITLES = { '/': 'Team', '/performance': 'Performance', '/templates': 'Templates', '/projects': 'Projects', '/apps': 'Apps', '/inbox': 'Inbox', '/chats': 'Customer chats', '/team-chat': 'Team chat', '/settings': 'Settings', '/people': 'People', '/files': 'Files' }
 
 class Boundary extends Component {
   state = { err: null }
@@ -101,13 +103,15 @@ function Shell() {
     <div className="shell">
       <aside className="sidebar">
         <Link to="/" className="brand"><span className="mark"><i /></span><span className="t"><b>Deskmates</b>{company?.name && <small>{company.name}</small>}</span></Link>
+        <WorkspaceSwitcher />
         <nav className="nav" aria-label="Main">
           {link('/', 'users', 'Team')}
-          {link('/people', 'person', 'People')}
+          {!auth.subworkspace && link('/people', 'person', 'People')}
           {link('/projects', 'projects', 'Projects')}
           {link('/files', 'folder', 'Files')}
           {link('/inbox', 'inbox', 'Inbox', badge)}
-          {link('/chats', 'chat', 'Chats', att ? att.chats_unread || 0 : 0)}
+          {link('/team-chat', 'chat', 'Team chat')}
+          {link('/chats', 'chat', 'Customer chats', att ? att.chats_unread || 0 : 0)}
           {link('/apps', 'apps', 'Apps')}
           {link('/settings', 'sliders', 'Settings')}
         </nav>
@@ -152,6 +156,7 @@ function Shell() {
             <Route path="/files" element={<Files />} />
             <Route path="/apps" element={<Apps />} />
             <Route path="/inbox" element={<Inbox />} />
+            <Route path="/team-chat" element={<TeamChat />} />
             <Route path="/chats" element={<Chats />} />
             <Route path="/settings" element={<SettingsHub />} />
             <Route path="/settings/connectors" element={<Navigate to={`/apps${loc.search}`} replace />} />
@@ -186,6 +191,7 @@ function MemberShell() {
     <div className="shell member-shell">
       <aside className="sidebar">
         <Link to="/" className="brand"><span className="mark"><i /></span><span className="t"><b>Deskmates</b>{auth.workspace?.name && <small>{auth.workspace.name}</small>}</span></Link>
+        <WorkspaceSwitcher />
         <nav className="nav" aria-label="Main">
           {link('/', 'person', 'My work')}
           {link('/projects', 'projects', 'Projects')}

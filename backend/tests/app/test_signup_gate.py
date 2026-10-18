@@ -101,7 +101,7 @@ class SignupGateTests(unittest.IsolatedAsyncioTestCase):
                                           ("PUT", "/api/platform/workspaces", {"company": "Sneaky"}),
                                           ("POST", "/api/auth/setup", {"token": "x", "username": "sneaky@example.com", "password": PASSWORD})):  # the old first-run screen, switched off
                 st, _ = await owner.request(method, path, payload)
-                self.assertIn(st, (403, 404, 405), f"{method} {path}")
+                self.assertIn(st, (422,) if path == "/api/workspaces" else (403, 404, 405), f"{method} {path}")
         self.assertEqual(directory.count(), before)
 
 

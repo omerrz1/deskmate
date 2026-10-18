@@ -148,7 +148,7 @@ def descendants(fid):
 def copy_doc(d, owner, folder_id):
     """Duplicate a document (and its stored file, if it has one) into another drive or folder. -> new id."""
     fp = d["file_path"] or ""
-    if d["kind"] == "file" and fp:
+    if fp:
         import shutil
         import uuid
         from pathlib import Path
@@ -186,6 +186,8 @@ TOOLS = [
     {"name": "move_file", "description": "Move a file you own (or a shared one) into another folder.", "parameters": {"type": "object", "properties": {"id": _I, "folder": _S, "shared": _SHARED, "project": _PROJECT}, "required": ["id", "folder"]}},
     {"name": "copy_file", "description": "Copy one of your files to the shared company drive (shared=true) or to a project's drive (project=<name>), keeping your own copy. Use it only when you were asked to share a file, or for a finished project deliverable. Your working files stay on your own computer.",
      "parameters": {"type": "object", "properties": {"id": _I, "folder": {**_S, "description": "folder on the destination, e.g. 'Deliverables'"}, "shared": _SHARED, "project": _PROJECT}, "required": ["id"]}},
+    {"name": "share_chat_file", "description": "Attach one of your files to the team chat you are currently answering. Use this only when the admin asks you to send/share a file, and give the document id from your files. The file is delivered in this chat.",
+     "parameters": {"type": "object", "properties": {"id": _I}, "required": ["id"]}},
     {"name": "delete_file", "description": "Delete one of your own files (or a shared one you created).", "parameters": {"type": "object", "properties": {"id": _I}, "required": ["id"]}},
 ]
 TOOL_NAMES = {t["name"] for t in TOOLS}
@@ -211,6 +213,18 @@ async def run_tool(agent, name, a):
 async def _run_tool(agent, name, a):
     from . import team
     aid = agent["id"] if agent else 0
+    if name == "share_chat_file":
+        mid = (agent or {}).get("_meeting_id")
+        meeting = db.q1("SELECT kind,status,agent_ids FROM meetings WHERE id=?", (mid,)) if mid else None
+        if not meeting or meeting["kind"] != "admin_chat" or meeting["status"] != "live" or aid not in db.jload(meeting["agent_ids"], []):
+            return {"error": "This tool is only available while replying in a live team chat."}, None
+        doc = db.q1("SELECT * FROM documents WHERE id=?", (a["id"],))
+        if not doc or not team.can_access_doc(agent, doc) or doc["agent_id"] not in (aid, 0):
+            return {"error": "That file is not in your own or the shared drive."}, None
+        attachment = {"doc_id": doc["id"], "title": doc["title"], "kind": doc["kind"], "mime": doc.get("mime") or "", "size": len(doc.get("body") or "")}
+        db.run("INSERT INTO meeting_msgs(meeting_id,role,agent_id,text,tools,attachments,created_at) VALUES(?,?,?,?,?,?,?)",
+               (mid, "agent", aid, "", "[]", json.dumps([attachment], ensure_ascii=False), db.now()))
+        return {"sent": doc["title"], "document_id": doc["id"]}, "/office?tab=files"
     if name in ("create_document", "create_spreadsheet"):
         owner = resolve_owner(agent, a)
         fid = folder_id(owner, a.get("folder") or ("Spreadsheets" if name == "create_spreadsheet" else "Documents"))
@@ -352,12 +366,15 @@ def download_parts(r, docs_as="md"):
     import io
     from pathlib import Path
     safe = "".join(c for c in r["title"] if c.isalnum() or c in " -_")[:60].strip() or "document"
-    if r["kind"] == "file":
+    if r.get("file_path"):
         p = db.data_dir() / "files" / Path(r["file_path"]).name
         if not p.exists():
             raise FileNotFoundError("The file is missing")
         ext = p.suffix
-        return (f"{safe}{ext if not safe.endswith(ext) else ''}", r["mime"] or "application/octet-stream", p.read_bytes())
+        stem = "".join(c for c in Path(r["title"]).stem if c.isalnum() or c in " -_")[:60].strip() or "file"
+        return (f"{stem}{ext}", r.get("mime") or "application/octet-stream", p.read_bytes())
+    if r["kind"] == "file":
+        raise FileNotFoundError("The file is missing")
     if r["kind"] == "chart":
         return (f"{safe}.svg", "image/svg+xml", r["body"].encode("utf-8"))
     if r["kind"] == "sheet":

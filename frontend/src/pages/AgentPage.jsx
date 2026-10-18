@@ -31,7 +31,7 @@ export default function AgentPage() {
             <p className="muted small">{a.role}{a.manager ? ` · reports to ${a.manager.name}` : ''}</p>
           </div>
         </div>
-        <button className="btn solid" onClick={meet}>Meet</button>
+        <div className="actions"><Link className="btn" to={`/team-chat?agent=${a.id}`}>Chat</Link><button className="btn solid" onClick={meet}>Meet</button></div>
       </header>
       <div className="tabs">{TABS.map(([k, n]) => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setSp({ tab: k })}>{n}</button>)}</div>
       {tab === 'overview' && <Overview a={a} go={(k) => setSp({ tab: k })} />}

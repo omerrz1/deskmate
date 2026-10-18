@@ -30,29 +30,27 @@ export default function Meeting() {
   const [thinking, setThinking] = useState(null)
   const [doing, setDoing] = useState(null) // {agent_id, text}
   const [speaking, setSpeaking] = useState(null)
-  const [panel, setPanel] = useState('chat')
+  const [panel, setPanel] = useState(null)
   const [captions, setCaptions] = useState(true)
-  const [handsFree, setHandsFree] = useState(true)
+  const [handsFree, setHandsFree] = useState(false)
   const [rec, setRec] = useState(false)
-  const [level, setLevel] = useState(0)
+  const level = 0
   const [text, setText] = useState('')
   const [err, setErr] = useState('')
   const [secs, setSecs] = useState(0)
   const [ended, setEnded] = useState(null)
   const [mode, setMode] = useState('starting') // starting | live | classic
-  const [muted, setMuted] = useState(false)
+  const [muted, setMuted] = useState(true)
   const rtRef = useRef(null)
   const [caption, setCaption] = useState(null)
   const busy = useRef(false)
   const gen = useRef(0)
   const chain = useRef(Promise.resolve())
   const curAudio = useRef(null)
-  const recRef = useRef(null)
-  const hf = useRef(true)
+  const abortRef = useRef(null)
   const done = useRef(false)
   const scroller = useRef(null)
-  const greeted = useRef(false)
-  hf.current = handsFree
+
 
   useEffect(() => {
     let alive = true
@@ -61,19 +59,20 @@ export default function Meeting() {
       if (!alive) return
       setM(x); setMsgs(x.messages)
       if (x.status === 'ended') { setEnded(x); return }
+      if (x.kind === 'admin_chat') { nav(`/team-chat?id=${id}`, { replace: true }); return }
       // live voice with OpenAI Realtime; fall back to the typed/turn-based room if it cannot connect
       const agentsIn = x.agents
       const rt = createRT({
         meetingId: id, agents: agentsIn, group: x.kind !== 'one_to_one',
         h: {
-          onAdmin: (t) => { setMsgs((p) => [...p, { id: 'u' + Date.now(), role: 'admin', text: t }]); api.post(`/meetings/${id}/log`, { role: 'admin', text: t }).catch(() => {}) },
+          onAdmin: async (t) => { await api.post(`/meetings/${id}/log`, { role: 'admin', text: t }); setMsgs((p) => [...p, { id: 'u' + Date.now(), role: 'admin', text: t }]) },
           onAgent: (aid, t, tools) => {
             setMsgs((p) => [...p, { id: 'a' + Date.now() + aid, role: 'agent', agent_id: aid, text: t, tools }])
             api.post(`/meetings/${id}/log`, { role: 'agent', agent_id: aid, text: t, tools }).catch(() => {})
             setTimeout(() => setCaption((c) => (c && c.text === t ? null : c)), 2500)
           },
           onPartial: (aid, t) => setPartial(aid ? { agent_id: aid, text: t } : null),
-          onCaption: (aid, t) => setCaption({ agent_id: aid, text: t }),
+          onCaption: (aid, t) => setCaption(aid && t ? { agent_id: aid, text: t } : null),
           onSpeaking: setSpeaking, onThinking: setThinking, onRec: setRec, onErr: setErr,
           onDoing: (aid, name) => setDoing(aid ? { agent_id: aid, text: TOOL_TEXT[name] || 'working on it' } : null),
         },
@@ -82,15 +81,15 @@ export default function Meeting() {
         await rt.start()
         if (!alive) { rt.close(); return }
         rtRef.current = rt; setMode('live')
-        if (!x.messages.length) rt.greet()
+
       } catch (e) {
         rt.close()
         if (!alive) return
         setMode('classic'); setErr(`Live voice unavailable (${e.message || 'no microphone'}). Using the typed room.`)
-        if (!x.messages.length && !greeted.current) { greeted.current = true; send('[The admin has just joined the meeting. Greet them warmly in one short sentence and mention one useful thing you know.]') }
+
       }
     }).catch((e) => setErr(e.message))
-    return () => { alive = false; done.current = true; rtRef.current?.close(); rtRef.current = null; interrupt(); stopRec(true) }
+    return () => { alive = false; done.current = true; rtRef.current?.close(); rtRef.current = null; interrupt(); abortRef.current?.abort() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
   useEffect(() => { const t = setInterval(() => setSecs((s) => s + 1), 1000); return () => clearInterval(t) }, [])
@@ -127,7 +126,7 @@ export default function Meeting() {
   const send = useCallback(async (t) => {
     t = (t || '').trim()
     if (!t || busy.current || done.current) return
-    busy.current = true; setErr('')
+    busy.current = true; setErr(''); abortRef.current = new AbortController()
     setMsgs((x) => [...x, { id: 'u' + Date.now(), role: 'admin', text: t }])
     try {
       await stream(`/meetings/${id}/message`, { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: t }) }, (ev) => {
@@ -141,69 +140,36 @@ export default function Meeting() {
           setMsgs((x) => [...x, { id: 'a' + Date.now() + ev.agent_id, role: 'agent', agent_id: ev.agent_id, text: ev.text, tools: ev.tools }])
           enqueueSpeech(ev.agent_id, ev.text)
         } else if (ev.type === 'error') setErr(ev.message)
-      })
-    } catch (e) { setErr(e.message) }
+      }, abortRef.current.signal)
+    } catch (e) { if (e.name !== 'AbortError') setErr(e.message) }
     setThinking(null); setPartial(null); setDoing(null)
     busy.current = false
     await chain.current
-    if (hf.current && !done.current) startRec()
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
-  // ---- microphone with automatic end-of-speech detection ----
-  async function startRec() {
-    if (recRef.current || done.current) return
-    let stream_
-    try { stream_ = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }) }
-    catch { setErr('Microphone blocked: you can still type in the chat.'); return }
-    const ac = new AudioContext()
-    const an = ac.createAnalyser(); an.fftSize = 1024
-    ac.createMediaStreamSource(stream_).connect(an)
-    const mr = new MediaRecorder(stream_)
-    const chunks = []
-    mr.ondataavailable = (e) => chunks.push(e.data)
-    const st = { mr, stream_, ac, heard: false, silent: null, start: Date.now(), cancel: false, timer: null }
-    recRef.current = st
-    setRec(true)
-    const buf = new Uint8Array(an.fftSize)
-    st.timer = setInterval(() => {
-      an.getByteTimeDomainData(buf)
-      let s = 0; for (const v of buf) { const x = (v - 128) / 128; s += x * x }
-      const rms = Math.sqrt(s / buf.length)
-      setLevel(Math.min(1, rms * 8))
-      const now = Date.now()
-      if (rms > 0.035) { st.heard = true; st.silent = null }
-      else if (st.heard) { st.silent = st.silent || now; if (now - st.silent > 1300) stopRec(false) }
-      if (!st.heard && now - st.start > 12000) stopRec(true)
-      if (now - st.start > 60000) stopRec(false)
-    }, 100)
-    mr.onstop = async () => {
-      clearInterval(st.timer); stream_.getTracks().forEach((t) => t.stop()); try { ac.close() } catch { /* ignore */ }
-      recRef.current = null; setRec(false); setLevel(0)
-      if (st.cancel || !st.heard || done.current) return
-      try {
-        const fd = new FormData(); fd.append('audio', new Blob(chunks, { type: mr.mimeType }), 'speech.webm')
-        const r = await api.form('/transcribe', fd)
-        if (r.text) send(r.text)
-        else if (hf.current) startRec()
-      } catch (e) { setErr(e.message) }
-    }
-    mr.start(250)
+  const stopListening = () => {
+    rtRef.current?.setMuted(true)
+    setMuted(true); setRec(false)
   }
-  function stopRec(cancel) {
-    const st = recRef.current
-    if (!st) return
-    st.cancel = cancel
-    try { st.mr.state !== 'inactive' && st.mr.stop() } catch { /* ignore */ }
-  }
+  useEffect(() => {
+    const hide = () => { if (document.hidden) stopListening() }
+    window.addEventListener('blur', stopListening)
+    document.addEventListener('visibilitychange', hide)
+    return () => { window.removeEventListener('blur', stopListening); document.removeEventListener('visibilitychange', hide) }
+  }, [])
+  const beginTalk = () => { if (rtRef.current) { setMuted(false); rtRef.current.beginTalk() } }
+  const endTalk = () => { rtRef.current?.endTalk(); setMuted(true) }
   const micClick = () => {
-    if (rtRef.current) { const nm = !muted; setMuted(nm); rtRef.current.setMuted(nm); return }
-    if (recRef.current) { stopRec(!recRef.current.heard); return }
-    interrupt(); startRec()
+    if (!rtRef.current) return
+    const next = !muted
+    setMuted(next); rtRef.current.setMuted(next)
   }
 
   const leave = async () => {
-    done.current = true; rtRef.current?.close(); rtRef.current = null; interrupt(); stopRec(true)
+    setMode('classic'); setMuted(true); setRec(false)
+    done.current = true; rtRef.current?.close(); rtRef.current = null; interrupt(); abortRef.current?.abort()
     try { const x = await api.post(`/meetings/${id}/end`); setEnded(x) } catch (e) { setErr(e.message) }
   }
 
@@ -231,7 +197,14 @@ export default function Meeting() {
   }
 
   return (
-    <div className="meet">
+    <div className="meet meet-polished">
+      <header className="meet-topbar">
+        <div className="meet-identity"><span className="meet-mark">D</span><span><b>{m.title}</b><small>{agents.map((a) => a.name).join(' · ')}</small></span></div>
+        <div className="meet-top-actions"><span className="meet-live"><i /> {mode === 'starting' ? 'Connecting' : 'In meeting'}</span><span className="meet-duration">{mm}</span>
+          <button className={`meet-top-btn ${panel === 'people' ? 'selected' : ''}`} onClick={() => setPanel(panel === 'people' ? null : 'people')} title="People"><Icon n="people" size={18} /><span>People</span></button>
+          <button className={`meet-top-btn ${panel === 'chat' ? 'selected' : ''}`} onClick={() => setPanel(panel === 'chat' ? null : 'chat')} title="Meeting chat"><Icon n="chat" size={18} /><span>Chat</span></button>
+        </div>
+      </header>
       <div className="meet-main">
         <div className={`tiles n${agents.length + 1}`}>
           {agents.map((a) => (
@@ -244,15 +217,15 @@ export default function Meeting() {
           ))}
           <div className={`tile you ${rec ? 'speaking' : ''}`} style={rec ? { outlineColor: `rgba(138,180,248,${0.35 + level * 0.65})` } : {}}>
             <span className="avatar you-av" style={{ '--c': '#6b5d57', width: 84, height: 84, fontSize: 36 }}><b>Y</b></span>
-            <span className="nameplate">You{(mode === 'live' ? muted : !rec) && <svg width="14" height="14" viewBox="0 0 24 24" fill="#f28b82" style={{ marginLeft: 6 }}>{I.mic}</svg>}</span>
+            <span className="nameplate">You · {rec ? "Listening" : "Mic off"}{(mode === 'live' ? muted : !rec) && <svg width="14" height="14" viewBox="0 0 24 24" fill="#f28b82" style={{ marginLeft: 6 }}>{I.mic}</svg>}</span>
           </div>
         </div>
 
         {panel && (
           <aside className="side">
-            <header>
-              <b>{panel === 'chat' ? 'In-call messages' : 'People'}</b>
-              <button className="x" onClick={() => setPanel(null)}>✕</button>
+            <header className="meet-panel-head">
+              <span><b>{panel === 'chat' ? 'Meeting chat' : 'People'}</b><small>{panel === 'chat' ? 'Messages stay with this meeting' : `${agents.length + 1} people here`}</small></span>
+              <button className="x" onClick={() => setPanel(null)} aria-label="Close panel">✕</button>
             </header>
             {panel === 'people' ? (
               <ul className="ppl">
@@ -262,14 +235,26 @@ export default function Meeting() {
             ) : (
               <>
                 <div className="msgs" ref={scroller}>
+                  {!msgs.length && <p className="muted small">Take your time. Hold Talk when you’re ready, or type a message below.</p>}
                   {msgs.filter((x) => !hidden(x.text)).map((x) => (
                     <div key={x.id} className="m"><b>{x.role === 'admin' ? 'You' : name(x.agent_id)}</b><p>{x.text}</p>
                       {x.tools?.length > 0 && <small>{x.tools.map((t) => TOOL_TEXT[t.name] || t.name).join(' · ')}</small>}</div>
                   ))}
                   {partial?.text && <div className="m live"><b>{name(partial.agent_id)}</b><p>{partial.text}</p></div>}
                 </div>
-                <form className="msgbox" onSubmit={(e) => { e.preventDefault(); const t = text.trim(); if (!t) return; setText(''); if (rtRef.current) { setMsgs((p) => [...p, { id: 'u' + Date.now(), role: 'admin', text: t }]); api.post(`/meetings/${id}/log`, { role: 'admin', text: t }).catch(() => {}); rtRef.current.typed(t) } else { interrupt(); send(t) } }}>
-                  <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Send a message to everyone" />
+                <form className="msgbox" onSubmit={async (e) => {
+                  e.preventDefault(); const t = text.trim(); if (!t || mode === 'starting' || busy.current) return
+                  setText('')
+                  if (rtRef.current) {
+                    stopListening(); rtRef.current.interruptAll()
+                    try {
+                      await api.post(`/meetings/${id}/log`, { role: 'admin', text: t })
+                      setMsgs((p) => [...p, { id: 'u' + Date.now(), role: 'admin', text: t }]); rtRef.current?.typed(t)
+                    } catch (error) { setErr(error.message); setText(t) }
+                  } else { interrupt(); send(t) }
+                }}>
+                  <input aria-label="Message the meeting" value={text} onChange={(e) => setText(e.target.value)} placeholder="Send a message to everyone" />
+                  <button type="submit" className="btn" disabled={!text.trim() || mode === 'starting'}>Send</button>
                 </form>
               </>
             )}
@@ -280,20 +265,26 @@ export default function Meeting() {
       {captions && caption && (
         <div className="captions"><b>{name(caption.agent_id)}</b> {caption.text}</div>
       )}
+      {handsFree && <div className="meet-listening-note">{muted ? "Microphone muted" : "Microphone on — nearby voices may be heard. Mute for side conversations."}</div>}
       {err && <div className="meet-err" onClick={() => setErr('')}>{err}</div>}
 
-      <footer className="bar">
-        <div className="left"><span>{mm}</span><span className="sep">|</span><span>{m.title}</span>{mode === 'starting' && <span className="sep">Connecting voices…</span>}</div>
+      <footer className="bar meet-controls">
         <div className="mid">
-          <button className={`cbtn ${mode === 'live' ? (muted ? 'off' : rec ? 'live' : 'on') : (rec ? 'live' : 'off')}`} onClick={micClick} title={mode === 'live' ? (muted ? 'Unmute' : 'Mute') : (rec ? 'Stop and send' : 'Talk')}><Icon n="mic" /></button>
+          {mode === 'live' && <>
+            {!handsFree ? <button className={`btn ${rec ? 'solid' : ''}`} style={{ touchAction: 'none', userSelect: 'none' }}
+              onPointerDown={(e) => { if (e.button !== 0) return; e.currentTarget.setPointerCapture(e.pointerId); beginTalk() }}
+              onPointerUp={endTalk} onBlur={stopListening} onPointerCancel={stopListening} onLostPointerCapture={() => { if (rec) endTalk() }}
+              onKeyDown={(e) => { if ([' ', 'Enter'].includes(e.key)) { e.preventDefault(); if (!e.repeat) beginTalk() } }}
+              onKeyUp={(e) => { if ([' ', 'Enter'].includes(e.key)) { e.preventDefault(); endTalk() } }}
+              aria-label="Hold to talk; release to send">{rec ? 'Listening… release to send' : 'Hold to talk'}</button>
+              : <button className={`cbtn ${muted ? 'off' : 'on'}`} onClick={micClick} aria-label={muted ? 'Unmute microphone' : 'Mute microphone'} title={muted ? 'Unmute microphone' : 'Mute microphone'}><Icon n="mic" /></button>}
+            <label className="small"><input type="checkbox" checked={handsFree} onChange={(e) => { const value = e.target.checked; setHandsFree(value); setMuted(true); rtRef.current?.setHandsFree(value) }} /> Hands-free</label>
+          </>}
+          <button className="cbtn" onClick={() => { rtRef.current?.interruptAll(); interrupt(); abortRef.current?.abort() }} title="Stop current reply" aria-label="Stop speaking"><span className="meet-stop-icon" /></button>
           <button className={`cbtn ${captions ? 'on' : ''}`} onClick={() => setCaptions(!captions)} title="Captions"><Icon n="cc" /></button>
-          {mode !== 'live' && <button className={`cbtn ${handsFree ? 'on' : ''}`} onClick={() => setHandsFree(!handsFree)} title="Hands-free: listen again after they finish"><span className="hf">HF</span></button>}
-          <button className="cbtn end" onClick={leave} title="Leave meeting"><Icon n="end" /></button>
+          <button className="cbtn end" onClick={leave} title="Leave meeting" aria-label="Leave meeting"><Icon n="end" /></button>
         </div>
-        <div className="right">
-          <button className={`cbtn plain ${panel === 'people' ? 'on' : ''}`} onClick={() => setPanel(panel === 'people' ? null : 'people')} title="People"><Icon n="people" /></button>
-          <button className={`cbtn plain ${panel === 'chat' ? 'on' : ''}`} onClick={() => setPanel(panel === 'chat' ? null : 'chat')} title="Chat"><Icon n="chat" /></button>
-        </div>
+        <div className="right"><span>{mode === 'live' ? (rec ? 'Listening · release to send' : 'Mic off') : mode === 'starting' ? 'Joining…' : 'Text mode'}</span></div>
       </footer>
     </div>
   )

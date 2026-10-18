@@ -5,17 +5,23 @@ const BENIGN = /active response|Cancellation failed|no active response|buffer is
 
 /**
  * Live voice for a meeting: one OpenAI Realtime session per agent (each with its own voice, personality and tools).
- * One person: the agent hears you directly and answers. Several agents: the first agent listens, and the server decides who answers
+ * Only the listener receives microphone audio. Every response is explicitly routed after a completed user turn.
  * (a name, "everyone", the person whose task it is, or the manager), ONE voice at a time: nobody starts until the speaker's whole
  * turn (words, tool calls and the words after them) is over, and what each said is shared with the others.
  */
-export function createRT({ meetingId, agents, group, h }) {
+export function createRT({ meetingId, agents, h }) {
   const S = {} // agent_id -> session
   let mic = null
   let closed = false
+  let muted = true
+  let handsFree = false
+  let recording = false
+  let accepting = false
+  const inputEpochs = new Map()
+  const commits = []
+  let startedAt = 0
   let queue = Promise.resolve()
   let epoch = 0
-  const order = agents.map((a) => a.id)
   const nameOf = (id) => agents.find((a) => a.id === id)?.name || 'Colleague'
 
   const lastSpoken = [] // recent things agents said, so the mic picking up the speakers isn't mistaken for the admin
@@ -31,7 +37,8 @@ export function createRT({ meetingId, agents, group, h }) {
   const anyActive = (except) => Object.values(S).some((o) => o !== except && active(o))
   async function floor(except) { // wait until nobody else has the floor
     const until = Date.now() + 20000
-    while (anyActive(except) && Date.now() < until) await new Promise((r) => setTimeout(r, 120))
+    while ((anyActive(except) || except.calling) && Date.now() < until) await new Promise((r) => setTimeout(r, 120))
+    return !anyActive(except) && !except.calling
   }
   function endTurn(s) { const t = s.turn; if (!t) return; clearTimeout(t.timer); s.turn = null; t.resolve() }
   const settled = (s) => !s.talking && !s.responding && !s.calling && !s.expect
@@ -46,11 +53,13 @@ export function createRT({ meetingId, agents, group, h }) {
     const pc = new RTCPeerConnection()
     const au = new Audio(); au.autoplay = true
     pc.ontrack = (e) => { au.srcObject = e.streams[0] }
-    pc.addTrack(mic.getAudioTracks()[0], mic)
+    if (sess.listener) pc.addTrack(mic.getAudioTracks()[0], mic)
+    else pc.addTransceiver('audio', { direction: 'recvonly' })
     const dc = pc.createDataChannel('oai-events')
     const s = { id: a.id, pc, dc, au, busy: false, talking: false, responding: false, calling: false, expect: false, turn: null, tools: [], buf: '', listener: sess.listener }
     S[a.id] = s
-    const opened = new Promise((res, rej) => { dc.onopen = res; setTimeout(() => rej(new Error('voice connection timed out')), 15000) })
+    const opened = new Promise((res, rej) => { s.openTimer = setTimeout(() => rej(new Error('voice connection timed out')), 15000); dc.onopen = () => { clearTimeout(s.openTimer); res() } })
+    opened.catch(() => {})
     dc.onmessage = (m) => { try { onEvent(s, JSON.parse(m.data)) } catch { /* ignore */ } }
     pc.onconnectionstatechange = () => { if (!closed && pc.connectionState === 'failed') h.onErr(`${a.name}'s connection dropped`) }
     const offer = await pc.createOffer()
@@ -59,29 +68,44 @@ export function createRT({ meetingId, agents, group, h }) {
     if (!r.ok) throw new Error('Could not open the voice connection')
     await pc.setRemoteDescription({ type: 'answer', sdp: await r.text() })
     await opened
+    send(s, { type: 'session.update', session: { type: 'realtime', audio: { input: { turn_detection: null } } } })
   }
 
   async function start() {
-    mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+    mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false } })
+    mic.getAudioTracks().forEach((t) => { t.enabled = false })
+    if (closed) { mic.getTracks().forEach((t) => t.stop()); return }
     await Promise.all(agents.map(connect))
     if (closed) close()
   }
 
   function onEvent(s, ev) {
+    if (closed) return
     switch (ev.type) {
       case 'input_audio_buffer.speech_started':
-        if (s.listener) { h.onRec(true); interruptAll() }
+        if (s.listener && handsFree && !muted) { recording = true; accepting = true; h.onRec(true); interruptAll() }
         break
-      case 'input_audio_buffer.speech_stopped': if (s.listener) h.onRec(false); break
+      case 'input_audio_buffer.speech_stopped': if (s.listener) { recording = false; h.onRec(false) } break
+      case 'input_audio_buffer.committed':
+        inputEpochs.set(ev.item_id, handsFree ? (accepting ? epoch : -1) : (commits.shift() ?? -1))
+        break
       case 'conversation.item.input_audio_transcription.completed': {
         const t = (ev.transcript || '').trim()
-        if (s.listener && t && !isEcho(t)) { h.onAdmin(t); if (group) route(t, true) }
+        if (s.listener && accepting && inputEpochs.get(ev.item_id) === epoch && t && !isEcho(t)) {
+          const my = epoch
+          Promise.resolve(h.onAdmin(t)).then(() => { if (my === epoch && !closed) route(t, true) }).catch(() => h.onErr('Could not save your message. Please try again.'))
+        }
+        inputEpochs.delete(ev.item_id)
         break
       }
-      case 'response.created': s.busy = true; s.responding = true; s.expect = false; h.onThinking(s.id); break
+      case 'response.created':
+        if (!s.expect || recording) { send(s, { type: 'response.cancel' }); send(s, { type: 'output_audio_buffer.clear' }); break }
+        s.responseId = ev.response?.id; s.busy = true; s.responding = true; s.expect = false; h.onThinking(s.id); break
       case 'response.output_audio_transcript.delta':
+        if (!s.responding) break
         s.buf += ev.delta || ''; h.onPartial(s.id, s.buf); h.onCaption(s.id, s.buf); break
       case 'response.output_audio_transcript.done': {
+        if (!s.responding) { s.buf = ''; break }
         const t = (ev.transcript || s.buf || '').trim()
         s.buf = ''
         h.onPartial(null, '')
@@ -92,19 +116,24 @@ export function createRT({ meetingId, agents, group, h }) {
         }
         break
       }
-      case 'output_audio_buffer.started': s.talking = true; h.onSpeaking(s.id); break
+      case 'output_audio_buffer.started':
+        if (recording || (!s.responding && !s.turn)) { send(s, { type: 'output_audio_buffer.clear' }); break }
+        s.talking = true; h.onSpeaking(s.id); break
+      case 'output_audio_buffer.cleared':
       case 'output_audio_buffer.stopped': s.talking = false; for (const x of lastSpoken) if (x.id === s.id) { x.live = false; x.at = Date.now() } h.onSpeaking(null); maybeEnd(s); break
       case 'response.output_item.done':
-        if (ev.item?.type === 'function_call') (s.pending = s.pending || []).push(ev.item)
+        if (s.responding && ev.item?.type === 'function_call') (s.pending = s.pending || []).push(ev.item)
         break
       case 'response.done': {
+        if (ev.response?.id && ev.response.id !== s.responseId) break
         s.busy = false; s.responding = false; h.onThinking(null)
         const calls = s.pending || []; s.pending = []
-        if (calls.length) { s.calling = true; runTools(s, calls) } // the turn continues after the tools: don't give the floor away yet
+        if (calls.length && ev.response?.status !== 'cancelled') { s.calling = true; runTools(s, calls) } // the turn continues after the tools: don't give the floor away yet
         else setTimeout(() => maybeEnd(s), 1200) // an answer with no audio has nothing to wait for
         break
       }
       case 'error':
+        if (ev.error?.code === 'input_audio_buffer_commit_empty') { commits.shift(); break }
         if (!BENIGN.test(ev.error?.message || '')) h.onErr(ev.error?.message || 'Voice error')
         break
       default: break
@@ -114,6 +143,7 @@ export function createRT({ meetingId, agents, group, h }) {
   async function runTools(s, calls) {
     const my = epoch
     for (const c of calls) {
+      if (closed || my !== epoch) break
       let args = {}
       try { args = JSON.parse(c.arguments || '{}') } catch { /* ignore */ }
       h.onDoing(s.id, c.name)
@@ -135,7 +165,7 @@ export function createRT({ meetingId, agents, group, h }) {
     try {
       const r = await Promise.race([api.post(`/meetings/${meetingId}/route`, { text }), new Promise((_, rej) => setTimeout(() => rej(new Error('slow')), 2500))])
       const picked = agents.filter((a) => r.agent_ids.includes(a.id))
-      if (picked.length) return picked
+      return picked
     } catch { /* fall through */ }
     const named = agents.filter((a) => new RegExp(`\\b${a.name.split(' ')[0]}\\b`, 'i').test(text))
     if (named.length) return named
@@ -153,11 +183,11 @@ export function createRT({ meetingId, agents, group, h }) {
         if (my !== epoch || closed) return
         const s = S[a.id]
         if (!s) continue
-        await floor(s)
+        if (!await floor(s)) { h.onErr('A teammate is still finishing. Please try again in a moment.'); return }
         if (my !== epoch || closed) return
         await new Promise((resolve) => {
           s.expect = true
-          s.turn = { resolve, timer: setTimeout(() => endTurn(s), 60000) } // safety net only
+          s.turn = { resolve, timer: setTimeout(() => { interruptAll(); h.onErr('That reply took too long. Please try again.') }, 60000) } // safety net only
           send(s, { type: 'response.create' })
         })
       }
@@ -170,24 +200,62 @@ export function createRT({ meetingId, agents, group, h }) {
     for (const s of Object.values(S)) {
       if (s.busy) send(s, { type: 'response.cancel' })
       send(s, { type: 'output_audio_buffer.clear' })
-      s.expect = false; s.calling = false; s.responding = false
+      s.expect = false; s.responding = false; s.talking = false; s.busy = false; s.pending = []; s.buf = ''
       endTurn(s)
     }
-    h.onSpeaking(null)
+    h.onSpeaking(null); h.onThinking(null); h.onPartial(null, ''); h.onCaption(null, '')
+  }
+
+  function setMuted(value) {
+    muted = value
+    accepting = !value
+    recording = false
+    mic?.getAudioTracks().forEach((t) => { t.enabled = !value && handsFree })
+    if (value) {
+      inputEpochs.clear()
+      commits.fill(-1)
+      for (const s of Object.values(S)) if (s.listener) send(s, { type: 'input_audio_buffer.clear' })
+    }
+    h.onRec(false)
   }
 
   return {
     start,
-    typed(text) { interruptAll(); epoch++; route(text, false) },
-    greet() { route('[The admin has just joined the meeting. Greet them warmly in one short sentence and mention one useful thing you know.]', false, true) },
-    setMuted(m) { mic?.getAudioTracks().forEach((t) => { t.enabled = !m }) },
+    typed(text) { interruptAll(); route(text, false) },
+    setMuted,
+    setHandsFree(value) {
+      setMuted(true)
+      handsFree = value
+      for (const s of Object.values(S)) if (s.listener) send(s, { type: 'session.update', session: { type: 'realtime', audio: { input: {
+        turn_detection: value ? { type: 'semantic_vad', eagerness: 'low', create_response: false, interrupt_response: false } : null,
+      } } } })
+    },
+    beginTalk() {
+      if (closed || handsFree || recording) return
+      interruptAll()
+      muted = false; accepting = true; recording = true; startedAt = Date.now()
+      for (const s of Object.values(S)) if (s.listener) send(s, { type: 'input_audio_buffer.clear' })
+      mic?.getAudioTracks().forEach((t) => { t.enabled = true })
+      h.onRec(true)
+    },
+    endTalk() {
+      if (!recording || handsFree) return
+      recording = false; muted = true
+      mic?.getAudioTracks().forEach((t) => { t.enabled = false })
+      if (Date.now() - startedAt >= 180) {
+        commits.push(epoch)
+        for (const s of Object.values(S)) if (s.listener) send(s, { type: 'input_audio_buffer.commit' })
+      } else { setMuted(true) }
+      h.onRec(false)
+    },
     interruptAll,
     close,
   }
 
   function close() {
     closed = true
-    for (const s of Object.values(S)) { try { s.dc?.close(); s.pc?.close(); s.au.srcObject = null } catch { /* ignore */ } }
+    interruptAll()
+    for (const s of Object.values(S)) { try { clearTimeout(s.openTimer); s.dc?.close(); s.pc?.close(); s.au.srcObject = null } catch { /* ignore */ } }
     mic?.getTracks().forEach((t) => t.stop())
   }
 }

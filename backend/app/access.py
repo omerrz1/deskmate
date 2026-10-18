@@ -51,6 +51,8 @@ _MEMBER_ROUTES = [(m, re.compile(p)) for m, p in _MEMBER_ROUTES]
 
 
 def member_allowed(method, path):
+    if path == "/api/workspaces" or path.startswith("/api/workspaces/"):
+        return True
     path = path.rstrip("/") or "/"
     return any(method in m and r.fullmatch(path) for m, r in _MEMBER_ROUTES)
 

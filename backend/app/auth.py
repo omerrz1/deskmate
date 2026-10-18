@@ -174,7 +174,7 @@ def split_token(value):
     return (db.MAIN, value) if value else (None, None)
 
 
-def session_from_cookie(cookie_header):
+def session_from_cookie(cookie_header, *, resolve_workspace=True):
     """-> the signed-in session (with the workspace it belongs to under 'ws'), or None."""
     from . import directory
     ws, secret = split_token(parse_cookie(cookie_header).get(SESSION_COOKIE))
@@ -190,6 +190,9 @@ def session_from_cookie(cookie_header):
         if t - s["last_seen"] > 60:
             db.run("UPDATE sessions SET last_seen=? WHERE id=?", (t, s["id"]))
     s["ws"] = ws
+    if resolve_workspace:
+        from .company_workspaces import resolve
+        s = resolve(s)
     return s
 
 

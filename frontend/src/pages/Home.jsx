@@ -73,7 +73,7 @@ export default function Home() {
   return (
     <div className="page wide home">
       <PageHeader title="Team" sub="Everyone on your team and what they are working on."
-        actions={<><Link className="btn" to="/templates">Templates</Link>{list.length > 0 && <Link className="btn" to="/performance">Performance</Link>}{list.length > 1 && <button className="btn" onClick={() => { setPanel(panel === 'meet' ? null : 'meet'); setSel(list.map((a) => a.id)) }}>Team meeting</button>}<button className="btn solid" onClick={() => setPanel(panel === 'new' ? null : 'new')}>New agent</button></>} />
+        actions={<><Link className="btn" to="/team-chat">Team chat</Link><Link className="btn" to="/templates">Templates</Link>{list.length > 0 && <Link className="btn" to="/performance">Performance</Link>}{list.length > 1 && <button className="btn" onClick={() => { setPanel(panel === 'meet' ? null : 'meet'); setSel(list.map((a) => a.id)) }}>Team meeting</button>}<button className="btn solid" onClick={() => setPanel(panel === 'new' ? null : 'new')}>New agent</button></>} />
       {central?.work_paused && <div className="notice" onClick={async () => { await api.put('/central', { work_paused: false }); reloadCentral() }}>Work is paused. Click here to resume.</div>}
 
       {!onboarding && list.length > 0 && pulse && (

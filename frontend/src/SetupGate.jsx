@@ -1,3 +1,4 @@
+import WorkspaceSwitcher from './WorkspaceSwitcher'
 import { useEffect, useState } from 'react'
 import { api } from './api'
 
@@ -26,6 +27,7 @@ export default function SetupGate({ children }) {
   return (
     <div className="setup">
       <div className="setup-card">
+        <WorkspaceSwitcher />
         <ol className="setup-steps" aria-label="Setup steps">
           {STEPS.map(([k, t], i) => <li key={k} className={i < at ? 'past' : i === at ? 'on' : ''}><i>{i < at ? '✓' : i + 1}</i>{t}</li>)}
           <li><i>3</i>Your company</li>

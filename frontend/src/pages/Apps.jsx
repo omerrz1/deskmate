@@ -145,15 +145,21 @@ export default function Apps() {
 function AppModal({ sel, asked, onClose, onSaved }) {
   const toast = useToast()
   const { spec, inst } = sel
-  const [vals, setVals] = useState(inst ? { ...inst.config } : {})
+  const [vals, setVals] = useState(inst ? { ...inst.config } : Object.fromEntries(spec.fields.filter(f => f.default !== undefined).map(f => [f.key, f.default])))
+  const [step, setStep] = useState(inst ? 1 : 0)
+  const [savedId, setSavedId] = useState(inst?.id)
+  const [showSecrets, setShowSecrets] = useState(false)
+  const missing = spec.fields.filter(f => f.required && !String(vals[f.key] ?? '').trim() && !inst?.secrets_set?.[f.key])
   const [busy, setBusy] = useState(false)
   const [res, setRes] = useState(null)
   const [msg, setMsg] = useState('')
   useEffect(() => { const k = (e) => { if (e.key === 'Escape') onClose() }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k) }, [onClose])
   const save = async () => {
+    if (missing.length) { setMsg(`Add ${missing.map(f => f.label).join(', ')} to continue.`); return }
     setBusy(true); setMsg(''); setRes(null)
     try {
-      const r = inst ? await api.put(`/apps/${inst.id}`, { config: vals }) : await api.post('/apps', { kind: spec.id, config: vals })
+      const r = savedId ? await api.put(`/apps/${savedId}`, { config: vals }) : await api.post('/apps', { kind: spec.id, config: vals })
+      if (r.id) setSavedId(r.id)
       setRes(r.test); onSaved()
       if (!r.test || r.test.ok) { toast.ok(inst ? `${spec.name} updated` : `${spec.name} connected`); onClose() }
     } catch (e) { setMsg(e.message) }
@@ -166,22 +172,27 @@ function AppModal({ sel, asked, onClose, onSaved }) {
         <div className="modal-b form-grid">
           {asked && <div className="notice" style={{ cursor: 'default' }}><b>{asked.agent_name} asked for this.</b> {asked.why}</div>}
           <p className="muted">{spec.description}</p>
+          <ol className="connection-steps"><li className={step === 0 ? 'active' : ''}>1. Get ready</li><li className={step === 1 ? 'active' : ''}>2. Connect & check</li></ol>
+          {step === 0 && <div className="connection-welcome"><h3>Connect your {spec.name} account</h3><p>Keep {spec.name} open in another tab. You’ll need {spec.fields.filter(f => f.required).map(f => f.label).join(', ') || 'no account details'}.</p><p>We’ll check the connection for you before you start using it.</p></div>}
           {spec.help && <div className="tip">{spec.help}</div>}
+          {step === 1 && <p className="small muted">Paste the details below. Secret values are hidden after saving.</p>}
           {spec.fields.length === 0 && <p className="small">This app needs no account or key.</p>}
-          {spec.fields.map((f) => (
+          {step === 1 && spec.fields.filter(f => f.required).map((f) => (
             <label key={f.key} className="f">{f.label}{!f.required && <span className="faint"> (optional)</span>}{f.secret && inst?.secrets_set?.[f.key] && <span className="ok small" style={{ margin: 0 }}> saved, leave empty to keep</span>}
-              <input type={f.secret ? 'password' : 'text'} autoComplete="new-password" value={vals[f.key] ?? ''} placeholder={f.placeholder || (f.default ? `Default: ${f.default}` : '')} onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })} />
+              <input type={f.secret && !showSecrets ? 'password' : 'text'} autoComplete="new-password" value={vals[f.key] ?? ''} placeholder={f.placeholder || (f.default ? `Default: ${f.default}` : '')} onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })} />
               {f.help && <small className="muted">{f.help}</small>}
             </label>
           ))}
+          {step === 1 && spec.fields.some(f => !f.required) && <details><summary>Optional settings</summary><div className="form-grid">{spec.fields.filter(f => !f.required).map(f => <label className="f" key={f.key}>{f.label}<input type={f.secret && !showSecrets ? 'password' : 'text'} autoComplete="off" value={vals[f.key] ?? ''} placeholder={f.placeholder || ''} onChange={e => setVals({ ...vals, [f.key]: e.target.value })}/>{f.help && <small className="muted">{f.help}</small>}</label>)}</div></details>}
+          {step === 1 && spec.fields.some(f => f.secret) && <label className="connection-reveal"><input type="checkbox" checked={showSecrets} onChange={e => setShowSecrets(e.target.checked)}/> Show entered secret values</label>}
           <details>
             <summary className="muted" style={{ cursor: 'pointer' }}>What your team will be able to do ({spec.tools.length})</summary>
             <ul className="plain" style={{ marginTop: 8 }}>{spec.tools.map((t) => <li key={t.name} className="small"><b>{t.name.replace(/_/g, ' ')}</b>{t.write && <span className="tag"> changes things</span>} <span className="muted">{t.description}</span></li>)}</ul>
           </details>
           {!spec.verified && <p className="muted small">Built from the service's public documentation. Use the test result to confirm it works with your account.</p>}
-          {res && <p className={res.ok ? 'ok small' : 'warn small'}>{res.message}</p>}
+          {res && <div role="status" className={res.ok ? 'ok small' : 'warn small'}><b>{res.ok ? 'Connection checked' : 'Your connection needs attention'}</b><p>{res.message}</p>{!res.ok && <p>Check the account details and permissions, then try again. Your saved connection will be updated.</p>}</div>}
           {msg && <p className="warn small">{msg}</p>}
-          <div className="actions" style={{ justifyContent: 'flex-end' }}><button className="btn" onClick={onClose}>Cancel</button><button className="btn solid" disabled={busy} onClick={save}>{busy ? 'Connecting…' : inst ? 'Save and test' : 'Connect'}</button></div>
+          <div className="actions" style={{ justifyContent: 'flex-end' }}><button className="btn" onClick={onClose}>Cancel</button><button className="btn solid" disabled={busy} onClick={step === 0 ? () => setStep(1) : save}>{step === 0 ? 'Let’s connect →' : busy ? 'Checking connection…' : 'Connect and check'}</button></div>
         </div>
       </div>
     </div>
@@ -254,7 +265,7 @@ function Mcp() {
   return (
     <section>
       <h3 className="sec-h">MCP servers</h3>
-      <p className="muted small" style={{ marginBottom: 10 }}>For developers: connect any server that speaks MCP and your team can use its tools. Only servers on the public web are allowed.</p>
+      <p className="muted small" style={{ marginBottom: 10 }}>Have a tool server link? Paste the HTTPS address supplied by your provider below. We’ll discover its tools automatically. Add an access token only if your provider gives you one.</p>
       <div className="list">
         {(list || []).map((c) => (
           <div key={c.id} className="item">

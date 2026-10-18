@@ -423,7 +423,18 @@ async def fs_upload(request: Request, owner: str = Form("shared"), folder_id: Op
         raise
     except Exception:
         raise HTTPException(400, "I couldn't read that file")
-    did = db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,mime,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (o, name[:160], kind, body, folder_id, file.content_type or "", db.now(), db.now()))
+    from pathlib import Path
+    import uuid
+    stored_name = f"{uuid.uuid4().hex}{Path(name).suffix.lower()[:12]}"
+    stored_dir = db.data_dir() / "files"
+    stored_dir.mkdir(parents=True, exist_ok=True)
+    stored_path = stored_dir / stored_name
+    stored_path.write_bytes(data)
+    try:
+        stored_path.chmod(0o600)
+    except OSError:
+        pass
+    did = db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,file_path,mime,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (o, name[:160], kind, body, folder_id, stored_name, file.content_type or "application/octet-stream", db.now(), db.now()))
     return {"id": did}
 
 

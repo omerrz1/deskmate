@@ -21,6 +21,8 @@ from . import access, admin_agent, agent_tools, agents, alerts, apps_api, backup
 
 app = FastAPI(title="Deskmates", docs_url=None, redoc_url=None, openapi_url=None)  # no public API docs
 app.add_middleware(security.Security)
+from . import company_workspaces
+app.include_router(company_workspaces.router)
 app.include_router(office_api.router)
 app.include_router(team_api.router)
 app.include_router(apps_api.router)
@@ -958,6 +960,7 @@ async def agent_speak(aid: int, s: SpeakIn):
 class MeetingIn(BaseModel):
     agent_ids: List[int]
     title: str = ""
+    chat: bool = False
 
 
 def _meeting_public(m):
@@ -970,15 +973,15 @@ def _meeting_public(m):
 @app.post("/api/meetings")
 def meeting_create(m: MeetingIn):
     try:
-        mid = agents.start_meeting(m.agent_ids[:6], m.title[:80])
+        mid = agents.start_meeting(m.agent_ids[:6], m.title[:80], chat=m.chat)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return _meeting_public(agents.meeting_detail(mid))
 
 
 @app.get("/api/meetings")
-def meeting_list():
-    return [dict(r) for r in db.q("SELECT id,title,kind,status,agent_ids,created_at,ended_at,summary FROM meetings ORDER BY id DESC LIMIT 40")]
+def meeting_list(chat: bool = False):
+    return [dict(r) for r in db.q("SELECT id,title,kind,status,agent_ids,created_at,ended_at,summary FROM meetings WHERE (kind='admin_chat')=? ORDER BY id DESC LIMIT 40", (int(chat),))]
 
 
 @app.get("/api/meetings/{mid}")
@@ -996,7 +999,7 @@ class RTIn(BaseModel):
 @app.post("/api/meetings/{mid}/realtime")
 async def meeting_realtime(mid: int, body: RTIn):
     m = agents.meeting_detail(mid)
-    if not m or m["status"] != "live":
+    if not m or m["status"] != "live" or m["kind"] == "admin_chat":
         raise HTTPException(404, "meeting not found or ended")
     ag = next((a for a in m["agents"] if a["id"] == body.agent_id), None)
     if not ag:
@@ -1004,7 +1007,7 @@ async def meeting_realtime(mid: int, body: RTIn):
     group = m["kind"] != "one_to_one"
     listener = (not group) or m["agents"][0]["id"] == ag["id"]
     prompt = agents.meeting_prompt(ag, m["agents"], m["kind"], live=True)
-    s = await llm.realtime_meeting_secret(prompt, ag["openai_voice"], agents.realtime_tools(ag), listener=listener, auto_reply=not group)
+    s = await llm.realtime_meeting_secret(prompt, ag["openai_voice"], agents.realtime_tools(ag), listener=listener, auto_reply=False)
     costs.open_voice_session(mid, ag["id"], listener)
     return {**s, "agent_id": ag["id"], "listener": listener, "group": group}
 
@@ -1023,9 +1026,9 @@ async def meeting_tool(mid: int, body: MToolIn):
         raise HTTPException(404, "meeting not active")
     if body.name not in {t["name"] for t in agents.tools_for(ag)}:
         raise HTTPException(400, "unknown tool")
-    gate = agents.meeting_gate(mid, body.name)
+    gate = agents.meeting_gate(mid, body.name, body.args)
     try:
-        res, link = (gate, None) if gate else await agents.run_agent_tool({**ag, "live_admin": True}, body.name, body.args)
+        res, link = (gate, None) if gate else await agents.run_agent_tool({**ag, "live_admin": True, "_meeting_id": mid}, body.name, body.args)
     except Exception as e:
         res, link = {"error": f"{type(e).__name__}"}, None
     db.log("agent", f"{ag['name']} (live meeting) used {body.name}")
@@ -1067,6 +1070,25 @@ async def meeting_route(mid: int, r: RouteIn):
 
 class MeetingMsg(BaseModel):
     text: str
+
+
+class MeetingAttachmentIn(BaseModel):
+    doc_id: int
+
+
+@app.post("/api/meetings/{mid}/attachments")
+def meeting_attach(mid: int, body: MeetingAttachmentIn):
+    """Send a document from the shared drive into a team chat."""
+    meeting = db.q1("SELECT kind,status FROM meetings WHERE id=?", (mid,))
+    if not meeting or meeting["kind"] != "admin_chat" or meeting["status"] != "live":
+        raise HTTPException(404, "chat not found or ended")
+    doc = db.q1("SELECT id,agent_id,title,kind,mime,body FROM documents WHERE id=?", (body.doc_id,))
+    if not doc or doc["agent_id"] != 0:
+        raise HTTPException(404, "file not found in the shared drive")
+    attachment = {"doc_id": doc["id"], "title": doc["title"], "kind": doc["kind"], "mime": doc["mime"] or "", "size": len(doc["body"] or "")}
+    db.run("INSERT INTO meeting_msgs(meeting_id,role,text,tools,attachments,created_at) VALUES(?,?,?,?,?,?)",
+           (mid, "admin", "", "[]", json.dumps([attachment], ensure_ascii=False), db.now()))
+    return {"ok": True, "attachment": attachment}
 
 
 @app.post("/api/meetings/{mid}/message")
@@ -1605,7 +1627,7 @@ def auth_status(request: Request):
     return {"needs_setup": False, "signup_open": directory.SIGNUPS_OPEN, "signup_code_required": bool(directory.SIGNUP_CODE),
             "signup_public": directory.SIGNUPS_OPEN and not directory.SIGNUP_CODE,  # whether the public site should offer "create a workspace" at all
             "contact_email": os.getenv("CONTACT_EMAIL", "").strip(), "authenticated": bool(sess), "username": sess["username"] if sess else None,
-            "role": sess["role"] if sess else None, "must_change": bool(sess and sess["must_change"]), "workspace": ws,
+            "role": sess["role"] if sess else None, "must_change": bool(sess and sess["must_change"]), "workspace": ws, "subworkspace": bool(sess and sess.get("company_ws")),
             "name": people.display_name(sess) if sess else None, "title": (sess.get("title") or "") if sess else "",
             "platform": bool(sess and sess["ws"] == db.MAIN and sess["role"] == "owner")}
 

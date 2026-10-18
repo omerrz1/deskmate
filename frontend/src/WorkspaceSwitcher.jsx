@@ -1,9 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api, usePoll } from './api'
 
 export default function WorkspaceSwitcher() {
-  const [data, reload] = usePoll('/workspaces', 15000)
+  const [data, reload, loadError] = usePoll('/workspaces', 15000)
   const [open, setOpen] = useState(false)
+  const dialog = useRef(null)
+  const nameInput = useRef(null)
+  useEffect(() => { if (open && dialog.current) { dialog.current.showModal(); if (open === 'create') nameInput.current?.focus() } }, [open])
   const [name, setName] = useState('')
   const [visibility, setVisibility] = useState('private')
   const [email, setEmail] = useState('')
@@ -14,21 +18,23 @@ export default function WorkspaceSwitcher() {
   async function enter(id) { await api.post(`/workspaces/${id}/switch`); localStorage.setItem('workspace-changed', String(Date.now())); window.location.assign('/') }
   const current = data?.workspaces.find(w => w.id === data.current)
   return <div className="workspace-switcher">
-    <button className="workspace-trigger" onClick={() => setOpen(!open)} aria-expanded={open}><span><small>WORKSPACE</small><b>{current?.name || data?.company || 'Company'}</b></span><span>⌄</span></button>
-    {open && <div className="workspace-panel">
-      <h3>Your workspaces</h3><p className="muted small">Separate files, AI teammates, projects and connected apps.</p>
-      <button className="workspace-choice" disabled={busy || !data} onClick={() => act(() => enter(data.company_id))}>{data?.company} <small>Company</small></button>
-      {data?.workspaces.map(w => <button className="workspace-choice" disabled={busy} key={w.id} onClick={() => act(async () => { if (!w.accepted) await api.post(`/workspaces/${w.id}/accept`); await enter(w.id) })}><span>{w.name}</span><small>{!w.accepted ? 'Accept invitation →' : w.visibility === 'private' ? 'Private · only you' : 'Shared'}</small></button>)}
+    <button className="workspace-trigger" onClick={() => setOpen(!open)} aria-expanded={!!open}><span><small>WORKSPACE</small><b>{current?.name || data?.company || 'Company'}</b></span><span>Switch ⌄</span></button>
+    <button className="workspace-create" onClick={() => setOpen('create')}>＋ Create workspace</button>
+    {open && createPortal(<dialog ref={dialog} className="workspace-panel" aria-labelledby="workspace-title" onCancel={() => setOpen(false)}><button className="workspace-close" onClick={() => setOpen(false)} aria-label="Close workspaces">×</button>
+      <h3 id="workspace-title">Your workspaces</h3><p className="muted small">Separate files, AI teammates, projects and connected apps.</p>
+      <button className="workspace-choice" disabled={busy || !data} onClick={() => act(() => enter(data.company_id))}>{data?.company} <small>{data?.current === data?.company_id ? '✓ Current · Company' : 'Company'}</small></button>
+      {data?.workspaces.map(w => <button className="workspace-choice" disabled={busy} key={w.id} onClick={() => act(async () => { if (!w.accepted) await api.post(`/workspaces/${w.id}/accept`); await enter(w.id) })}><span>{w.name}</span><small>{w.id === data.current ? '✓ Current · ' : ''}{!w.accepted ? 'Accept invitation →' : w.visibility === 'private' ? 'Private · only you' : 'Shared'}</small></button>)}
       <form className="form" onSubmit={e => { e.preventDefault(); act(async () => { const w = await api.post('/workspaces', { name, visibility }); await enter(w.id) }) }}>
-        <h4>Create a workspace</h4><label>Name<input required maxLength={80} placeholder="My research, Product team…" value={name} onChange={e => setName(e.target.value)} /></label>
+        <h4>Create a workspace</h4><label>Name<input ref={nameInput} required maxLength={80} placeholder="My research, Product team…" value={name} onChange={e => setName(e.target.value)} /></label>
         <label>Who can access it?<select value={visibility} onChange={e => setVisibility(e.target.value)}><option value="private">Private — only me</option><option value="shared">Shared — invited colleagues</option></select></label>
         <button className="btn solid" disabled={busy || !name.trim()}>Create workspace</button>
       </form>
       {current?.is_owner && current?.visibility === 'shared' && <form className="form" onSubmit={e => { e.preventDefault(); act(async () => { await api.post(`/workspaces/${current.id}/invite`, { username: email }); setEmail(''); await reload(); setError('Invitation sent. Your colleague can accept it from their workspace menu.') }) }}><label>Invite a company colleague<input required placeholder="Email or username" value={email} onChange={e => setEmail(e.target.value)} /></label><button className="btn" disabled={busy}>Invite</button></form>}
       {current?.is_owner && current.visibility === 'shared' && <WorkspaceMembers id={current.id} ownerId={current.owner_id} />}
+      {loadError && <p role="alert">{loadError.message} <button className="link" onClick={reload}>Try again</button></p>}
       {error && <p role="status" className="small">{error}</p>}
       <button className="link" onClick={() => setOpen(false)}>Close</button>
-    </div>}
+    </dialog>, document.body)}
   </div>
 }
 

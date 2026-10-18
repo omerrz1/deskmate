@@ -103,7 +103,6 @@ function Shell() {
     <div className="shell">
       <aside className="sidebar">
         <Link to="/" className="brand"><span className="mark"><i /></span><span className="t"><b>Deskmates</b>{company?.name && <small>{company.name}</small>}</span></Link>
-        <WorkspaceSwitcher />
         <nav className="nav" aria-label="Main">
           {link('/', 'users', 'Team')}
           {!auth.subworkspace && link('/people', 'person', 'People')}
@@ -135,6 +134,7 @@ function Shell() {
       </aside>
       <main className="main">
         <header className="topbar">
+          <WorkspaceSwitcher />
           <div className="crumb"><span>{company?.name || 'Deskmates'}</span>{section && <><i>/</i><b>{section}</b></>}</div>
           <button className="search-trigger" onClick={() => setPalette(true)} ><Icon name="search" size={14} /><span>Search or jump to…</span><kbd>⌘K</kbd></button>
           <Link to="/settings/account" className="bell shell-mobile-only" aria-label="Your account" title="Your account"><span className="u-av" style={{ width: 28, height: 28, fontSize: 12 }}>{(auth.username || '?').slice(0, 1).toUpperCase()}</span></Link>
@@ -191,7 +191,6 @@ function MemberShell() {
     <div className="shell member-shell">
       <aside className="sidebar">
         <Link to="/" className="brand"><span className="mark"><i /></span><span className="t"><b>Deskmates</b>{auth.workspace?.name && <small>{auth.workspace.name}</small>}</span></Link>
-        <WorkspaceSwitcher />
         <nav className="nav" aria-label="Main">
           {link('/', 'person', 'My work')}
           {link('/projects', 'projects', 'Projects')}
@@ -205,6 +204,7 @@ function MemberShell() {
       </aside>
       <main className="main">
         <header className="topbar">
+          <WorkspaceSwitcher />
           <div className="crumb"><span>{auth.workspace?.name || 'Deskmates'}</span>{section && <><i>/</i><b>{section}</b></>}</div>
           <button className="bell" onClick={() => setTheme(theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system')} title={`Theme: ${theme === 'system' ? 'matches your computer' : theme}. Click to change.`} aria-label="Change theme"><Icon name={theme === 'dark' ? 'moon' : theme === 'light' ? 'sun' : 'monitor'} size={16} /></button>
         </header>

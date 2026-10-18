@@ -1217,3 +1217,17 @@ a.ch-chip:hover { text-decoration: underline; }
 .tc-thread:hover,.tc-thread.active { background:var(--surface); }
 .tc-agent-picker label { background:var(--surface); }.tc-agent-picker label.picked { background:var(--accent-bg); }
 .tc-agent-picker label:focus-within { outline:2px solid var(--accent-solid);outline-offset:2px; }
+
+/* The composer must fill its flex container, including legacy chat form rules. */
+.team-chat-room form.tc-compose { display:block;width:100%;max-width:none;align-self:stretch;margin:0;padding:16px 18px 20px;border:0; }
+.tc-compose-box { width:100%;min-width:0; }
+.team-chat-room .tc-compose-box textarea { display:block;width:100%;resize:none; }
+.topbar .workspace-switcher { display:flex;align-items:center;gap:8px;margin:0;flex-shrink:0; }
+.topbar .workspace-trigger { width:auto;min-width:160px;padding:7px 10px;gap:16px; }
+.workspace-create { border:1px solid var(--line);border-radius:9px;padding:10px 12px;background:var(--surface);color:var(--text);white-space:nowrap;cursor:pointer; }
+.topbar .workspace-trigger b { max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+.workspace-panel { position:fixed;inset:0;margin:auto;width:min(520px,calc(100vw - 32px));max-height:85dvh;padding:28px;border:1px solid var(--line); }
+.workspace-panel::backdrop { background:#0007;backdrop-filter:blur(3px); }
+.workspace-close { float:right;border:0;background:transparent;color:var(--text);font-size:24px;cursor:pointer; }
+@media(max-width:1100px) { .topbar .crumb { display:none; }.topbar .workspace-trigger { min-width:0; } }
+@media(max-width:760px) { .topbar .workspace-switcher { flex:1;min-width:0;gap:6px; }.topbar .workspace-trigger { flex:1;min-width:0; }.topbar .workspace-trigger b { max-width:110px; }.workspace-create { font-size:11px;padding:10px 7px; }.team-chat-room form.tc-compose { padding:10px; }.workspace-panel { padding:20px; } }

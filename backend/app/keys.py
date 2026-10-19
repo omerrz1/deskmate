@@ -24,6 +24,7 @@ def _put(key, value):
     _gate[0] = 0.0
 
 
+@db.company_scope
 def get(name):
     """The plain key, or '' when not connected."""
     stored = _setting(NAMES[name])
@@ -37,18 +38,21 @@ def get(name):
     return plain
 
 
+@db.company_scope
 def save(name, key):
     _put(NAMES[name], secretbox.seal(key.strip()))
     if name == "eleven":
         _put("eleven_skipped", "")
 
 
+@db.company_scope
 def clear(name):
     db.run("DELETE FROM settings WHERE key=?", (NAMES[name],))
     _cache.pop(name, None)
     _gate[0] = 0.0
 
 
+@db.company_scope
 def skip_eleven(on=True):
     _put("eleven_skipped", "1" if on else "")
 
@@ -69,6 +73,7 @@ def migrate_env():
             db.log("security", f"The {'OpenAI' if name == 'openai' else 'ElevenLabs'} key was moved from the server's .env file into the app")
 
 
+@db.company_scope
 def state():
     openai, eleven = bool(get("openai")), bool(get("eleven"))
     skipped = bool(_setting("eleven_skipped"))
@@ -78,6 +83,7 @@ def state():
             "complete": done, "step": "done" if done else ("openai" if not openai else "eleven")}
 
 
+@db.company_scope
 def complete():
     """True once both steps are done. Cached for a second: it is asked on every request."""
     t = time.time()

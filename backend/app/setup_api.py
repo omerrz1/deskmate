@@ -1,5 +1,5 @@
 """Connecting the company's own OpenAI and ElevenLabs accounts. Until both steps are done the rest of the app answers 'connect your keys first'."""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from . import auth, db, keys, llm
@@ -12,8 +12,9 @@ class KeyIn(BaseModel):
 
 
 @router.get("/setup")
-def setup_state():
-    return keys.state()
+def setup_state(request: Request):
+    s = request.state.session
+    return {**keys.state(), 'can_manage': s.get('company_role', s.get('role')) in ('owner', 'admin')}
 
 
 @router.post("/setup/openai")

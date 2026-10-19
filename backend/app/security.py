@@ -118,7 +118,8 @@ class Security:
                 if not ok:
                     return await deny(429, f"Too many attempts. Try again in {wait}s.", [(b"retry-after", str(wait).encode())])
             elif path not in PUBLIC:
-                company_route = path.startswith(("/api/auth/", "/api/workspaces"))
+                connection_write = method not in SAFE and (path == "/api/apps" or path.startswith(("/api/apps/", "/api/connectors", "/api/setup")))
+                company_route = path.startswith(("/api/auth/", "/api/workspaces")) or connection_write
                 sess = auth.session_from_cookie(headers.get("cookie"), resolve_workspace=not company_route)
                 if not sess:
                     return await deny(401, "Please sign in.")

@@ -311,7 +311,7 @@ def attention():
         "approvals": db.q1("SELECT COUNT(*) n FROM emails WHERE status='pending_approval'")["n"] + db.q1("SELECT COUNT(*) n FROM outbox WHERE status='pending_approval'")["n"] + chats.counts()["approvals"],
         "chats_unread": chats.counts()["unread"],
         "unread": db.q1("SELECT COUNT(*) n FROM emails WHERE agent_id=0 AND folder='inbox' AND status='unread'")["n"],
-        "connectors_to_review": db.q1("SELECT COUNT(*) n FROM connectors WHERE added_by LIKE '%(manager)' AND checked_at>?", (now - 86400 * 2,))["n"],
+        "connectors_to_review": db.company_q1("SELECT COUNT(*) n FROM connectors WHERE added_by LIKE '%(manager)' AND checked_at>?", (now - 86400 * 2,))["n"],
         "live_questions": len(live_help.listing("open")),
         "discuss": db.q1("SELECT COUNT(*) n FROM discuss_items WHERE status='open'")["n"],
         "app_requests": app_requests.listing(),
@@ -401,13 +401,13 @@ def connectors_patch(cid: int, p: ConnectorPatch):
     if p.token:
         f["token"] = p.token.strip()
     if f:
-        db.update("connectors", cid, **f)
+        db.company_update("connectors", cid, **f)
     return {"ok": True}
 
 
 @router.delete("/connectors/{cid}")
 def connectors_delete(cid: int):
-    db.run("DELETE FROM connectors WHERE id=?", (cid,))
+    db.company_run("DELETE FROM connectors WHERE id=?", (cid,))
     return {"ok": True}
 
 

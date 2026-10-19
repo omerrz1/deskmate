@@ -33,8 +33,9 @@ export default function SetupGate({ children }) {
           <li><i>3</i>Your company</li>
         </ol>
         <h1>{title}</h1>
+        <p className="small muted">Connect once for your company. All workspaces use this account.</p>
         <p className="muted">{why}</p>
-        <form onSubmit={connect}>
+        {s.can_manage === false ? <p className="notice">Your company admin needs to connect the company’s AI account. Once connected, it will work in all your workspaces automatically.</p> : <form onSubmit={connect}>
           <label className="f">API key
             <input type="password" autoComplete="off" spellCheck="false" autoFocus value={key} onChange={(e) => setKey(e.target.value)} placeholder={hint} />
           </label>
@@ -42,7 +43,7 @@ export default function SetupGate({ children }) {
           {err && <p className="warn" role="alert">{err}</p>}
           <div className="actions"><button className="btn solid big" disabled={busy || key.trim().length < 20}>{busy ? 'Checking…' : 'Connect'}</button>
             {at === 1 && <button type="button" className="btn ghost" onClick={skip}>Skip for now (no ElevenLabs phone voices)</button>}</div>
-        </form>
+        </form>}
       </div>
     </div>
   )

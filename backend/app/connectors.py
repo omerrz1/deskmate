@@ -97,29 +97,31 @@ def check_url(url, public_only):
 
 
 async def add(name, url, token, added_by="admin", public_only=False):
+    if db.current() != db.company():
+        raise MCPError('Ask a company admin to connect this server in Apps.')
     url = url.strip()
     check_url(url, public_only)
-    cid = db.run("INSERT INTO connectors(name,url,token,added_by,created_at) VALUES(?,?,?,?,?)", (re.sub(r"[^A-Za-z0-9 _.-]", "", name)[:40] or "Connector", url, token.strip(), added_by, db.now()))
+    cid = db.company_run("INSERT INTO connectors(name,url,token,added_by,created_at) VALUES(?,?,?,?,?)", (re.sub(r"[^A-Za-z0-9 _.-]", "", name)[:40] or "Connector", url, token.strip(), added_by, db.now()))
     await refresh(cid)
     return cid
 
 
 async def refresh(cid):
-    c = db.q1("SELECT * FROM connectors WHERE id=?", (cid,))
+    c = db.company_q1("SELECT * FROM connectors WHERE id=?", (cid,))
     if not c:
         return None
     try:
         tools = await list_tools(c["url"], c["token"])
-        db.update("connectors", cid, tools=json.dumps(tools), last_error="", checked_at=db.now())
+        db.company_update("connectors", cid, tools=json.dumps(tools), last_error="", checked_at=db.now())
         return tools
     except Exception as e:
-        db.update("connectors", cid, last_error=(str(e) if isinstance(e, MCPError) else f"Could not reach it ({type(e).__name__})")[:200], checked_at=db.now())
+        db.company_update("connectors", cid, last_error=(str(e) if isinstance(e, MCPError) else f"Could not reach it ({type(e).__name__})")[:200], checked_at=db.now())
         return None
 
 
 def listing():
     out = []
-    for c in db.q("SELECT * FROM connectors ORDER BY id"):
+    for c in db.company_q("SELECT * FROM connectors ORDER BY id"):
         tools = json.loads(c["tools"] or "[]")
         out.append({"id": c["id"], "name": c["name"], "url": c["url"], "enabled": bool(c["enabled"]), "added_by": c["added_by"], "has_token": bool(c["token"]),
                     "tools": [{"name": t["name"], "description": t["description"]} for t in tools], "last_error": c["last_error"], "checked_at": c["checked_at"]})
@@ -133,7 +135,7 @@ def _tool_name(cid, tool):
 def tool_defs():
     """OpenAI function definitions for every enabled connector tool."""
     defs = []
-    for c in db.q("SELECT * FROM connectors WHERE enabled=1"):
+    for c in db.company_q("SELECT * FROM connectors WHERE enabled=1"):
         for t in json.loads(c["tools"] or "[]"):
             schema = t["schema"] if isinstance(t["schema"], dict) and t["schema"].get("type") == "object" else {"type": "object", "properties": {}}
             defs.append({"name": _tool_name(c["id"], t["name"]), "description": f"[{c['name']}] {t['description']}"[:900], "parameters": schema})
@@ -144,7 +146,7 @@ async def run(name, args):
     m = re.match(r"^mcp__(\d+)__(.+)$", name)
     if not m:
         return {"error": "unknown tool"}
-    c = db.q1("SELECT * FROM connectors WHERE id=? AND enabled=1", (int(m.group(1)),))
+    c = db.company_q1("SELECT * FROM connectors WHERE id=? AND enabled=1", (int(m.group(1)),))
     if not c:
         return {"error": "that connector is off"}
     real = next((t["name"] for t in json.loads(c["tools"] or "[]") if _tool_name(c["id"], t["name"]) == name), None)

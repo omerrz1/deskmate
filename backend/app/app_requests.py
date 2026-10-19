@@ -54,7 +54,7 @@ def steps_for(spec):
 
 
 def _installed(spec):
-    return bool(spec and db.q1("SELECT id FROM integrations WHERE kind=?", (spec["id"],)))
+    return bool(spec and db.company_q1("SELECT id FROM integrations WHERE kind=?", (spec["id"],)))
 
 
 def listing():

@@ -18,7 +18,7 @@ export default function Connections() {
   }
   const test = async () => { try { setRes(await api.post('/setup/test')) } catch (e) { toast.err(e.message) } }
   const disconnect = async () => {
-    if (!(await confirm({ title: 'Disconnect ElevenLabs?', body: 'Phone calls will use the OpenAI voice until you connect it again.', confirm: 'Disconnect', danger: true }))) return
+    if (!(await confirm({ title: 'Disconnect ElevenLabs?', body: 'This disconnects ElevenLabs across every workspace in your company. Phone calls will use the OpenAI voice until it is reconnected.', confirm: 'Disconnect', danger: true }))) return
     try { await api.del('/setup/eleven'); reload() } catch (e) { toast.err(e.message) }
   }
   const card = (name, title, why, st) => (
@@ -33,18 +33,19 @@ export default function Connections() {
         </form>
       ) : (
         <div className="actions" style={{ marginTop: 12 }}>
-          <button className="btn" onClick={() => { setEdit(name); setKey('') }}>{st.connected ? 'Replace key' : 'Connect'}</button>
-          {name === 'eleven' && st.connected && <button className="btn danger" onClick={disconnect}>Disconnect</button>}
+          <button className="btn" disabled={s.can_manage === false} onClick={() => { setEdit(name); setKey('') }}>{st.connected ? 'Replace key' : 'Connect'}</button>
+          {name === 'eleven' && st.connected && <button className="btn danger" disabled={s.can_manage === false} onClick={disconnect}>Disconnect</button>}
         </div>
       )}
     </div></section>
   )
   return (
     <>
-      <p className="muted" style={{ marginBottom: 14, maxWidth: 640 }}>Your team runs on your own accounts, so usage is billed to you. Keys are checked with the provider, stored encrypted on this server, and never shown again.</p>
+      <p className="muted" style={{ marginBottom: 14, maxWidth: 640 }}>These company accounts are shared across all workspaces, so usage is billed to the company’s connected accounts. Keys are checked with the provider, stored encrypted on this server, and never shown again.</p>
+      {s.can_manage === false && <p className="notice-soft">Your company admin manages these connections. They are already available to your workspace.</p>}
       {card('openai', 'OpenAI', 'Thinking, writing, planning, meetings and summaries. Required.', s.openai)}
       {card('eleven', 'ElevenLabs', 'Natural voices on live phone calls. Used for calls only.', s.eleven)}
-      <div className="actions"><button className="btn" onClick={test}>Test both connections</button></div>
+      <div className="actions"><button className="btn" disabled={s.can_manage === false} onClick={test}>Test both connections</button></div>
     </>
   )
 }

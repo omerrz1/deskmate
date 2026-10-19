@@ -15,7 +15,9 @@ export default function Apps() {
   const confirm = useConfirm()
   const [params, setParams] = useSearchParams()
   const [cat] = usePoll('/apps/catalog', 0)
-  const [inst, reload] = usePoll('/apps', 0)
+  const [inst, reload] = usePoll('/apps', 5000)
+  const [scope] = usePoll('/apps-scope', 0)
+  const canManage = !!scope?.can_manage
   const [builtin, reloadB] = usePoll('/apps/builtin', 0)
   const [reqs] = usePoll('/app-requests', 0)
   const [sel, setSel] = useState(null) // { spec, inst? }
@@ -28,10 +30,10 @@ export default function Apps() {
   const asked = (reqs || []).find((r) => r.app_key === want)
 
   useEffect(() => {  // arriving from an employee's request: open that app's form straight away
-    if (!want || !cat || sel) return
+    if (!want || !cat || sel || !canManage) return
     const spec = cat.find((a) => a.id === want)
     if (spec) setSel({ spec })
-  }, [want, cat]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [want, cat, canManage]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const addable = useMemo(() => (cat || []).filter((a) => !a.builtin), [cat])
   const cats = useMemo(() => {  // categories with how many apps each holds, biggest first
@@ -50,7 +52,7 @@ export default function Apps() {
       <div className="apphead"><AppIcon id={a.id} name={a.name} emoji={a.icon} /><div><b>{a.name}</b><small>{a.category}</small></div></div>
       <p className="small muted clamp2">{a.description}</p>
       <div className="appfoot">
-        {a.installed && !a.multi ? <span className="tag done" style={{ margin: 0, width: 'fit-content' }}>Connected</span> : <button className="btn small" onClick={() => setSel({ spec: a })}>Connect</button>}
+        {a.installed && !a.multi ? <span className="tag done" style={{ margin: 0, width: 'fit-content' }}>Connected</span> : <button className="btn small" disabled={!canManage} onClick={() => setSel({ spec: a })}>Connect</button>}
         {SETUP[a.setup] && <span className="faint small">{SETUP[a.setup]}</span>}
       </div>
     </article>
@@ -59,14 +61,15 @@ export default function Apps() {
   const toggle = async (i, patch) => { try { await api.put(`/apps/${i.id}`, patch); reload() } catch (e) { toast.err(e.message) } }
   const test = async (i) => { try { const r = await api.post(`/apps/${i.id}/test`); r.ok ? toast.ok(`${i.name}: ${r.message}`) : toast.err(`${i.name}: ${r.message}`); reload() } catch (e) { toast.err(e.message) } }
   const disconnect = async (i) => {
-    if (!(await confirm({ title: `Disconnect ${i.name}?`, body: 'Your team will no longer be able to use it. You can connect it again any time.', confirm: 'Disconnect', danger: true }))) return
+    if (!(await confirm({ title: `Disconnect ${i.name}?`, body: 'This disconnects the app for every workspace in your company. You can reconnect it later.', confirm: 'Disconnect', danger: true }))) return
     try { await api.del(`/apps/${i.id}`); reload(); toast.ok(`${i.name} disconnected`) } catch (e) { toast.err(e.message) }
   }
   const closeModal = () => { setSel(null); if (want) setParams(tab === 'connected' ? {} : { tab }) }
 
   return (
     <div className="page wide">
-      <PageHeader title="Apps" sub="The tools your team can use: your own accounts, built-in tools and custom connections." />
+      <PageHeader title="Apps" sub="Connect once for your company. Use connected accounts in every workspace." />
+      <p className="notice-soft"><b>{scope?.company || 'Company'} connections</b> · Shared across all company workspaces. {canManage ? 'Changes here apply to every workspace.' : 'Your agents can use these connections. Ask a company admin to add or change an account.'}</p>
       <div className="tabs">{TABS.map(([k, n]) => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{n}{k === 'connected' && installed.length > 0 && <i className="badge muted-badge">{installed.length}</i>}</button>)}</div>
 
       {tab === 'connected' && (
@@ -80,13 +83,13 @@ export default function Apps() {
                 <div key={i.id} className="item app-row">
                   <AppIcon id={i.kind} name={i.name} emoji={i.icon} />
                   <div className="grow"><b>{i.name}</b><span className={i.last_error ? 'warn small' : 'muted small'} style={{ margin: 0, display: 'block' }}>{i.last_error || `${i.last_ok_at ? 'Connected' : 'Saved'} · ${i.tools.length} actions`}</span></div>
-                  <div className="side-r app-ctl">
+                  <fieldset className="side-r app-ctl connection-controls" disabled={!canManage}>
                     <Switch checked={i.enabled} label="On" onChange={(v) => toggle(i, { enabled: v })} />
                     <Switch checked={i.allow_write} label="Can make changes" onChange={(v) => toggle(i, { allow_write: v })} />
                     <button className="link" onClick={() => test(i)}>Test</button>
                     <button className="link" onClick={() => spec && setSel({ spec, inst: i })}>Settings</button>
                     <button className="link" onClick={() => disconnect(i)}>Disconnect</button>
-                  </div>
+                  </fieldset>
                 </div>
               )
             })}
@@ -128,7 +131,7 @@ export default function Apps() {
                 <div key={b.id} className="item">
                   <AppIcon id={b.id} name={b.name} emoji={(cat || []).find((c) => c.id === b.id)?.icon} />
                   <div className="grow"><b>{b.name}</b><span className="muted small" style={{ display: 'block' }}>{b.description}</span></div>
-                  <div className="side-r"><Switch checked={b.enabled} label={b.enabled ? 'On' : 'Off'} onChange={async (v) => { try { await api.put(`/apps/builtin/${b.id}`, { enabled: v }); reloadB() } catch (e) { toast.err(e.message) } }} /></div>
+                  <fieldset disabled={!canManage} className="side-r connection-controls"><Switch checked={b.enabled} label={b.enabled ? 'On' : 'Off'} onChange={async (v) => { try { await api.put(`/apps/builtin/${b.id}`, { enabled: v }); reloadB() } catch (e) { toast.err(e.message) } }} /></fieldset>
                 </div>
               ))}
             </div>
@@ -136,7 +139,7 @@ export default function Apps() {
         </>
       )}
 
-      {tab === 'advanced' && <Advanced />}
+      {tab === 'advanced' && <Advanced canManage={canManage} />}
       {sel && <AppModal sel={sel} asked={asked && sel.spec.id === asked.app_key ? asked : null} onClose={closeModal} onSaved={() => { reload() }} />}
     </div>
   )
@@ -199,12 +202,12 @@ function AppModal({ sel, asked, onClose, onSaved }) {
   )
 }
 
-function Advanced() {
+function Advanced({ canManage }) {
   return (
     <div style={{ display: 'grid', gap: 36 }}>
       <Messaging />
       <Hooks />
-      <Mcp />
+      <fieldset className="connection-controls" disabled={!canManage}><Mcp /></fieldset>
     </div>
   )
 }

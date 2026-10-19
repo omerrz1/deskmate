@@ -307,3 +307,59 @@ def carry(coro):
         finally:
             _tenant.reset(tok)
     return _run()
+
+
+# Connections belong to a company; ordinary q/run continue to address the workspace.
+def company():
+    from . import directory
+    tid = current()
+    if not tid:
+        raise RuntimeError('No workspace is selected for this request.')
+    return (directory.get(tid) or {}).get('parent_id') or tid
+
+
+def company_q(sql, args=()):
+    with use(company()):
+        return q(sql, args)
+
+
+def company_q1(sql, args=()):
+    rows = company_q(sql, args)
+    return rows[0] if rows else None
+
+
+def company_run(sql, args=()):
+    with use(company()):
+        result = run(sql, args)
+        _publish_company(sql)
+        return result
+
+
+def _publish_company(sql):
+    from . import directory
+    for row in directory._q("SELECT id FROM workspaces WHERE parent_id=? AND status='active'", (current(),)):
+        bus.publish_sql(sql, row['id'])
+
+
+def company_update(table, id_, **fields):
+    with use(company()):
+        result = update(table, id_, **fields)
+        _publish_company('UPDATE ' + table)
+        return result
+
+
+def company_scope(fn):
+    """Use company-owned state for a small service function, restoring workspace context."""
+    import functools
+    import inspect
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def asynchronous(*args, **kwargs):
+            with use(company()):
+                return await fn(*args, **kwargs)
+        return asynchronous
+    @functools.wraps(fn)
+    def synchronous(*args, **kwargs):
+        with use(company()):
+            return fn(*args, **kwargs)
+    return synchronous

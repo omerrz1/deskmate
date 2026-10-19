@@ -25,7 +25,7 @@ def resolve(session):
         person = db.q1('SELECT id FROM admins WHERE username=?', (session['username'],))
     if not person:
         return session
-    return {**session, 'company_ws': session['ws'], 'company_admin_id': session['admin_id'], 'ws': wid,
+    return {**session, 'company_ws': session['ws'], 'company_admin_id': session['admin_id'], 'company_role': session['role'], 'ws': wid,
             'admin_id': person['id'], 'role': 'owner' if row['owner_id'] == session['admin_id'] else 'admin'}
 
 

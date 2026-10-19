@@ -53,7 +53,7 @@ def _agents():
 
 
 def _tools_of(connector_id):
-    return json.loads((db.q1('SELECT tools FROM connectors WHERE id=?', (connector_id,)) or {}).get('tools') or '[]')
+    return json.loads((db.company_q1('SELECT tools FROM connectors WHERE id=?', (connector_id,)) or {}).get('tools') or '[]')
 
 
 @tool("update_my_profile")
@@ -194,7 +194,9 @@ async def list_connectors(agent, a):
 
 @tool("toggle_connector")
 async def toggle_connector(agent, a):
-    db.update("connectors", a["id"], enabled=int(bool(a["enabled"])))
+    if db.current() != db.company():
+        return {'error': 'Ask a company admin to change this connection.'}, None
+    db.company_update("connectors", a["id"], enabled=int(bool(a["enabled"])))
     return {"ok": True}, "/settings/connectors"
 
 

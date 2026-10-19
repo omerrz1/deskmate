@@ -8,7 +8,7 @@ _S = {"type": "string"}
 
 
 def _mcp_rows():
-    return [c for c in db.q("SELECT * FROM connectors WHERE enabled=1 ORDER BY id")]
+    return [c for c in db.company_q("SELECT * FROM connectors WHERE enabled=1 ORDER BY id")]
 
 
 def list_all(agent=None):
@@ -29,7 +29,7 @@ def describe(key):
     if d:
         return d
     if str(key).startswith("mcp-") and str(key)[4:].isdigit():
-        c = db.q1("SELECT * FROM connectors WHERE id=? AND enabled=1", (int(str(key)[4:]),))
+        c = db.company_q1("SELECT * FROM connectors WHERE id=? AND enabled=1", (int(str(key)[4:]),))
         if c:
             return {"app": key, "name": c["name"], "actions": [{"action": t["name"], "does": t["description"], "makes_changes": True, "inputs": (t.get("schema") or {}).get("properties", {}), "required": (t.get("schema") or {}).get("required", [])}
                                                               for t in json.loads(c["tools"] or "[]")]}
@@ -45,7 +45,7 @@ def is_write(key, action):
 async def call(key, action, inputs):
     key = str(key or "").strip()
     if key.lower().startswith("mcp-") and key[4:].isdigit():
-        c = db.q1("SELECT * FROM connectors WHERE id=? AND enabled=1", (int(key[4:]),))
+        c = db.company_q1("SELECT * FROM connectors WHERE id=? AND enabled=1", (int(key[4:]),))
         if not c or action not in [t["name"] for t in json.loads(c["tools"] or "[]")]:
             return {"error": "That MCP tool is not available."}
         try:

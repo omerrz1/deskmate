@@ -433,6 +433,8 @@ async def run_tool(agent, name, a):
         log_event(aid, "manager", "notes", f"Updated the company details ({', '.join(changed) or 'nothing'})")
         return {"updated": changed}, "/settings/company"
     if name == "toggle_app":
+        if db.current() != db.company():
+            return {"error": "Ask a company admin to change company connections."}, None
         from . import integrations
         ref = str(a["app"]).strip().lower()
         inst = next((i for i in integrations.listing() if ref in (i["kind"].lower(), i["name"].lower(), i["key"].lower())), None)

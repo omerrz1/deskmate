@@ -21,7 +21,7 @@ export default function WorkspaceSwitcher() {
     <button className="workspace-trigger" onClick={() => setOpen(!open)} aria-expanded={!!open}><span><small>WORKSPACE</small><b>{current?.name || data?.company || 'Company'}</b></span><span>Switch ⌄</span></button>
     <button className="workspace-create" onClick={() => setOpen('create')}>＋ Create workspace</button>
     {open && createPortal(<dialog ref={dialog} className="workspace-panel" aria-labelledby="workspace-title" onCancel={() => setOpen(false)}><button className="workspace-close" onClick={() => setOpen(false)} aria-label="Close workspaces">×</button>
-      <h3 id="workspace-title">Your workspaces</h3><p className="muted small">Separate files, AI teammates, projects and connected apps.</p>
+      <h3 id="workspace-title">Your workspaces</h3><p className="muted small">Separate files, AI teammates and projects. Company connections are available in every workspace.</p>
       <button className="workspace-choice" disabled={busy || !data} onClick={() => act(() => enter(data.company_id))}>{data?.company} <small>{data?.current === data?.company_id ? '✓ Current · Company' : 'Company'}</small></button>
       {data?.workspaces.map(w => <button className="workspace-choice" disabled={busy} key={w.id} onClick={() => act(async () => { if (!w.accepted) await api.post(`/workspaces/${w.id}/accept`); await enter(w.id) })}><span>{w.name}</span><small>{w.id === data.current ? '✓ Current · ' : ''}{!w.accepted ? 'Accept invitation →' : w.visibility === 'private' ? 'Private · only you' : 'Shared'}</small></button>)}
       <form className="form" onSubmit={e => { e.preventDefault(); act(async () => { const w = await api.post('/workspaces', { name, visibility }); await enter(w.id) }) }}>

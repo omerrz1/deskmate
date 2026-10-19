@@ -20,7 +20,7 @@ _recent = defaultdict(deque)
 # ---------- catalog and installed apps ----------
 @router.get("/apps/catalog")
 def apps_catalog():
-    installed = {i["kind"] for i in db.q("SELECT kind FROM integrations")}
+    installed = {i["kind"] for i in db.company_q("SELECT kind FROM integrations")}
     return [{"id": a["id"], "name": a["name"], "category": a["category"], "icon": a["icon"], "description": a["description"], "help": a.get("help", ""), "verified": a.get("verified", False),
              "multi": bool(a.get("multi")), "builtin": bool(a.get("builtin")), "popular": bool(a.get("popular")), "setup": catalog.setup_kind(a), "installed": a["id"] in installed, "fields": [{k: v for k, v in f.items() if k != "validate"} for f in a["fields"]],
              "tools": [{"name": t["name"], "description": t["description"], "write": bool(t.get("write"))} for t in a["tools"]]} for a in catalog.APPS]
@@ -48,7 +48,8 @@ def apps_builtin_toggle(kind: str, p: BuiltinPatch):
         raise HTTPException(404)
     off = integrations.builtin_off()
     (off.discard if p.enabled else off.add)(kind)
-    voices.set_setting("builtin_off", json.dumps(sorted(off)))
+    with db.use(db.company()):
+        voices.set_setting("builtin_off", json.dumps(sorted(off)))
     return {"ok": True}
 
 
@@ -249,3 +250,12 @@ async def video_leave(sid: int):
     if not row:
         raise HTTPException(404)
     return await meeting_bot.leave(ag, sid)
+
+
+@router.get('/apps-scope')
+def connection_scope(request: Request):
+    from . import directory
+    session = request.state.session
+    company = directory.get(db.company()) or {}
+    return {'company': company.get('name', 'Company'), 'scope': 'company',
+            'can_manage': session.get('company_role', session.get('role')) in ('owner', 'admin')}

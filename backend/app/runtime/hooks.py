@@ -12,7 +12,7 @@ APPS = {
     "tasks": {"add_todo", "list_todos", "update_todo", "assign_duty", "complete_duty", "list_duties"},
     "files": {"create_document", "create_spreadsheet", "edit_sheet", "read_document", "update_document", "list_documents", "list_files", "create_folder", "move_file", "copy_file", "delete_file"},
     "calendar": {"create_event", "list_events", "cancel_event", "get_current_time"},
-    "phone": {"call_contact", "schedule_call", "start_campaign", "stop_campaign", "create_campaign", "list_calls", "get_call", "list_campaigns", "list_scheduled_calls", "get_client_report", "search_contacts", "update_contact", "get_segments", "get_dashboard_stats", "weekly_report"},
+    "phone": {"call_contact", "schedule_call", "start_campaign", "stop_campaign", "create_campaign", "list_calls", "get_call", "get_call_report", "list_campaigns", "list_scheduled_calls", "get_client_report", "search_contacts", "update_contact", "get_segments", "get_dashboard_stats", "weekly_report"},
     "web": {"read_webpage", "learn_from_website"} | browser_tools.NAMES,
     "notes": {"remember", "learn_procedure", "get_procedure", "list_procedures", "forget_procedure", "update_my_profile"},
     "knowledge": {"create_knowledge_base", "add_knowledge", "update_knowledge_base", "search_knowledge", "list_knowledge_bases"},
@@ -31,7 +31,7 @@ def _summary(name, a, res):
          "create_document": lambda: f"Wrote a document: {g('title')}", "create_spreadsheet": lambda: f"Made a spreadsheet: {g('title')}", "edit_sheet": lambda: f"Updated spreadsheet #{g('id')}",
          "update_document": lambda: f"Edited file #{g('id')}", "create_folder": lambda: f"Made folder {g('path')}", "create_event": lambda: f"Added to calendar: {g('title')}",
          "read_webpage": lambda: f"Read {g('url')}", "use_app": lambda: f"Used {g('app')}: {g('action')}", "connected_apps": lambda: "Looked at connected apps", "learn_from_website": lambda: f"Studied {g('url')}", "call_contact": lambda: f"Placed a call to customer #{g('contact_id')}",
-         "schedule_call": lambda: f"Scheduled a call (customer #{g('contact_id')})", "start_campaign": lambda: f"Started campaign #{g('campaign_id')}", "create_campaign": lambda: f"Created campaign {g('name')}",
+         "schedule_call": lambda: f"Scheduled a call (customer #{g('contact_id')})", "start_campaign": lambda: f"Started campaign #{g('campaign_id')}", "create_campaign": lambda: f"Created campaign {g('name')}", "get_call_report": lambda: f"Prepared the full report for call #{g('call_id')}",
          "learn_procedure": lambda: f"Learned: {g('name')}", "remember": lambda: "Made a note", "weekly_report": lambda: "Pulled the weekly report", "get_dashboard_stats": lambda: "Checked the numbers"}
     return (s.get(name) or (lambda: name.replace("_", " ").capitalize()))()
 

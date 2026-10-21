@@ -177,10 +177,10 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"id": _I, "add_rows": {"type": "array", "items": {"type": "array", "items": _S}},
                                                     "set_cells": {"type": "array", "items": {"type": "object", "properties": {"row": _I, "column": _S, "value": _S}}},
                                                     "add_columns": {"type": "array", "items": _S}, "delete_rows": {"type": "array", "items": _I}}, "required": ["id"]}},
-    {"name": "read_document", "description": "Open a document or spreadsheet by id (works for yours, colleagues' and shared files).", "parameters": {"type": "object", "properties": {"id": _I}, "required": ["id"]}},
+    {"name": "read_document", "description": "Read a document or spreadsheet by id. For long files, use offset/limit to read additional sections; for a spreadsheet, use query to find matching rows.", "parameters": {"type": "object", "properties": {"id": _I, "query": _S, "offset": _I, "limit": _I}, "required": ["id"]}},
     {"name": "update_document", "description": "Replace or append to a document's text, or append rows to a spreadsheet, or rename it.",
      "parameters": {"type": "object", "properties": {"id": _I, "body": _S, "append": _S, "add_rows": {"type": "array", "items": {"type": "array", "items": _S}}, "title": _S}, "required": ["id"]}},
-    {"name": "list_documents", "description": "Find files by words in the title or content, across your computer, colleagues' and the shared drive.", "parameters": {"type": "object", "properties": {"query": _S}}},
+    {"name": "list_documents", "description": "Search file titles and contents, including uploaded PDFs, text, and spreadsheet cells, across accessible drives. If the first search misses, try a distinctive word or list files in folders.", "parameters": {"type": "object", "properties": {"query": _S}}},
     {"name": "list_files", "description": "Look inside a folder on your computer (or the shared drive): subfolders and files with ids. Empty path = the top level.", "parameters": {"type": "object", "properties": {"path": _S, "shared": _SHARED, "project": _PROJECT}}},
     {"name": "create_folder", "description": "Make a folder (and any parents) on your computer or the shared drive.", "parameters": {"type": "object", "properties": {"path": _S, "shared": _SHARED, "project": _PROJECT}, "required": ["path"]}},
     {"name": "move_file", "description": "Move a file you own (or a shared one) into another folder.", "parameters": {"type": "object", "properties": {"id": _I, "folder": _S, "shared": _SHARED, "project": _PROJECT}, "required": ["id", "folder"]}},
@@ -242,10 +242,29 @@ async def _run_tool(agent, name, a):
             return {"error": "That file is private to someone else. Ask them to share it with you."}, None
         if d["kind"] == "sheet":
             t = _sheet(d)
-            return {"id": d["id"], "title": d["title"], "kind": "sheet", "columns": t["columns"], "rows": t["rows"][:200], "total_rows": len(t["rows"])}, "/office?tab=files"
+            rows = t["rows"]
+            query = str(a.get("query") or "").strip().casefold()
+            if query:
+                rows = [r for r in rows if query in " ".join(map(str, r)).casefold()]
+            offset = max(0, int(a.get("offset") or 0))
+            limit = min(500, max(1, int(a.get("limit") or 200)))
+            return {"id": d["id"], "title": d["title"], "kind": "sheet", "columns": t["columns"], "rows": rows[offset:offset + limit], "offset": offset, "total_rows": len(rows), "has_more": offset + limit < len(rows)}, "/office?tab=files"
         if d["kind"] == "file":
-            return {"id": d["id"], "title": d["title"], "kind": "file", "location": _where(d), "note": "This is an exported file (PDF, Word, Excel or similar) that can't be read as text. Open the original document it was made from (list_documents with a word from the title), or ask whoever made it."}, "/office?tab=files"
-        return {"id": d["id"], "title": d["title"], "kind": d["kind"], "location": _where(d), "content": d["body"][:8000]}, "/office?tab=files"
+            if d.get("file_path"):
+                from pathlib import Path
+                path = db.data_dir() / "files" / Path(d["file_path"]).name
+                if path.exists():
+                    try:
+                        from . import knowledge
+                        text = knowledge.extract_text(d["title"], path.read_bytes())
+                        offset = max(0, int(a.get("offset") or 0)); limit = min(20000, max(1, int(a.get("limit") or 8000)))
+                        return {"id": d["id"], "title": d["title"], "kind": "file", "location": _where(d), "content": text[offset:offset + limit], "offset": offset, "total_characters": len(text), "has_more": offset + limit < len(text)}, "/office?tab=files"
+                    except Exception:
+                        pass
+            return {"error": "The original uploaded file is missing or its text could not be extracted. The file is still listed, but its contents are unavailable."}, "/office?tab=files"
+        body = d["body"] or ""
+        offset = max(0, int(a.get("offset") or 0)); limit = min(20000, max(1, int(a.get("limit") or 8000)))
+        return {"id": d["id"], "title": d["title"], "kind": d["kind"], "location": _where(d), "content": body[offset:offset + limit], "offset": offset, "total_characters": len(body), "has_more": offset + limit < len(body)}, "/office?tab=files"
     if name == "update_document":
         d = db.q1("SELECT * FROM documents WHERE id=?", (a["id"],))
         if not d:
@@ -305,10 +324,14 @@ async def _run_tool(agent, name, a):
         db.update("documents", d["id"], body=json.dumps(t, ensure_ascii=False), updated_at=db.now())
         return {"updated": True, "cells_changed": changed, "rows_now": len(t["rows"]), "columns": t["columns"]}, "/office?tab=files"
     if name == "list_documents":
-        q = f"%{a.get('query', '')}%"
-        rows = db.q("SELECT d.*, g.name owner FROM documents d LEFT JOIN agents g ON g.id=d.agent_id "
-                    "WHERE d.title LIKE ? OR (d.kind='doc' AND d.body LIKE ?) ORDER BY d.updated_at DESC LIMIT 120", (q, q))
-        rows = [r for r in rows if team.can_access_doc(agent, r)][:25]
+        query = str(a.get("query") or "").strip()
+        if query:
+            pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            found = db.q("SELECT d.*, g.name owner FROM documents d LEFT JOIN agents g ON g.id=d.agent_id "
+                         "WHERE d.title LIKE ? ESCAPE '\\' OR d.body LIKE ? ESCAPE '\\' ORDER BY d.updated_at DESC", (pattern, pattern))
+        else:
+            found = db.q("SELECT d.*, g.name owner FROM documents d LEFT JOIN agents g ON g.id=d.agent_id ORDER BY d.updated_at DESC LIMIT 500")
+        rows = [r for r in found if team.can_access_doc(agent, r)][:50]
         return [{"id": r["id"], "title": r["title"], "kind": r["kind"], "owner": ("a project drive" if r["agent_id"] < 0 else r["owner"] or "shared drive"), "folder": path_of(r["folder_id"])} for r in rows], "/office?tab=files"
     if name == "list_files":
         owner = resolve_owner(agent, a)

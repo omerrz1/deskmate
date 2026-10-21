@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest import mock
 
-from app import admin_agent, agents, db, llm, runtime, team
+from app import admin_agent, agents, db, files, llm, runtime, team
 
 from tests.harness.fakes import FakeClient, collect, say, use
 
@@ -106,6 +106,7 @@ class WiringTests(Base):
         self.assertIn("hire_agent", [t["name"] for t in mia])
         self.assertNotIn("create_agent", [t["name"] for t in ava])  # ...and it is a manager power, so nobody else is offered it either
         self.assertIn("list_documents", [t["name"] for t in ava])
+        self.assertIn("get_call_report", [t["name"] for t in ava])
         self.assertNotIn("list_documents", [t["name"] for t in ben])  # files are switched off for Ben
         self.assertNotIn("list_connectors", [t["name"] for t in ava])  # manager powers
         self.assertIn("list_connectors", [t["name"] for t in mia])
@@ -123,6 +124,33 @@ class WiringTests(Base):
         self.assertEqual(c.config.max_steps, 6)
         self.assertEqual(c.registry.names(), [t["name"] for t in admin_agent.TOOLS])
         self.assertEqual(c.policies.policies, [])
+
+    async def test_employee_searches_spreadsheet_cells_and_reads_rows_in_pages(self):
+        with db.use(db.current()):
+            folder = files.folder_id(self.ava, "Spreadsheets")
+            did = db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                         (self.ava, "Autumn leads", "sheet", json.dumps({"columns": ["Name", "Note"], "rows": [["Alex", "needs a callback"], ["Sam", "send prospectus"]]}), folder, db.now(), db.now()))
+        with db.use(db.current()):
+            found, _ = await files.run_tool(agents.get(self.ava), "list_documents", {"query": "prospectus"})
+            page, _ = await files.run_tool(agents.get(self.ava), "read_document", {"id": did, "offset": 1, "limit": 1})
+        self.assertEqual(found[0]["id"], did)
+        self.assertEqual(page["rows"], [["Sam", "send prospectus"]])
+        self.assertFalse(page["has_more"])
+
+    async def test_admin_agent_can_generate_and_retrieve_a_full_call_report(self):
+        with db.use(db.current()):
+            contact = db.run("INSERT INTO contacts(name,phone,created_at) VALUES(?,?,?)", ("Report Test", "+447700900111", db.now()))
+            cid = db.run("INSERT INTO calls(contact_id,status,outcome,summary,transcript,created_at,duration) VALUES(?,?,?,?,?,?,?)",
+                         (contact, "completed", "callback_requested", "Customer requested a callback.", json.dumps([{"role": "agent", "text": "Is tomorrow suitable?"}, {"role": "customer", "text": "Yes, please call after lunch."}]), db.now(), 42))
+            with mock.patch.object(llm, "complete_json", new_callable=mock.AsyncMock, return_value={"executive_summary": "Customer agreed to a callback."}) as generate:
+                report, _ = await admin_agent.run_tool("get_call_report", {"call_id": cid})
+            self.assertEqual(report["executive_summary"], "Customer agreed to a callback.")
+            self.assertEqual(len(report["transcript"]), 2)
+            stored = db.q1("SELECT report FROM calls WHERE id=?", (cid,))
+            self.assertIn("Customer agreed", stored["report"])
+            again, _ = await admin_agent.run_tool("get_call_report", {"call_id": cid})
+            self.assertEqual(again["call_id"], cid)
+            generate.assert_awaited_once()
 
 
 class RuleTests(Base):

@@ -35,11 +35,11 @@ async def call_report(call_id):
     if not row:
         raise ValueError("call not found")
     saved = db.jload(row.get("report"), {})
-    if saved:
-        return saved
     transcript = db.jload(row.get("transcript"), [])
     transcript_text = "\n".join(f"{('AGENT' if t.get('role') == 'agent' else 'CUSTOMER')}: {t.get('text', '')}" for t in transcript)
-    if transcript_text:
+    if saved:
+        report = saved
+    elif transcript_text:
         try:
             report = await llm.complete_json(
                 "Write a thorough, factual call report in English as JSON. Keys: executive_summary (3-5 sentences), objective, objective_result (achieved|partially_achieved|not_achieved|unclear), conversation_flow (short account of the main stages), customer_needs (array), questions_and_answers (array of objects with question and answer_status: answered|partly_answered|unanswered, plus answer_or_gap), objections_or_concerns (array), commitments (array identifying who committed to what), outcome, sentiment, key_facts_shared (array), follow_up_actions (array of objects with action, owner, timing), risks_or_gaps (array), language. Use only the call record and transcript. Do not infer facts or invent commitments. If the call did not connect or evidence is missing, say so plainly.",
@@ -48,7 +48,9 @@ async def call_report(call_id):
             report = {"executive_summary": row.get("summary") or "A transcript is available, but report analysis could not be generated.", "objective": row.get("objective") or row.get("reason") or "", "objective_result": "unclear", "conversation_flow": "See the attached transcript; automated analysis was unavailable.", "customer_needs": [], "questions_and_answers": [], "objections_or_concerns": [], "commitments": [], "outcome": row.get("outcome") or "unknown", "sentiment": row.get("sentiment") or "unknown", "key_facts_shared": [], "follow_up_actions": ([{"action": row["follow_up"], "owner": "team", "timing": "not specified"}] if row.get("follow_up") else []), "risks_or_gaps": ["Automated transcript analysis was unavailable; review the transcript before relying on this report."], "language": row.get("language") or "unknown"}
     else:
         report = {"executive_summary": row.get("summary") or f"No conversation transcript is available (call status: {row.get('status')}).", "objective": row.get("objective") or row.get("reason") or "", "objective_result": "unclear", "conversation_flow": "No transcript available.", "customer_needs": [], "questions_and_answers": [], "objections_or_concerns": [], "commitments": [], "outcome": row.get("outcome") or row.get("status"), "sentiment": row.get("sentiment") or "unknown", "key_facts_shared": [], "follow_up_actions": ([{"action": row["follow_up"], "owner": "team", "timing": "not specified"}] if row.get("follow_up") else []), "risks_or_gaps": ["No call transcript is available; conversation details could not be assessed."], "language": row.get("language") or "unknown"}
-    report.update({"call_id": call_id, "contact": row.get("contact_name"), "phone": row.get("contact_phone"), "status": row.get("status"), "duration_seconds": round(row.get("duration") or 0), "transcript": transcript, "generated_at": db.now()})
-    db.update("calls", call_id, report=report)
-    db.log("report", f"Detailed call report generated for call {call_id}", call_id=call_id, contact_id=row.get("contact_id"))
-    return report
+    if not saved:
+        db.update("calls", call_id, report=report)
+        db.log("report", f"Detailed call report generated for call {call_id}", call_id=call_id, contact_id=row.get("contact_id"))
+    return {**report, "call_id": call_id, "contact": row.get("contact_name"), "phone": row.get("contact_phone"),
+            "status": row.get("status"), "duration_seconds": round(row.get("duration") or 0), "transcript": transcript,
+            "generated_at": row.get("ended_at") or row.get("created_at")}

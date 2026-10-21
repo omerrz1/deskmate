@@ -31,6 +31,34 @@ class TwilioFixture(Company):
 
 
 class TwilioCalls(TwilioFixture):
+    async def test_excel_import_reads_all_sheets_with_one_shared_lead_layout(self):
+        from openpyxl import Workbook
+        from app import importer
+        wb = Workbook()
+        first = wb.active
+        first.append(["Name", "Phone"])
+        first.append(["A", "+447700900101"])
+        second = wb.create_sheet("Next batch")
+        second.append(["Name", "Phone"])
+        second.append(["B", "+447700900102"])
+        raw = io.BytesIO()
+        wb.save(raw)
+        header, rows = importer.read_rows("leads.xlsx", raw.getvalue())
+        self.assertEqual(header, ["Name", "Phone"])
+        self.assertEqual([r["Name"] for r in rows], ["A", "B"])
+
+    async def test_campaign_queue_handles_more_than_five_thousand_leads_in_batches(self):
+        from app import callengine
+        with db.use(self.ws), mock.patch.object(callengine, "_outbound_problem", return_value=""):
+            dataset = db.run("INSERT INTO datasets(name,filename,columns,row_count,created_at) VALUES(?,?,?,?,?)", ("Large", "large.csv", "[]", 5505, db.now()))
+            db.many("INSERT INTO contacts(dataset_id,name,phone,language,status,created_at) VALUES(?,?,?,?,?,?)",
+                    ((dataset, f"Lead {i}", f"+447700{i:06d}", "English", "new", db.now()) for i in range(5505)))
+            campaign = db.run("INSERT INTO campaigns(name,objective,filters,status,max_attempts,created_at) VALUES(?,?,?,?,?,?)",
+                              ("Large batch", "Confirm interest", json.dumps({"dataset_id": dataset, "language": "English", "status": "new"}), "draft", 1, db.now()))
+            self.assertEqual(callengine.queue_campaign(campaign), 5505)
+            self.assertEqual(db.q1("SELECT COUNT(*) n FROM calls WHERE campaign_id=? AND status='queued'", (campaign,))["n"], 5505)
+            self.assertEqual(callengine.queue_campaign(campaign), 0)
+
     async def test_new_workspace_gets_english_elevenlabs_voice_profile(self):
         from app import voices
         with db.use(self.ws):
@@ -174,10 +202,13 @@ class TwilioCalls(TwilioFixture):
                                 ('Leads', 'leads.xlsx', '[]', 1, db.now()))
             contact_id = db.run("INSERT INTO contacts(dataset_id,name,phone,email,company,language,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
                                 (dataset_id, 'A Lead', '+447700900123', 'lead@example.com', 'Example', 'English', 'contacted', db.now()))
+            db.many("INSERT INTO contacts(dataset_id,name,phone,language,status,created_at) VALUES(?,?,?,?,?,?)",
+                    ((dataset_id, f'Bulk {i}', f'+447701{i:06d}', 'English', 'new', db.now()) for i in range(10001)))
             campaign_id = db.run("INSERT INTO campaigns(name,objective,status,filters,max_attempts,created_at) VALUES(?,?,?,?,?,?)",
                                  ('Lead calls', 'Ask for update', 'completed', json.dumps({'dataset_id': dataset_id}), 1, db.now()))
-            db.run("INSERT INTO calls(contact_id,campaign_id,attempt,status,outcome,summary,follow_up,created_at,ended_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                   (contact_id, campaign_id, 1, 'completed', 'callback_requested', 'Asked to call next week.', '2026-10-28 10:00', db.now(), db.now()))
+            db.run("INSERT INTO calls(contact_id,campaign_id,attempt,status,outcome,summary,follow_up,report,created_at,ended_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   (contact_id, campaign_id, 1, 'completed', 'callback_requested', 'Asked to call next week.', '2026-10-28 10:00',
+                    json.dumps({"executive_summary": "Requested a callback next week.", "commitments": ["Team to call next week."], "objections_or_concerns": ["Timing uncertain."]}), db.now(), db.now()))
             response = main.campaign_export(campaign_id)
             raw = b''.join([chunk async for chunk in response.body_iterator])
             sheet = load_workbook(io.BytesIO(raw), read_only=True).active
@@ -185,6 +216,9 @@ class TwilioCalls(TwilioFixture):
             self.assertEqual(rows[1][0:2], ('A Lead', '+447700900123'))
             self.assertEqual(rows[1][7], 'callback_requested')
             self.assertEqual(rows[1][9], 'Asked to call next week.')
+            self.assertIn('Requested a callback next week.', rows[1][14])
+            self.assertIn('Commitments', rows[1][14])
+            self.assertEqual(len(rows), 10003)  # header plus every lead; exports are no longer capped at 10,000
 
     async def test_call_contact_accepts_a_phone_without_an_existing_contact_or_name(self):
         from app import admin_agent, callengine

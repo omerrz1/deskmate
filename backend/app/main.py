@@ -12,6 +12,7 @@ import traceback
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 
@@ -592,7 +593,7 @@ def campaigns():
 
 @app.post("/api/campaigns")
 def campaign_create(c: CampaignIn):
-    concurrency = max(1, min(10, int(c.concurrency)))
+    concurrency = max(1, min(50, int(c.concurrency)))
     cid = db.run("INSERT INTO campaigns(name,objective,instructions,filters,status,max_attempts,retry_delay_min,voice,kb_id,kb_categories,followup,call_window,start_at,autopilot,concurrency,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (c.name, c.objective, c.instructions, json.dumps(c.filters), "draft", c.max_attempts, c.retry_delay_min, c.voice, c.kb_id, json.dumps(c.kb_categories), json.dumps(c.followup), json.dumps(c.call_window), c.start_at, int(c.autopilot), concurrency, db.now()))
     if c.agent_id and agents.get(c.agent_id):
@@ -603,37 +604,73 @@ def campaign_create(c: CampaignIn):
 
 @app.get("/api/campaigns/{cid}/export.xlsx")
 def campaign_export(cid: int):
-    from io import BytesIO
+    from pathlib import Path
+    import tempfile
     from openpyxl import Workbook
     campaign = db.q1("SELECT * FROM campaigns WHERE id=?", (cid,))
     if not campaign:
         raise HTTPException(404, "Campaign not found")
     filters = db.jload(campaign.get("filters"), {})
     dataset_id = filters.get("dataset_id")
-    contacts = (db.q("SELECT * FROM contacts WHERE dataset_id=? ORDER BY id", (dataset_id,)) if dataset_id else
-                crm.find_contacts(filters, limit=10000))
-    if len(contacts) > 10000:
-        raise HTTPException(413, "Export is limited to 10,000 contacts")
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Call results"
-    ws.append(["Name", "Phone", "Email", "Company", "Language", "Lead status", "Call status", "Outcome", "Sentiment", "Call summary", "Key points", "Callback", "Attempts", "Last called"])
-    for contact in contacts:
-        row = dict(contact)
-        latest = db.q1("SELECT status,outcome,sentiment,summary,key_points,follow_up,attempt,ended_at,created_at FROM calls WHERE campaign_id=? AND contact_id=? ORDER BY id DESC LIMIT 1", (cid, row["id"])) or {}
-        ws.append([row.get("name"), row.get("phone"), row.get("email"), row.get("company"), row.get("language"), row.get("status"), latest.get("status", "not called"), latest.get("outcome"), latest.get("sentiment"), latest.get("summary"), "; ".join(db.jload(latest.get("key_points"), [])), latest.get("follow_up"), latest.get("attempt", 0), latest.get("ended_at") or latest.get("created_at")])
+    if dataset_id:
+        audience = db.q1("SELECT COUNT(*) n FROM contacts WHERE dataset_id=?", (dataset_id,))["n"]
+        where, args = "dataset_id=?", [dataset_id]
+    else:
+        where, args = crm.build_filter(filters)
+        audience = db.q1(f"SELECT COUNT(*) n FROM contacts WHERE {where}", args)["n"]
+    if audience > 1_000_000:
+        raise HTTPException(413, "An Excel sheet can contain at most 1,000,000 lead rows. Export a smaller segment.")
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("Call results")
+    ws.append(["Name", "Phone", "Email", "Company", "Language", "Lead status", "Call status", "Outcome", "Sentiment", "Call summary", "Key points", "Callback / follow-up", "Attempts", "Last called", "Detailed call report"])
+    cursor, batch_size = 0, 1000
+    while True:
+        contacts = db.q(f"SELECT * FROM contacts WHERE ({where}) AND id>? ORDER BY id LIMIT ?", [*args, cursor, batch_size])
+        if not contacts:
+            break
+        ids = [r["id"] for r in contacts]
+        marks = ",".join("?" for _ in ids)
+        latest = db.q(f"""SELECT c.id,c.contact_id,c.status,c.outcome,c.sentiment,c.summary,c.key_points,c.follow_up,c.attempt,c.ended_at,c.created_at,c.report
+            FROM calls c JOIN (SELECT contact_id,MAX(id) id FROM calls WHERE campaign_id=? AND contact_id IN ({marks}) GROUP BY contact_id) x ON x.id=c.id""",
+            [cid, *ids])
+        by_contact = {r["contact_id"]: r for r in latest}
+        for row in contacts:
+            call = by_contact.get(row["id"], {})
+            report = db.jload(call.get("report"), {})
+            report_text = ""
+            if report:
+                sections = [report.get("executive_summary") or call.get("summary")]
+                for title, key in (("Customer needs", "customer_needs"), ("Questions", "questions_and_answers"),
+                                   ("Concerns", "objections_or_concerns"), ("Commitments", "commitments"),
+                                   ("Follow-up", "follow_up_actions"), ("Risks / gaps", "risks_or_gaps")):
+                    values = report.get(key)
+                    if values:
+                        sections.append(title + ": " + json.dumps(values, ensure_ascii=False))
+                report_text = "\n".join(str(s) for s in sections if s)[:32000]
+            ws.append([row.get("name"), row.get("phone"), row.get("email"), row.get("company"), row.get("language"), row.get("status"), call.get("status", "not called"), call.get("outcome"), call.get("sentiment"), call.get("summary"), "; ".join(db.jload(call.get("key_points"), [])), call.get("follow_up"), call.get("attempt", 0), call.get("ended_at") or call.get("created_at"), report_text])
+        cursor = ids[-1]
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
     for col, width in {"A": 24, "B": 18, "C": 28, "D": 24, "F": 16, "G": 16, "H": 22, "J": 55, "K": 40, "L": 22}.items():
         ws.column_dimensions[col].width = width
-    out = BytesIO()
-    wb.save(out)
-    return StreamingResponse(iter([out.getvalue()]), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="campaign-{cid}-results.xlsx"'})
+    fd, temp_name = tempfile.mkstemp(prefix=f"campaign-{cid}-", suffix=".xlsx", dir=db.data_dir())
+    os.close(fd)
+    try:
+        wb.save(temp_name)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+    def chunks():
+        with open(temp_name, "rb") as f:
+            while block := f.read(64 * 1024):
+                yield block
+    return StreamingResponse(chunks(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="campaign-{cid}-results.xlsx"'},
+                             background=BackgroundTask(Path(temp_name).unlink, missing_ok=True))
 
 
 @app.post("/api/campaigns/{cid}/start")
 def campaign_start(cid: int, limit: Optional[int] = None):
-    return {"queued": callengine.queue_campaign(cid, limit)}
+    return callengine.queue_campaign(cid, limit, details=True)
 
 
 @app.post("/api/campaigns/{cid}/simulate")
@@ -1532,6 +1569,7 @@ def countries_list():
 def settings_get():
     return {"language_source": voices.get_setting("language_source", "smart"),
             "voice_engine": voices.get_setting("voice_engine", "openai"),
+            "max_concurrent_calls": callengine.concurrency_limit(),
             "english_only": voices.english_only(),
             "main_link": voices.get_setting("main_link", ""),
             "transcript_retention_days": int(voices.get_setting("transcript_retention_days", "0") or 0)}
@@ -1543,10 +1581,15 @@ class SettingsIn(BaseModel):
     voice_engine: Optional[str] = None
     english_only: Optional[bool] = None
     main_link: Optional[str] = None
+    max_concurrent_calls: Optional[int] = None
 
 
 @app.put("/api/settings")
 def settings_put(s: SettingsIn, request: Request):
+    if s.max_concurrent_calls is not None:
+        if not 1 <= s.max_concurrent_calls <= 50:
+            raise HTTPException(400, "Maximum simultaneous calls must be between 1 and 50.")
+        voices.set_setting("max_concurrent_calls", str(s.max_concurrent_calls))
     if s.language_source is not None:
         if s.language_source not in ("smart", "phone", "sheet"):
             raise HTTPException(400, "language_source must be smart, phone or sheet")

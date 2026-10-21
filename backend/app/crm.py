@@ -19,34 +19,35 @@ def contact_out(c):
     return c
 
 
-def build_filter(filters):
+def build_filter(filters, alias=""):
     """Segment filter -> (where_sql, args). Supported: ids, dataset_id, language[], status[], tags, search, extra{}, exclude_dnc."""
     f = filters or {}
-    w, a = ["do_not_call=0"], []
+    col = (lambda name: f"{alias}.{name}") if alias else (lambda name: name)
+    w, a = [f"{col('do_not_call')}=0"], []
     if f.get("ids"):
-        w.append(f"id IN ({','.join('?' * len(f['ids']))})")
+        w.append(f"{col('id')} IN ({','.join('?' * len(f['ids']))})")
         a += list(f["ids"])
     if f.get("dataset_id"):
-        w.append("dataset_id=?")
+        w.append(f"{col('dataset_id')}=?")
         a.append(f["dataset_id"])
     for key in ("language", "status"):
         v = f.get(key)
         if v:
             v = v if isinstance(v, list) else [v]
-            w.append(f"lower({key}) IN ({','.join('?' * len(v))})")
+            w.append(f"lower({col(key)}) IN ({','.join('?' * len(v))})")
             a += [str(x).lower() for x in v]
     if f.get("tags"):
-        w.append("lower(tags) LIKE ?")
+        w.append(f"lower({col('tags')}) LIKE ?")
         a.append(f"%{str(f['tags']).lower()}%")
     if f.get("last_outcome"):
-        w.append("lower(last_outcome)=?")
+        w.append(f"lower({col('last_outcome')})=?")
         a.append(str(f["last_outcome"]).lower())
     if f.get("search"):
-        w.append("(lower(name) LIKE ? OR phone LIKE ? OR lower(company) LIKE ? OR lower(extra) LIKE ?)")
+        w.append(f"(lower({col('name')}) LIKE ? OR {col('phone')} LIKE ? OR lower({col('company')}) LIKE ? OR lower({col('extra')}) LIKE ?)")
         s = f"%{str(f['search']).lower()}%"
         a += [s, s, s, s]
     for k, v in (f.get("extra") or {}).items():
-        w.append("lower(extra) LIKE ?")
+        w.append(f"lower({col('extra')}) LIKE ?")
         a.append(f'%"{k}": "{str(v).lower()}%')
     return " AND ".join(w), a
 

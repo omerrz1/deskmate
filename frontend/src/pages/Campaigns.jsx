@@ -87,7 +87,7 @@ function Form({ initial, onDone }) {
         <div className="sect">
           <h5>Automatic follow-up</h5>
           <div className="form-row">
-            <label>Simultaneous calls<select value={f.concurrency} onChange={(e) => setF({ ...f, concurrency: +e.target.value })}>{[1, 2, 3, 5, 8, 10].map((n) => <option key={n} value={n}>{n} at a time</option>)}</select><span className="faint">Account limit also applies; start small and increase after a successful test.</span></label>
+            <label>Simultaneous calls<select value={f.concurrency} onChange={(e) => setF({ ...f, concurrency: +e.target.value })}>{[1, 2, 3, 5, 8, 10, 15, 20, 30, 50].map((n) => <option key={n} value={n}>{n} at a time</option>)}</select><span className="faint">Capped by workspace settings and Twilio account concurrency. Twilio’s calls-per-second limit is separate.</span></label>
             <label>Retry unanswered, up to<input type="number" min="1" max="10" value={f.max_attempts} onChange={(e) => setF({ ...f, max_attempts: +e.target.value })} /></label>
             <label>Wait before retry (minutes)<input type="number" min="0" value={f.retry_delay_min} onChange={(e) => setF({ ...f, retry_delay_min: +e.target.value })} /></label>
             <label>Follow up interested people after (days)<input type="number" min="1" value={fu.nudge_days} onChange={(e) => setFu({ ...fu, nudge_days: +e.target.value })} /></label>
@@ -122,7 +122,7 @@ export default function Campaigns() {
   const [creating, setCreating] = useState(sp.get('new') === '1')
   const [toast, setToast] = useState('')
   useEffect(() => { if (sp.get('new')) setSp({}, { replace: true }) }, [sp, setSp])
-  const act = async (path, msg) => { try { await api.post(path); setToast(msg) } catch (e) { setToast(e.message) } reload() }
+  const act = async (path, msg) => { try { const result = await api.post(path); setToast(result?.queued != null ? `${result.queued} calls queued${result.invalid_phone ? ` · ${result.invalid_phone} rows skipped: missing or invalid phone` : ''}.` : msg) } catch (e) { setToast(e.message) } reload() }
 
   return (
     <div className="page">

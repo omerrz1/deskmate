@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest import mock
 
-from app import admin_agent, agents, db, files, llm, runtime, team
+from app import admin_agent, agents, db, files, llm, runtime, team, workbench
 
 from tests.harness.fakes import FakeClient, collect, say, use
 
@@ -151,6 +151,18 @@ class WiringTests(Base):
             again, _ = await admin_agent.run_tool("get_call_report", {"call_id": cid})
             self.assertEqual(again["call_id"], cid)
             generate.assert_awaited_once()
+
+    async def test_importing_a_saved_lead_sheet_twice_does_not_duplicate_leads(self):
+        with db.use(db.current()):
+            fid = files.folder_id(self.ava, "Spreadsheets")
+            did = db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                         (self.ava, "Warm leads", "sheet", json.dumps({"columns": ["Name", "Phone"], "rows": [["Lead", "+447700900222"]]}), fid, db.now(), db.now()))
+            first, _ = await workbench.run_tool(agents.get(self.ava), "sheet_to_customers", {"id": did})
+            second, _ = await workbench.run_tool(agents.get(self.ava), "sheet_to_customers", {"id": did})
+            dataset_id = first["details"]["dataset_id"]
+            self.assertEqual(first["imported"], second["imported"])
+            self.assertTrue(second["details"]["already_imported"])
+            self.assertEqual(db.q1("SELECT COUNT(*) n FROM contacts WHERE dataset_id=?", (dataset_id,))["n"], 1)
 
 
 class RuleTests(Base):

@@ -107,6 +107,12 @@ export default function Settings({ embedded = false }) {
         </div>
       </Panel>
 
+      <Panel title="Workspace call capacity">
+        <label>Maximum simultaneous calls<select value={settings?.max_concurrent_calls || 10} onChange={async (e) => { try { await api.put('/settings', { max_concurrent_calls: +e.target.value }); reloadS(); setMsg('Workspace call capacity saved.') } catch (x) { setMsg(x.message) } }}>{[1, 2, 3, 5, 10, 15, 20, 30, 50].map((n) => <option key={n} value={n}>{n} at a time</option>)}</select>
+          <span className="faint">Applies across campaigns and direct calls. Twilio also enforces separate account concurrency and calls-per-second limits, which this setting cannot raise.</span>
+        </label>
+      </Panel>
+
       <Panel title="Main link">
         <p className="muted small">The link your callers send when a customer is ready to move forward: a sign-up, booking, application or payment page. It is saved with the call, and your team (or a later text/email integration) delivers it.</p>
         <div className="actions">

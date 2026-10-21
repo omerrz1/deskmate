@@ -29,8 +29,8 @@ PERSONAS = [
 
 
 # ---------- queueing ----------
-def queue_campaign(campaign_id, limit=None):
-    from .crm import find_contacts
+def queue_campaign(campaign_id, limit=None, details=False):
+    from . import crm
     camp = db.q1("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
     if not camp:
         raise ValueError("campaign not found")
@@ -39,27 +39,52 @@ def queue_campaign(campaign_id, limit=None):
         if problem:
             raise ValueError(problem)
     filters = db.jload(camp["filters"], {})
-    contacts = find_contacts(filters, limit=5000)
+    where, args = crm.build_filter(filters, alias="p")
     first_at = schedule.clamp(camp, max(db.now(), camp.get("start_at") or 0))
-    queued = 0
-    for c in contacts:
-        if limit and queued >= limit:
+    queued, invalid_phone, cursor, batch_size = 0, 0, 0, 2000
+    max_attempts = max(1, int(camp.get("max_attempts") or 1))
+    from .messaging import normalise
+    insert_sql = ("INSERT INTO calls(contact_id,campaign_id,attempt,status,language,created_at,not_before,reason,mode) "
+                  "VALUES(?,?,?,'queued',?,?,?,'initial','pstn')")
+    while not limit or queued < limit:
+        take = min(batch_size, limit - queued) if limit else batch_size
+        candidates = db.q(f"""SELECT p.id, p.phone, p.language, COUNT(old.id) attempts
+            FROM contacts p LEFT JOIN calls old ON old.contact_id=p.id AND old.campaign_id=?
+            WHERE ({where}) AND p.id>?
+              AND NOT EXISTS (SELECT 1 FROM calls live WHERE live.contact_id=p.id AND live.campaign_id=?
+                AND (live.status IN ('queued','ringing','in_progress') OR live.status='completed'))
+            GROUP BY p.id HAVING COUNT(old.id)<? ORDER BY p.id LIMIT ?""",
+            [campaign_id, *args, cursor, campaign_id, max_attempts, take])
+        if not candidates:
             break
-        if not c["phone"]:
-            continue
-        exists = db.q1("SELECT id FROM calls WHERE campaign_id=? AND contact_id=? AND (status IN ('queued','ringing','in_progress') OR status='completed')",
-                       (campaign_id, c["id"]))
-        if exists:
-            continue
-        attempts = db.q1("SELECT COUNT(*) n FROM calls WHERE campaign_id=? AND contact_id=?", (campaign_id, c["id"]))["n"]
-        if attempts >= camp["max_attempts"]:
-            continue
-        db.run("INSERT INTO calls(contact_id,campaign_id,attempt,status,language,created_at,not_before,reason,mode) VALUES(?,?,?,?,?,?,?,?,?)",
-               (c["id"], campaign_id, attempts + 1, "queued", c["language"], db.now(), first_at, "initial", "pstn"))
-        queued += 1
+        now = db.now()
+        insert_rows, phone_updates = [], []
+        for c in candidates:
+            phone = normalise(c.get("phone"))
+            if not phone:
+                invalid_phone += 1
+                continue
+            if phone != c.get("phone"):
+                phone_updates.append((phone, c["id"]))
+            insert_rows.append((c["id"], campaign_id, (c["attempts"] or 0) + 1, c["language"], now, first_at))
+        if phone_updates:
+            db.many("UPDATE contacts SET phone=? WHERE id=?", phone_updates)
+        if insert_rows:
+            db.many(insert_sql, insert_rows)
+        queued += len(insert_rows)
+        cursor = candidates[-1]["id"]
     db.update("campaigns", campaign_id, status="scheduled" if (camp.get("start_at") or 0) > db.now() else "active", started_at=db.now())
-    db.log("campaign", f"Campaign '{camp['name']}' started: {queued} calls queued", campaign_id=campaign_id)
-    return queued
+    db.log("campaign", f"Campaign '{camp['name']}' started: {queued} calls queued; {invalid_phone} invalid or missing phone numbers skipped", campaign_id=campaign_id, invalid_phone=invalid_phone)
+    return {"queued": queued, "invalid_phone": invalid_phone} if details else queued
+
+
+def concurrency_limit():
+    """Workspace-side maximum; Twilio account CPS/concurrency limits still apply independently."""
+    configured = voices.get_setting("max_concurrent_calls", os.getenv("TWILIO_MAX_CONCURRENT_CALLS", "10"))
+    try:
+        return max(1, min(50, int(configured)))
+    except (TypeError, ValueError):
+        return 10
 
 
 def _expire():
@@ -443,10 +468,10 @@ async def _dial_twilio_due():
         return
     async with _twilio_dial_lock:
         browser_calls = {r["id"] for r in db.q("SELECT id FROM calls WHERE status='queued' AND campaign_id IS NULL")}
-        global_limit = max(1, min(10, int(os.getenv("TWILIO_MAX_CONCURRENT_CALLS", "10"))))
+        global_limit = concurrency_limit()
         skipped = set(browser_calls)
         while True:
-            active = db.q1("SELECT COUNT(*) n FROM calls WHERE status IN ('ringing','in_progress') AND mode='pstn'")["n"]
+            active = db.q1("SELECT COUNT(*) n FROM calls WHERE status IN ('ringing','in_progress') AND mode IN ('pstn','phone','whatsapp')")["n"]
             if active >= global_limit:
                 break
             due = next_due(live_only=False, skip=skipped, autopilot=False)
@@ -458,7 +483,7 @@ async def _dial_twilio_due():
                 skipped.add(due["id"])
                 continue
             campaign_active = db.q1("SELECT COUNT(*) n FROM calls WHERE campaign_id=? AND status IN ('ringing','in_progress') AND mode='pstn'", (camp["id"],))["n"]
-            campaign_limit = max(1, min(10, int(camp.get("concurrency") or 3)))
+            campaign_limit = min(global_limit, max(1, min(50, int(camp.get("concurrency") or 3))))
             if campaign_active >= campaign_limit:
                 skipped.add(due["id"])
                 continue
@@ -477,6 +502,19 @@ async def _dial_twilio_due():
                 db.log("call", "Outbound Twilio Voice call started", call_id=call["id"])
             except Exception as e:
                 msg = str(e)[:400]
+                # A provider throttle/capacity response means Twilio rejected
+                # this create request, so it is safe to retry later. Avoid
+                # replaying timeouts or 5xx responses: Twilio may have accepted
+                # those requests even though we did not receive the response.
+                provider_status = getattr(e, "status", None)
+                provider_code = str(getattr(e, "code", ""))
+                if provider_status == 429 or provider_code == "86008":
+                    retry_at = db.now() + 60
+                    db.update("calls", call["id"], status="queued", mode="pstn",
+                              not_before=retry_at, outcome="unresolved", summary=msg)
+                    skipped.add(call["id"])
+                    db.log("call", f"Twilio capacity limit; call will retry after {int(retry_at)}", call_id=call["id"])
+                    continue
                 db.update("calls", call["id"], status="failed", mode="pstn", ended_at=db.now(), outcome="unresolved", summary=msg)
                 db.log("error", f"Twilio Voice call failed: {msg}", call_id=call["id"])
 
@@ -507,9 +545,6 @@ async def call_now(contact_id, objective, agent_id=None):
         why = costs.over_cap(agent["id"])
         if why:
             return {"error": f"Calls are paused: {why}."}
-    if len([1 for (ws, _), _sess in wa_call.SESSIONS.items() if ws == db.current()]) >= 2:
-        return {"error": "Two calls are already active. Try again when one ends."}
-
     objective = (objective or "Follow up with the customer.").strip()[:500]
     campaign_name = f"Direct call · {contact['name']} · {int(db.now())}"
     campaign_id = db.run("INSERT INTO campaigns(name,objective,filters,status,max_attempts,created_at,started_at,agent_id) VALUES(?,?,?,?,?,?,?,?)",
@@ -519,10 +554,11 @@ async def call_now(contact_id, objective, agent_id=None):
 
     # Serialize with the campaign dialer so an immediate request cannot race it.
     async with _twilio_dial_lock:
-        active = db.q1("SELECT COUNT(*) n FROM calls WHERE status IN ('ringing','in_progress') AND mode='pstn'")["n"]
-        if active >= 2:
-            db.update("calls", call_id, status="failed", ended_at=db.now(), outcome="unresolved", summary="Two calls are already active.")
-            return {"error": "Two calls are already active. Try again when one ends."}
+        active = db.q1("SELECT COUNT(*) n FROM calls WHERE status IN ('ringing','in_progress') AND mode IN ('pstn','phone','whatsapp')")["n"]
+        max_active = concurrency_limit()
+        if active >= max_active:
+            db.update("calls", call_id, status="failed", ended_at=db.now(), outcome="unresolved", summary=f"Workspace concurrent-call cap reached ({max_active}).")
+            return {"error": f"The workspace concurrent-call cap ({max_active}) has been reached. Try again when a call ends or increase the cap in Settings."}
         try:
             twilio_call.voice_config()
             contact_view = {**contact, "name": contact.get("name") or "Customer"}
@@ -589,6 +625,9 @@ async def finalize(call_id, status="completed"):
             "follow_up (string: concrete next action for staff, or empty), callback_time (string if requested, else empty), "
             "callback_at (ISO-8601 local datetime like 2026-10-14T15:00:00 if the customer asked to be called at a specific time, resolved from the current time given, else null), "
             "unanswered_questions (array of short strings: questions the customer asked that the agent could not answer or that were deferred; empty if none), "
+            "conversation_flow (brief stages of the discussion), customer_needs (array), questions_and_answers (array of objects with question, answer_status, answer_or_gap), "
+            "objections_or_concerns (array), commitments (array naming who committed to what), key_facts_shared (array), follow_up_actions (array of objects with action, owner, timing), risks_or_gaps (array), "
+            "objective_result (achieved|partially_achieved|not_achieved|unclear), "
             "language_detected (string). Use 'success' only if the campaign objective was clearly achieved. "
             "Use 'do_not_call' if the customer asked not to be contacted again.",
             f"Current local time: {time.strftime('%Y-%m-%dT%H:%M:%S')} ({time.strftime('%A')})\nCampaign objective: {(camp or {}).get('objective','general check-in')}\nCustomer: {contact.get('name')} ({contact.get('language')})\n\nTRANSCRIPT:\n{convo}")
@@ -598,9 +637,13 @@ async def finalize(call_id, status="completed"):
     follow = res.get("follow_up") or ""
     if res.get("callback_time"):
         follow = f"{follow} (callback: {res['callback_time']})".strip()
+    call_report = {k: res.get(k) for k in ("conversation_flow", "customer_needs", "questions_and_answers", "objections_or_concerns", "commitments", "key_facts_shared", "follow_up_actions", "risks_or_gaps", "objective_result") if res.get(k) is not None}
+    call_report.update({"executive_summary": res.get("summary") or "", "objective": (camp or {}).get("objective") or call.get("objective") or "",
+                        "outcome": outcome, "sentiment": res.get("sentiment") or "neutral", "follow_up": follow,
+                        "language": res.get("language_detected") or contact.get("language")})
     db.update("calls", call_id, outcome=outcome, sentiment=res.get("sentiment") or "neutral",
               summary=res.get("summary") or "", key_points=res.get("key_points") or [], follow_up=follow,
-              language=res.get("language_detected") or contact.get("language"))
+              language=res.get("language_detected") or contact.get("language"), report=call_report)
     try:
         from . import discuss
         owner = discuss.owner_for_call(call)

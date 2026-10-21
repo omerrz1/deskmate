@@ -31,19 +31,34 @@ def read_rows(filename, data: bytes):
     if name.endswith(".csv"):
         text = data.decode("utf-8-sig", errors="replace")
         rows = list(csv.reader(io.StringIO(text)))
+        rows = [r for r in rows if any(c not in (None, "") for c in r)]
+        if not rows:
+            return [], []
+        header = [str(c).strip() if c is not None else f"col{i+1}" for i, c in enumerate(rows[0])][:200]
+        body = [{header[i]: ("" if c is None else str(c).strip()) for i, c in enumerate(r[:len(header)])} for r in rows[1:50001]]
+        return header, body
     else:
         wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        ws = wb.active
-        rows = []
-        for r in ws.iter_rows(values_only=True):
-            rows.append(list(r))
-            if len(rows) > 50001:
-                break  # cap rows so a huge or malicious file cannot exhaust memory
-    rows = [r for r in rows if any(c not in (None, "") for c in r)]
-    if not rows:
+        header, body = [], []
+        for ws in wb.worksheets:
+            iterator = (list(r[:200]) for r in ws.iter_rows(values_only=True))
+            first = next((r for r in iterator if any(c not in (None, "") for c in r)), None)
+            if first is None:
+                continue
+            sheet_header = [str(c).strip() if c is not None else f"col{i+1}" for i, c in enumerate(first)]
+            for c in sheet_header:
+                if c not in header:
+                    header.append(c)
+            for row in iterator:
+                if not any(c not in (None, "") for c in row):
+                    continue
+                body.append({sheet_header[i]: ("" if c is None else str(c).strip()) for i, c in enumerate(row) if i < len(sheet_header)})
+                if len(body) >= 50000:
+                    break
+            if len(body) >= 50000:
+                break
+    if not header:
         return [], []
-    header = [str(c).strip() if c is not None else f"col{i+1}" for i, c in enumerate(rows[0])]
-    body = [{header[i]: ("" if c is None else str(c).strip()) for i, c in enumerate(r) if i < len(header)} for r in rows[1:]]
     return header, body
 
 
@@ -76,9 +91,13 @@ def norm_phone(v):
     return keep
 
 
-def import_rows(dataset_name, filename, header, body, mapping):
-    ds_id = db.run("INSERT INTO datasets(name,filename,columns,row_count,created_at) VALUES(?,?,?,?,?)",
-                   (dataset_name, filename, json.dumps(header), 0, db.now()))
+def import_rows(dataset_name, filename, header, body, mapping, source_doc_id=None):
+    if source_doc_id:
+        existing = db.q1("SELECT id,row_count FROM datasets WHERE source_doc_id=?", (source_doc_id,))
+        if existing:
+            return {"dataset_id": existing["id"], "imported": existing["row_count"], "skipped": 0, "already_imported": True}
+    ds_id = db.run("INSERT INTO datasets(name,filename,columns,row_count,created_at,source_doc_id) VALUES(?,?,?,?,?,?)",
+                   (dataset_name, filename, json.dumps(header), 0, db.now(), source_doc_id))
     mapped_cols = set(mapping.values())
     rows, skipped = [], 0
     for r in body:

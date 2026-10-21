@@ -147,7 +147,7 @@ def close(tid):
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS datasets(
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, filename TEXT, columns TEXT,
-  row_count INTEGER DEFAULT 0, created_at REAL);
+  row_count INTEGER DEFAULT 0, created_at REAL, source_doc_id INTEGER);
 CREATE TABLE IF NOT EXISTS contacts(
   id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id INTEGER, name TEXT, phone TEXT,
   email TEXT, company TEXT, language TEXT DEFAULT 'English', status TEXT DEFAULT 'new',
@@ -169,15 +169,18 @@ CREATE TABLE IF NOT EXISTS activity(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, kind TEXT, message TEXT, meta TEXT DEFAULT '{}');
 CREATE INDEX IF NOT EXISTS idx_calls_status ON calls(status);
 CREATE INDEX IF NOT EXISTS idx_calls_contact ON calls(contact_id);
+CREATE INDEX IF NOT EXISTS idx_calls_campaign_contact ON calls(campaign_id,contact_id,status);
 CREATE INDEX IF NOT EXISTS idx_contacts_ds ON contacts(dataset_id);
 """
 with _lock:
     _conn.executescript(SCHEMA)
-    for stmt in ("ALTER TABLE calls ADD COLUMN recording TEXT", "ALTER TABLE calls ADD COLUMN report TEXT", "ALTER TABLE campaigns ADD COLUMN institution TEXT", "ALTER TABLE campaigns ADD COLUMN kb_id INTEGER", "ALTER TABLE campaigns ADD COLUMN followup TEXT", "ALTER TABLE campaigns ADD COLUMN call_window TEXT", "ALTER TABLE campaigns ADD COLUMN start_at REAL", "ALTER TABLE campaigns ADD COLUMN kb_categories TEXT", "ALTER TABLE campaigns ADD COLUMN autopilot INTEGER DEFAULT 0", "ALTER TABLE campaigns ADD COLUMN concurrency INTEGER DEFAULT 3", "ALTER TABLE calls ADD COLUMN reason TEXT"):
+    for stmt in ("ALTER TABLE datasets ADD COLUMN source_doc_id INTEGER", "ALTER TABLE calls ADD COLUMN recording TEXT", "ALTER TABLE calls ADD COLUMN report TEXT", "ALTER TABLE campaigns ADD COLUMN institution TEXT", "ALTER TABLE campaigns ADD COLUMN kb_id INTEGER", "ALTER TABLE campaigns ADD COLUMN followup TEXT", "ALTER TABLE campaigns ADD COLUMN call_window TEXT", "ALTER TABLE campaigns ADD COLUMN start_at REAL", "ALTER TABLE campaigns ADD COLUMN kb_categories TEXT", "ALTER TABLE campaigns ADD COLUMN autopilot INTEGER DEFAULT 0", "ALTER TABLE campaigns ADD COLUMN concurrency INTEGER DEFAULT 3", "ALTER TABLE calls ADD COLUMN reason TEXT"):
         try:
             _conn.execute(stmt)
         except sqlite3.OperationalError:
             pass
+    _conn.commit()
+    _conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_datasets_source_doc ON datasets(source_doc_id) WHERE source_doc_id IS NOT NULL")
     _conn.commit()
 
 

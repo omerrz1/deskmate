@@ -308,7 +308,7 @@ async def run_tool(agent, name, a):
             mapping = importer.guess_mapping(header)
             if "name" not in mapping and "phone" not in mapping:
                 return {"error": f"I couldn't tell which columns hold the name and phone number. Columns: {', '.join(header)}. Rename them (for example 'Name' and 'Phone') with edit_sheet and try again."}, None
-            res = importer.import_rows(d["title"], d["title"], header, body, mapping)
+            res = importer.import_rows(d["title"], d["title"], header, body, mapping, source_doc_id=d["id"])
             return {"imported": res.get("imported", res), "details": {k: v for k, v in res.items() if k != "imported"}}, "/data"
         if name == "make_chart":
             xi, yi = _col_index(cols, a["x"]), _col_index(cols, a["y"])

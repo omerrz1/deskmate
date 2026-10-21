@@ -503,8 +503,16 @@ async def _finish(sess, outcome, note):
             if call and call.get("campaign_id") and status in ("no_answer", "declined"):
                 callengine.mark_missed(cid, status)
             else:
-                db.update("calls", cid, status=status, outcome="no_answer" if status != "failed" else "unresolved", ended_at=db.now(),
-                          summary=note or {"no_answer": "They did not answer.", "declined": "They declined the call."}.get(status, "The call did not connect."))
+                summary = note or {"no_answer": "They did not answer.", "declined": "They declined the call."}.get(status, "The call did not connect.")
+                outcome = "no_answer" if status != "failed" else "unresolved"
+                report = {"executive_summary": summary, "objective": "", "objective_result": "unclear",
+                          "conversation_flow": "The call did not connect.", "customer_needs": [], "questions_and_answers": [],
+                          "objections_or_concerns": [], "commitments": [], "key_facts_shared": [], "follow_up_actions": [],
+                          "risks_or_gaps": ["No conversation transcript exists because the call did not connect."],
+                          "outcome": outcome, "sentiment": "unknown", "transcript_status": "unavailable"}
+                db.update("calls", cid, status=status, outcome=outcome, ended_at=db.now(), summary=summary, report=report)
+                from . import files
+                files.update_call_sheet(cid, status, summary)
             text = note or ("They did not answer." if status == "no_answer" else "They declined the call." if status == "declined" else "The call did not connect.")
             if sess.chat and sess.chat.get("id"):
                 chats.add_message(sess.chat["id"], "out", text, "call", None, "", "sent", None, "Deskmates", call_id=cid)
@@ -817,5 +825,7 @@ async def make_engine(sess, call, contact, camp):
             eleven_agents.mark_down()
             db.log("error", f"ElevenLabs was not available for a WhatsApp call, using OpenAI voice: {str(e)[:100]}", call_id=sess.call_id)
     prompt = callengine.system_prompt(call, contact, camp, realtime=True, external=False)
-    voice = ag.get("openai_voice") if ag.get("openai_voice") in llm.REALTIME_VOICES else (llm.AGENT_VOICE if llm.AGENT_VOICE in llm.REALTIME_VOICES else "marin")
+    from . import voices
+    configured = (camp or {}).get("voice") or voices.get_setting("call_voice", "marin")
+    voice = ag.get("openai_voice") if ag.get("openai_voice") in llm.REALTIME_VOICES else (configured if configured in llm.REALTIME_VOICES else "marin")
     return OpenAIEngine(sess, prompt, voice, contact.get("language"))

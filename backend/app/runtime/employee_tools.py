@@ -2,8 +2,9 @@
 One function per tool; `run` is the toolset entry point the registry calls."""
 import asyncio
 import json
+import re
 
-from .. import admin_agent, connectors, crm, db, knowledge, office, team
+from .. import admin_agent, connectors, crm, db, knowledge, office, team, voices
 
 _S = {"type": "string"}
 AGENT_TOOLS = [
@@ -18,6 +19,8 @@ AGENT_TOOLS = [
     {"name": "update_knowledge_base", "description": "Edit a knowledge base's persona, context, key facts, next steps or hand-off contact.",
      "parameters": {"type": "object", "properties": {"kb_id": {"type": "integer"}, "persona": _S, "context": _S, "key_facts": _S, "next_steps": _S, "contact": _S}, "required": ["kb_id"]}},
     {"name": "search_knowledge", "description": "Search a knowledge base.", "parameters": {"type": "object", "properties": {"kb_id": {"type": "integer"}, "query": _S}, "required": ["kb_id", "query"]}},
+    {"name": "learn_company_website", "description": "Crawl the public company website linked in Settings, including its sitemap and linked subdomains, and build or refresh a searchable knowledge base. Use this when the admin asks you to study or learn the company website.", "parameters": {"type": "object", "properties": {}}},
+    {"name": "search_company_website", "description": "Search the linked company website knowledge base for exact business facts, products, prices, course details, policies, locations, and FAQs. This builds the searchable website knowledge base on first use. Use this before answering factual questions about the company; cite the returned source URL/title in your answer when useful.", "parameters": {"type": "object", "properties": {"query": _S}, "required": ["query"]}},
     {"name": "learn_from_website", "description": "Read a public website and turn it into a new knowledge base. Returns the kb id and what was learned.",
      "parameters": {"type": "object", "properties": {"url": _S}, "required": ["url"]}},
     {"name": "assign_duty", "description": "Give a duty to a team member (including yourself). With run_now the agent starts working on it immediately by itself.",
@@ -97,6 +100,48 @@ async def update_knowledge_base(agent, a):
 @tool("search_knowledge")
 async def search_knowledge(agent, a):
     return knowledge.search(a["kb_id"], a["query"], k=4), "/knowledge"
+
+
+async def _company_website_kb(refresh=False):
+    from .. import webdemo
+    url = voices.get_setting("company_website", "").strip()
+    if not url:
+        return None, "No company website is linked yet. Add it in Settings → Company."
+    kb_id = voices.get_setting("company_website_kb_id", "")
+    if kb_id and db.q1("SELECT id FROM knowledge_bases WHERE id=?", (kb_id,)) and not refresh:
+        return int(kb_id), ""
+    try:
+        result = await asyncio.wait_for(webdemo.learn(url, kb_id=int(kb_id) if kb_id else None), timeout=180)
+    except webdemo.Blocked as e:
+        return None, str(e)
+    except asyncio.TimeoutError:
+        return None, "The website crawl exceeded its time limit. It did not complete; try again later."
+    except Exception as e:
+        return None, f"The company website could not be read ({type(e).__name__})."
+    kb_id = result["kb_id"]
+    voices.set_setting("company_website_kb_id", str(kb_id))
+    return kb_id, ""
+
+
+@tool("learn_company_website")
+async def learn_company_website(agent, a):
+    kb_id, error = await _company_website_kb(refresh=True)
+    if error:
+        return {"error": error}, None
+    return {"kb_id": kb_id, "knowledge_base": (knowledge.get_kb(kb_id) or {}).get("name"),
+            "sections": db.q1("SELECT COUNT(*) n FROM kb_docs WHERE kb_id=?", (kb_id,))["n"],
+            "status": "ready"}, "/knowledge"
+
+
+@tool("search_company_website")
+async def search_company_website(agent, a):
+    kb_id, error = await _company_website_kb()
+    if error:
+        return {"error": error}, None
+    hits = knowledge.search(kb_id, str(a["query"])[:500], k=8)
+    sources = list(dict.fromkeys(re.findall(r"source:\s*(https?://[^\s\]]+)", "\n".join(hits))))
+    return {"kb_id": kb_id, "results": hits or ["NOTHING FOUND in the crawled website pages. Do not guess; say you could not verify the answer."],
+            "sources": sources}, "/knowledge"
 
 
 @tool("learn_from_website")

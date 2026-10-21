@@ -212,7 +212,7 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
         <button className="btn small" onClick={() => setCreating('doc')}><Icon name="plus" size={13} /> Document</button>
         <button className="btn small" onClick={() => setCreating('sheet')}><Icon name="plus" size={13} /> Sheet</button>
         <button className="btn small" onClick={() => fileInput.current.click()}><Icon name="upload" size={13} /> Upload</button>
-        <input ref={fileInput} type="file" multiple hidden accept=".pdf,.txt,.md,.csv,.xlsx,.xls,.json" onChange={(e) => { upload(e.target.files); e.target.value = '' }} />
+        <input ref={fileInput} type="file" multiple hidden accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.xls,.json" onChange={(e) => { upload(e.target.files); e.target.value = '' }} />
       </div>
 
       <div className="fx-main">

@@ -4,7 +4,7 @@ import json
 
 from harness import AFTER_TOOL, TOOL_ERROR, ChatModel, Harness, LoopConfig, RunContext
 
-from . import callengine, crm, db, llm, reports
+from . import callengine, crm, db, files, llm, reports
 
 TOOLS = [
     {"name": "get_dashboard_stats", "description": "Overall KPIs: contacts, calls, answer/success rate, live calls, outcomes.", "parameters": {"type": "object", "properties": {}}},
@@ -27,11 +27,13 @@ TOOLS = [
     {"name": "stop_campaign", "description": "Stop a campaign and cancel its queued calls.", "parameters": {"type": "object", "properties": {"campaign_id": {"type": "integer"}}, "required": ["campaign_id"]}},
     {"name": "list_campaigns", "description": "List campaigns with progress.", "parameters": {"type": "object", "properties": {}}},
     {"name": "export_campaign_report", "description": "Prepare a campaign results workbook with one row per lead, including each lead's latest call status, outcome, summary, key points, commitments, concerns and follow-up. Use after a campaign or when the admin asks for its spreadsheet report.", "parameters": {"type": "object", "properties": {"campaign_id": {"type": "integer"}}, "required": ["campaign_id"]}},
-    {"name": "call_contact", "description": "Place one customer call NOW through the configured Twilio Voice number. You may provide an existing contact_id or a phone number directly; for a new number, create a contact with the supplied name or a minimal name automatically. A successful state=initiated result means Twilio accepted the request; it does not confirm the recipient's phone is ringing. Report errors exactly, and never claim ringing without provider confirmation. Do not create a campaign for a single immediate call.", "parameters": {"type": "object", "properties": {
+    {"name": "call_contact", "description": "Place one customer call NOW through the configured Twilio Voice number. You may provide an existing contact_id or a phone number directly; for a new number, create a contact with the supplied name or a minimal name automatically. When the admin asks you to update a spreadsheet after the call, provide report_sheet with that sheet's title (for example 'leads'); the system will resolve the title and write the final outcome into its status column when the call ends. You may give report_row (one-based data row) if you know it; otherwise it matches the lead by phone/name. A successful state=initiated result means Twilio accepted the request; it does not confirm the recipient's phone is ringing. Report errors exactly, and never claim ringing without provider confirmation. Do not create a campaign for a single immediate call.", "parameters": {"type": "object", "properties": {
         "contact_id": {"type": "integer", "description": "Existing customer ID; optional when phone is provided."},
         "phone": {"type": "string", "description": "Phone number to call, international format preferred; local numbers use the workspace calling code."},
         "name": {"type": "string", "description": "Optional contact name; a minimal contact is created if this is a new phone number."},
-        "objective": {"type": "string"}}, "required": ["objective"]}},
+        "objective": {"type": "string"}, "report_sheet": {"type": "string", "description": "Title of the spreadsheet to update after the call, if requested by the admin."},
+        "report_row": {"type": "integer", "description": "Optional one-based data row number in report_sheet."},
+        "report_status_column": {"type": "string", "description": "Status column name; defaults to status."}}, "required": ["objective"]}},
     {"name": "list_calls", "description": "Recent calls with summaries. Filter by status, outcome or contact.", "parameters": {"type": "object", "properties": {
         "limit": {"type": "integer"}, "status": {"type": "string"}, "outcome": {"type": "string"}, "contact_id": {"type": "integer"}}}},
     {"name": "get_call", "description": "Full detail and transcript of one call.", "parameters": {"type": "object", "properties": {"call_id": {"type": "integer"}}, "required": ["call_id"]}},
@@ -44,9 +46,12 @@ TOOLS = [
 
 def _brief_call(c):
     ct = db.q1("SELECT name FROM contacts WHERE id=?", (c["contact_id"],))
+    transcript = db.jload(c.get("transcript"), [])
+    report = db.jload(c.get("report"), {})
     return {"id": c["id"], "contact": (ct or {}).get("name"), "contact_id": c["contact_id"], "status": c["status"],
             "outcome": c["outcome"], "sentiment": c["sentiment"], "attempt": c["attempt"],
-            "duration_s": round(c["duration"] or 0), "summary": c["summary"], "follow_up": c["follow_up"]}
+            "duration_s": round(c["duration"] or 0), "summary": c["summary"], "follow_up": c["follow_up"],
+            "transcript_lines": len(transcript), "report_available": bool(report)}
 
 
 async def run_tool(name, a, agent=None):
@@ -130,6 +135,12 @@ async def run_tool(name, a, agent=None):
                 "active": totals["active"] or 0, "pending": totals["pending"] or 0,
                 "download": f"/api/campaigns/{a['campaign_id']}/export.xlsx"}, f"/api/campaigns/{a['campaign_id']}/export.xlsx"
     if name == "call_contact":
+        sheet_id = None
+        if a.get("report_sheet"):
+            sheet, error = files.resolve_document(agent, title=a["report_sheet"], kind="sheet")
+            if error:
+                return {"error": error}, "/office?tab=files"
+            sheet_id = sheet["id"]
         contact_id = a.get("contact_id")
         if contact_id:
             contact = db.q1("SELECT id,phone FROM contacts WHERE id=?", (contact_id,))
@@ -150,7 +161,12 @@ async def run_tool(name, a, agent=None):
                 contact_id = db.run("INSERT INTO contacts(name,phone,language,status,tags,created_at) VALUES(?,?,?,?,?,?)",
                     (name, phone, "English", "new", "ad-hoc-call", db.now()))
                 db.log("agent", f"Created contact {name} from an immediate call request", contact_id=contact_id)
-        result = await callengine.call_now(contact_id, a["objective"], (agent or {}).get("id"))
+        result = await callengine.call_now(contact_id, a["objective"], (agent or {}).get("id"),
+                                           report_sheet_id=sheet_id, report_row=a.get("report_row"),
+                                           report_status_column=a.get("report_status_column") or "status")
+        if sheet_id and isinstance(result, dict) and not result.get("error"):
+            result["report_sheet"] = a["report_sheet"]
+            result["report_update"] = "The matching lead row will be updated in the status column when the call ends."
         return result, f"/calls?open={result['call_id']}" if result.get("call_id") else "/settings/calling"
     if name == "list_calls":
         w, args = ["1=1"], []

@@ -815,7 +815,8 @@ async def phone_realtime(call_id: int, fallback: int = 0):
             voice_note = f"OpenAI Realtime voice ({why})"
     prompt = callengine.system_prompt(call, contact, camp, realtime=True, external=external)
     _ag = agents.get((camp or {}).get("agent_id")) if (camp or {}).get("agent_id") else None
-    sess = await llm.realtime_secret(prompt, contact.get("language"), (_ag or {}).get("openai_voice") or (camp or {}).get("voice"), external)
+    default_call_voice = voices.get_setting("call_voice", "marin")
+    sess = await llm.realtime_secret(prompt, contact.get("language"), (_ag or {}).get("openai_voice") or (camp or {}).get("voice") or default_call_voice, external)
     sess["external"] = external
     sess["voice_note"] = voice_note
     sess["kb_id"] = (camp or {}).get("kb_id") or 0
@@ -1395,7 +1396,7 @@ async def kb_add_doc(kid: int, d: KBDoc):
 async def kb_upload(kid: int, files: List[UploadFile] = File(...)):
     done = []
     for f in files:
-        text = knowledge.extract_text(f.filename, await read_limited(f, 15, (".txt", ".md", ".csv", ".pdf", ".xlsx"))).strip()
+        text = knowledge.extract_text(f.filename, await read_limited(f, 15, (".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx"))).strip()
         if not text:
             continue
         n = await knowledge.ingest(kid, f.filename.rsplit(".", 1)[0], text, f.filename)
@@ -1569,6 +1570,7 @@ def countries_list():
 def settings_get():
     return {"language_source": voices.get_setting("language_source", "smart"),
             "voice_engine": voices.get_setting("voice_engine", "openai"),
+            "call_voice": voices.get_setting("call_voice", "marin"),
             "max_concurrent_calls": callengine.concurrency_limit(),
             "english_only": voices.english_only(),
             "main_link": voices.get_setting("main_link", ""),
@@ -1579,6 +1581,7 @@ class SettingsIn(BaseModel):
     language_source: Optional[str] = None
     transcript_retention_days: Optional[int] = None
     voice_engine: Optional[str] = None
+    call_voice: Optional[str] = None
     english_only: Optional[bool] = None
     main_link: Optional[str] = None
     max_concurrent_calls: Optional[int] = None
@@ -1605,6 +1608,10 @@ def settings_put(s: SettingsIn, request: Request):
         if s.voice_engine not in ("openai", "elevenlabs"):
             raise HTTPException(400, "voice_engine must be openai or elevenlabs")
         voices.set_setting("voice_engine", s.voice_engine)
+    if s.call_voice is not None:
+        if s.call_voice not in llm.REALTIME_VOICES:
+            raise HTTPException(400, "call_voice must be a supported OpenAI Realtime voice")
+        voices.set_setting("call_voice", s.call_voice)
     if s.transcript_retention_days is not None:
         if not (0 <= s.transcript_retention_days <= 3650):
             raise HTTPException(400, "Retention must be between 0 (keep forever) and 3650 days")

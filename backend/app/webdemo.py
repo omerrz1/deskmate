@@ -10,10 +10,16 @@ import httpx
 
 from . import db, knowledge, llm
 
-MAX_PAGES = 7
+MAX_PAGES = 250
 MAX_BYTES = 1_500_000
+MAX_TOTAL_BYTES = 35_000_000
+MAX_SITEMAPS = 20
+MAX_SITEMAP_URLS = 20_000
+FETCH_CONCURRENCY = 8
+READER_PAGE_LIMIT = 30
 PRIORITY = re.compile(r"about|service|product|pric|plan|faq|contact|course|program|team|how|feature|offer|shop|solution|support|apply|admission|fee", re.I)
-SKIP_EXT = re.compile(r"\.(png|jpe?g|gif|svg|webp|ico|pdf|zip|mp4|mp3|css|js|xml|json|woff2?)(\?|$)", re.I)
+SKIP_EXT = re.compile(r"\.(png|jpe?g|gif|svg|webp|ico|zip|mp4|mp3|css|js|json|woff2?)(\?|$)", re.I)
+MULTI_LABEL_SUFFIXES = {"co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "com.br", "co.jp", "co.in", "com.sg", "com.tr", "com.mx"}
 
 
 BROWSER_HEADERS = {
@@ -38,6 +44,29 @@ def _check_host(host):
         ip = ipaddress.ip_address(i[4][0])
         if not ip.is_global:
             raise Blocked("That address isn't a public website.")
+
+
+def _base_domain(host):
+    """Approximate the registrable domain without accepting unrelated sibling domains."""
+    host = (host or "").lower().rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    labels = host.split(".")
+    if len(labels) < 2:
+        return host
+    suffix = ".".join(labels[-2:])
+    return ".".join(labels[-3:]) if suffix in MULTI_LABEL_SUFFIXES and len(labels) >= 3 else suffix
+
+
+def _in_scope(url, base_domain):
+    p = urlparse(url)
+    host = (p.hostname or "").lower().rstrip(".")
+    return p.scheme in ("http", "https") and (host == base_domain or host.endswith("." + base_domain))
 
 
 class _Page(HTMLParser):
@@ -133,11 +162,15 @@ def _Page_text(html):
     return p.text() + p.structured_text()
 
 
-async def _get(client, url):
+async def _get(client, url, base_domain=None):
     for _ in range(4):  # follow redirects by hand so every hop is checked
         u = urlparse(url)
         if u.scheme not in ("http", "https"):
             raise Blocked("Only http and https links work.")
+        if u.port not in (None, 80, 443):
+            raise Blocked("Only standard public website ports are allowed.")
+        if base_domain and not _in_scope(url, base_domain):
+            raise Blocked("That link is outside the company's website and its subdomains.")
         await asyncio.get_event_loop().run_in_executor(None, _check_host, u.hostname)
         async with client.stream("GET", url, headers=BROWSER_HEADERS) as r:
             if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
@@ -145,13 +178,22 @@ async def _get(client, url):
                 continue
             if r.status_code >= 400:
                 raise Blocked(f"The website answered with an error ({r.status_code}).")
-            if "html" not in r.headers.get("content-type", "html") and "text" not in r.headers.get("content-type", ""):
+            content_type = r.headers.get("content-type", "html").lower()
+            is_pdf = "pdf" in content_type or urlparse(url).path.lower().endswith(".pdf")
+            if not is_pdf and not any(t in content_type for t in ("html", "text", "xml")):
                 raise Blocked("That link isn't a web page.")
             buf = b""
             async for chunk in r.aiter_bytes():
                 buf += chunk
                 if len(buf) > MAX_BYTES:
                     break
+            if is_pdf:
+                try:
+                    from .knowledge import extract_text
+                    text = extract_text("site.pdf", buf)
+                except Exception:
+                    return str(r.url), ""
+                return str(r.url), text
             return str(r.url), buf.decode(r.encoding or "utf-8", errors="replace")
     raise Blocked("Too many redirects.")
 
@@ -175,7 +217,49 @@ async def _reader(client, url):
     return {"url": url, "title": title.strip(), "meta": {}, "text": body.strip()[:40000], "links": links}
 
 
-async def crawl(url):
+async def _sitemap_urls(client, start_url, base_domain):
+    """Discover sitemap pages (including nested sitemap indexes) without leaving the company domain."""
+    parsed = urlparse(start_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    pending = [urljoin(origin, "/robots.txt"), urljoin(origin, "/sitemap.xml")]
+    visited_maps, pages = set(), []
+    while pending and len(visited_maps) < MAX_SITEMAPS and len(pages) < MAX_SITEMAP_URLS:
+        sitemap = pending.pop(0)
+        if sitemap in visited_maps or not _in_scope(sitemap, base_domain):
+            continue
+        visited_maps.add(sitemap)
+        try:
+            _, body = await _get(client, sitemap, base_domain)
+        except Exception:
+            continue
+        if sitemap.endswith("robots.txt"):
+            for line in body.splitlines():
+                match = re.match(r"\s*sitemap:\s*(\S+)", line, re.I)
+                if match and match.group(1) not in pending:
+                    pending.append(match.group(1))
+            continue
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(body)
+            for node in root.iter():
+                if node.tag.rsplit("}", 1)[-1].lower() != "loc" or not node.text:
+                    continue
+                loc = node.text.strip()
+                if not _in_scope(loc, base_domain):
+                    continue
+                if loc.lower().endswith(".xml") and len(visited_maps) + len(pending) < MAX_SITEMAPS:
+                    if loc not in pending and loc not in visited_maps:
+                        pending.append(loc)
+                elif not SKIP_EXT.search(urlparse(loc).path):
+                    pages.append(urldefrag(loc)[0])
+                    if len(pages) >= MAX_SITEMAP_URLS:
+                        break
+        except Exception:
+            continue
+    return list(dict.fromkeys(pages))
+
+
+async def crawl(url, max_pages=MAX_PAGES):
     if not re.match(r"^https?://", url, re.I):
         url = "https://" + url
     pages, seen = [], set()
@@ -191,54 +275,95 @@ async def crawl(url):
         else:
             blocked_msg = ""
         host = urlparse(final).hostname
+        base_domain = _base_domain(urlparse(url).hostname or host)
+        if not _in_scope(final, base_domain):
+            raise Blocked("The website redirected outside its domain. Add that website directly instead.")
         if not html or len(_Page_text(html)) < 300:  # empty or JavaScript-only page: let the reader service render it
             try:
                 alt = await _reader(client, final)
                 pages = [alt]
-                picked = [x for x in dict.fromkeys(urldefrag(l)[0] for l in alt["links"]) if urlparse(x).hostname == host and not SKIP_EXT.search(x)]
+                sitemap = await _sitemap_urls(client, final, base_domain)
+                picked = [x for x in dict.fromkeys([*sitemap, *(urldefrag(urljoin(final, l))[0] for l in alt["links"])])
+                          if _in_scope(x, base_domain) and not SKIP_EXT.search(urlparse(x).path)]
                 picked.sort(key=lambda x: (0 if PRIORITY.search(urlparse(x).path) else 1, len(x)))
-                res = await asyncio.gather(*[_reader(client, x) for x in picked[:MAX_PAGES - 1]], return_exceptions=True)
-                pages += [r for r in res if not isinstance(r, Exception) and len(r["text"]) > 150]
+                semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
+                async def read_one(page_url):
+                    async with semaphore:
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(None, _check_host, urlparse(page_url).hostname)
+                            return await _reader(client, page_url)
+                        except Exception:
+                            return None
+                res = await asyncio.gather(*[read_one(x) for x in picked[:min(max_pages - 1, READER_PAGE_LIMIT)]])
+                pages += [r for r in res if r and len(r["text"]) > 150]
                 return pages
             except Exception:
                 if not html:
                     raise Blocked(blocked_msg or "I couldn't read that website. It may block automated readers.")
-        queue = [(final, html)]
-        first = True
-        while queue and len(pages) < MAX_PAGES:
-            u, h = queue.pop(0)
-            p = _Page()
-            try:
-                p.feed(h)
-            except Exception:
-                continue
-            seen.add(urldefrag(u)[0])
-            txt = p.text()
-            extra = p.structured_text()
-            if extra and len(txt) < 1500:
-                txt = (txt + "\n\n" + extra).strip()
-            pages.append({"url": u, "title": p.title.strip(), "meta": p.meta, "text": txt})
-            if first:
-                first = False
-                cands = []
-                for href in p.links:
-                    full = urldefrag(urljoin(u, href))[0]
-                    pu = urlparse(full)
-                    if pu.hostname != host or full in seen or SKIP_EXT.search(full) or pu.scheme not in ("http", "https"):
-                        continue
-                    cands.append((0 if PRIORITY.search(pu.path) else 1, len(pu.path), full))
-                picked = []
-                for _, _, full in sorted(set(cands)):
-                    if full not in picked:
-                        picked.append(full)
-                    if len(picked) >= MAX_PAGES - 1:
-                        break
-                res = await asyncio.gather(*[_get(client, x) for x in picked], return_exceptions=True)
-                queue.extend(r for r in res if not isinstance(r, Exception))
+        sitemap_urls = await _sitemap_urls(client, final, base_domain)
+        pages.append({"url": final, "title": "", "meta": {}, "text": ""})
+        frontier = set(sitemap_urls)
+        frontier.update(urldefrag(urljoin(final, href))[0] for href in _Page_links(html))
+        seen.add(urldefrag(final)[0])
+        total_bytes = len(html.encode("utf-8", errors="ignore"))
+        semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
+        while frontier and len(pages) < max_pages and total_bytes < MAX_TOTAL_BYTES:
+            candidates = [x for x in frontier if x not in seen and _in_scope(x, base_domain) and not SKIP_EXT.search(urlparse(x).path)]
+            candidates.sort(key=lambda x: (0 if PRIORITY.search(urlparse(x).path) else 1, len(urlparse(x).path), x))
+            batch = candidates[:min(FETCH_CONCURRENCY, max_pages - len(pages))]
+            if not batch:
+                break
+            frontier.difference_update(batch)
+            seen.update(batch)
+            async def get_one(page_url):
+                async with semaphore:
+                    try:
+                        return await _get(client, page_url, base_domain)
+                    except Exception:
+                        return None
+            results = await asyncio.gather(*(get_one(x) for x in batch))
+            for item in results:
+                if not item:
+                    continue
+                page_url, page_html = item
+                size = len(page_html.encode("utf-8", errors="ignore"))
+                if total_bytes + size > MAX_TOTAL_BYTES:
+                    continue
+                total_bytes += size
+                parser = _Page()
+                try:
+                    parser.feed(page_html)
+                except Exception:
+                    continue
+                txt = parser.text()
+                extra = parser.structured_text()
+                if extra:
+                    txt = (txt + "\n\n" + extra).strip()
+                if len(txt) > 80:
+                    pages.append({"url": page_url, "title": parser.title.strip(), "meta": parser.meta, "text": txt})
+                for href in parser.links:
+                    full = urldefrag(urljoin(page_url, href))[0]
+                    if full not in seen and _in_scope(full, base_domain) and not SKIP_EXT.search(urlparse(full).path):
+                        frontier.add(full)
+        first = _Page()
+        first.feed(html)
+        txt = first.text()
+        extra = first.structured_text()
+        pages[0] = {"url": final, "title": first.title.strip(), "meta": first.meta,
+                    "text": (txt + ("\n\n" + extra if extra else "")).strip()}
     return pages
 
 
-async def learn(url, pasted=""):
+def _Page_links(html):
+    p = _Page()
+    try:
+        p.feed(html)
+    except Exception:
+        return []
+    return p.links
+
+
+async def learn(url, pasted="", kb_id=None):
     """Read a site (or pasted text) into a new knowledge base. -> dict(kb_id, company, pages, sections, info). Raises Blocked with a friendly message."""
     if pasted and len(pasted.strip()) > 150:  # the site couldn't be read: use text the admin copied from it
         host0 = urlparse(url if re.match(r"^https?://", url, re.I) else "https://" + url).hostname or "pasted text"
@@ -263,15 +388,25 @@ async def learn(url, pasted=""):
         pass
     company = (info.get("company") or home["meta"].get("og:site_name") or home["title"].split("|")[0].split("-")[0].strip() or host)[:60]
     facts = info.get("key_facts") or []
-    kb_id = db.run("INSERT INTO knowledge_bases(name,agent_name,persona,context,key_facts,next_steps,contact,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                   (f"Website: {company}", "", info.get("persona") or f"Friendly, quick rep for {company}. Plain words, short sentences.",
-                    f"{company}: {info.get('what_they_do') or home['meta'].get('description') or ''} (from {host})",
-                    "\n".join(f"- {f}" for f in facts), info.get("call_goal") or "", "", db.now()))
+    fields = {"name": f"Website: {company}", "agent_name": "",
+              "persona": info.get("persona") or f"Friendly, quick rep for {company}. Plain words, short sentences.",
+              "context": f"{company}: {info.get('what_they_do') or home['meta'].get('description') or ''} (from {host})",
+              "key_facts": "\n".join(f"- {f}" for f in facts), "next_steps": info.get("call_goal") or "", "contact": ""}
+    existing = db.q1("SELECT id FROM knowledge_bases WHERE id=?", (kb_id,)) if kb_id else None
+    if existing:
+        db.update("knowledge_bases", kb_id, **fields)
+        for doc in db.q("SELECT id,source FROM kb_docs WHERE kb_id=? AND source IS NOT NULL", (kb_id,)):
+            if _in_scope(doc["source"], _base_domain(urlparse(doc["source"]).hostname or "")) and _in_scope(doc["source"], _base_domain(host)):
+                db.run("DELETE FROM kb_docs WHERE id=?", (doc["id"],))
+    else:
+        kb_id = db.run("INSERT INTO knowledge_bases(name,agent_name,persona,context,key_facts,next_steps,contact,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                       (fields["name"], fields["agent_name"], fields["persona"], fields["context"], fields["key_facts"], fields["next_steps"], fields["contact"], db.now()))
     total = 0
     for p in pages:
         title = p["title"] or p["url"]
         total += await knowledge.ingest(kb_id, title[:120], p["text"][:20000], source=p["url"])
-    return {"kb_id": kb_id, "company": company, "pages": [p["url"] for p in pages], "sections": total, "info": info, "host": host}
+    return {"kb_id": kb_id, "company": company, "pages": [p["url"] for p in pages], "sections": total, "info": info, "host": host,
+            "page_limit": MAX_PAGES, "coverage_note": (f"Crawled {len(pages)} public pages (limit {MAX_PAGES}). Sites blocked by robots, authentication or anti-bot controls, and content beyond the page limit, may not be included." if len(pages) >= MAX_PAGES else f"Crawled {len(pages)} discovered public pages. Authenticated or blocked content may not be included.")}
 
 
 async def build(url, person_name="Alex", pasted=""):

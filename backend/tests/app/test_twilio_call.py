@@ -352,11 +352,29 @@ class TwilioCalls(TwilioFixture):
             with mock.patch.object(twilio_call, 'signed_form', new_callable=mock.AsyncMock,
                                    return_value={'CallSid': 'CA'+'f'*32, 'CallStatus': 'completed', 'CallDuration': '1'}):
                 response = await twilio_call.call_status(self.ws, 'secret', cid, None)
-            row = db.q1('SELECT status,summary,duration FROM calls WHERE id=?', (cid,))
+            row = db.q1('SELECT status,summary,duration,outcome,report FROM calls WHERE id=?', (cid,))
             self.assertEqual(response.status_code, 204)
-            self.assertEqual(row['status'], 'failed')
-            self.assertIn('AI audio session was unavailable', row['summary'])
+            self.assertEqual(row['status'], 'completed')
+            self.assertIn('no customer speech was captured', row['summary'])
             self.assertEqual(row['duration'], 1)
+            self.assertEqual(row['outcome'], 'unresolved')
+            self.assertEqual(json.loads(row['report'])['transcript_status'], 'unavailable')
+
+    async def test_completed_callback_recovers_transcript_after_local_session_cleanup(self):
+        from app import callengine
+        with db.use(self.ws):
+            cid = db.run("INSERT INTO calls(contact_id,status,mode,direction,ext_id,created_at,transcript) VALUES(?,?,?,?,?,?,?)",
+                         (self.chat['contact_id'], 'failed', 'pstn', 'out', 'CA'+'e'*32, db.now(),
+                          json.dumps([{'role': 'agent', 'text': 'Hello'}, {'role': 'customer', 'text': 'Call me tomorrow'}])))
+            with mock.patch.object(twilio_call, 'signed_form', new_callable=mock.AsyncMock,
+                                   return_value={'CallSid': 'CA'+'e'*32, 'CallStatus': 'completed', 'CallDuration': '12'}), \
+                 mock.patch.object(callengine, 'finalize', new_callable=mock.AsyncMock) as finalize:
+                response = await twilio_call.call_status(self.ws, 'secret', cid, None)
+            row = db.q1('SELECT status,duration FROM calls WHERE id=?', (cid,))
+            self.assertEqual(response.status_code, 204)
+            self.assertEqual(row['status'], 'in_progress')
+            self.assertEqual(row['duration'], 12)
+            finalize.assert_awaited_once_with(cid, 'completed')
 
     async def test_foreign_workspace_cannot_attach_to_call(self):
         socket = SimpleNamespace(close=mock.AsyncMock(), accept=mock.AsyncMock())

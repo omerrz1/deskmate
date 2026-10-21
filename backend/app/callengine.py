@@ -17,6 +17,7 @@ RING_TIMEOUT = 30
 IDLE_TIMEOUT = 90
 RECORD_CUSTOMER_TTS = False  # calls are not recorded
 _twilio_dial_lock = asyncio.Lock()
+_finalize_locks = {}
 
 PERSONAS = [
     ("cooperative", "friendly and cooperative, answers questions directly"),
@@ -176,13 +177,23 @@ def mark_missed(call_id, status="no_answer"):
     call = db.q1("SELECT * FROM calls WHERE id=?", (call_id,))
     if not call or call["status"] in ("completed", "no_answer", "declined", "failed"):
         return
-    db.update("calls", call_id, status=status, outcome="no_answer", ended_at=db.now(),
-              summary="Customer did not pick up." if status == "no_answer" else "Customer declined the call.")
+    summary = "Customer did not pick up." if status == "no_answer" else "Customer declined the call."
+    report = {"executive_summary": summary, "objective": call.get("objective") or "", "objective_result": "unclear",
+              "conversation_flow": "The call did not connect.", "customer_needs": [], "questions_and_answers": [],
+              "objections_or_concerns": [], "commitments": [], "key_facts_shared": [], "follow_up_actions": [],
+              "risks_or_gaps": ["No conversation transcript exists because the call did not connect."],
+              "outcome": status, "sentiment": "unknown", "transcript_status": "unavailable"}
+    db.update("calls", call_id, status=status, outcome="no_answer", ended_at=db.now(), summary=summary, report=report)
     c = db.q1("SELECT * FROM contacts WHERE id=?", (call["contact_id"],))
     if c:
         db.update("contacts", c["id"], last_call_at=db.now(), last_outcome="no_answer",
                   status=c["status"] if c["status"] not in ("new",) else "no_answer")
     db.log("call", f"Call {status.replace('_', ' ')} (attempt {call['attempt']})", call_id=call_id, contact_id=call["contact_id"])
+    try:
+        from . import files
+        files.update_call_sheet(call_id, status, summary)
+    except Exception:
+        pass
     _schedule_retry(call)
     _check_campaign_done(call["campaign_id"])
 
@@ -519,7 +530,7 @@ async def _dial_twilio_due():
                 db.log("error", f"Twilio Voice call failed: {msg}", call_id=call["id"])
 
 
-async def call_now(contact_id, objective, agent_id=None):
+async def call_now(contact_id, objective, agent_id=None, report_sheet_id=None, report_row=None, report_status_column="status"):
     """Place one explicitly requested customer call immediately through Twilio Voice."""
     from . import agents, costs, messaging, twilio_call, wa_call
     contact = db.q1("SELECT * FROM contacts WHERE id=?", (contact_id,))
@@ -551,6 +562,9 @@ async def call_now(contact_id, objective, agent_id=None):
         (campaign_name, objective, json.dumps({"ids": [contact_id]}), "active", 1, db.now(), db.now(), agent_id))
     call_id = db.run("INSERT INTO calls(contact_id,campaign_id,attempt,status,language,created_at,not_before,reason,mode,objective,direction) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (contact_id, campaign_id, 1, "queued", contact.get("language") or "English", db.now(), db.now(), "direct", "pstn", objective, "out"))
+    if report_sheet_id:
+        db.update("calls", call_id, report_sheet_id=int(report_sheet_id), report_agent_id=agent_id,
+                  report_row=int(report_row) if report_row else None, report_status_column=str(report_status_column or "status")[:80])
 
     # Serialize with the campaign dialer so an immediate request cannot race it.
     async with _twilio_dial_lock:
@@ -558,6 +572,8 @@ async def call_now(contact_id, objective, agent_id=None):
         max_active = concurrency_limit()
         if active >= max_active:
             db.update("calls", call_id, status="failed", ended_at=db.now(), outcome="unresolved", summary=f"Workspace concurrent-call cap reached ({max_active}).")
+            from . import files
+            files.update_call_sheet(call_id, "failed", f"Workspace concurrent-call cap reached ({max_active}).")
             return {"error": f"The workspace concurrent-call cap ({max_active}) has been reached. Try again when a call ends or increase the cap in Settings."}
         try:
             twilio_call.voice_config()
@@ -575,6 +591,8 @@ async def call_now(contact_id, objective, agent_id=None):
             wa_call.SESSIONS.pop((db.current(), call_id), None)
             message = str(e)[:400]
             db.update("calls", call_id, status="failed", ended_at=db.now(), outcome="unresolved", summary=message)
+            from . import files
+            files.update_call_sheet(call_id, "failed", message)
             db.log("error", f"Direct Twilio call failed: {message}", call_id=call_id)
             return {"error": message, "call_id": call_id}
 
@@ -595,18 +613,45 @@ def _outbound_problem():
 
 # ---------- finalize ----------
 async def finalize(call_id, status="completed"):
+    """Serialize all completion sources so callbacks and media teardown cannot race."""
+    key = (db.current(), int(call_id))
+    lock = _finalize_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        return await _finalize_locked(call_id, status)
+
+
+async def _finalize_locked(call_id, status="completed"):
     call, contact, camp = call_context(call_id)
-    if call["status"] in ("completed", "no_answer", "declined", "failed"):
+    if call["status"] in ("completed", "no_answer", "declined", "failed") and call.get("report"):
         return db.q1("SELECT * FROM calls WHERE id=?", (call_id,))
     transcript = db.jload(call["transcript"], [])
     ended = db.now()
     duration = round(ended - (call["answered_at"] or ended), 1)
     if not any(t["role"] == "customer" for t in transcript):
-        # picked up but nobody spoke
+        # Persist a truthful report even when the stream/transcriber yielded no customer speech.
+        # A report must describe what is known and clearly mark what could not be captured.
+        summary = "The call ended, but no customer speech was captured. The conversation and outcome cannot be verified."
+        report = {"executive_summary": summary, "objective": (camp or {}).get("objective") or call.get("objective") or call.get("reason") or "",
+                  "objective_result": "unclear", "conversation_flow": "No customer transcript was captured.",
+                  "customer_needs": [], "questions_and_answers": [], "objections_or_concerns": [], "commitments": [],
+                  "key_facts_shared": [], "follow_up_actions": [],
+                  "risks_or_gaps": ["No customer speech transcript was captured; conversation details and outcome are unknown."],
+                  "outcome": "unresolved", "sentiment": "unknown", "language": call.get("language") or "unknown",
+                  "transcript_status": "unavailable"}
         db.update("calls", call_id, status="completed", ended_at=ended, duration=duration, outcome="unresolved",
-                  sentiment="neutral", summary="Call connected but the customer never replied.")
+                  sentiment="neutral", summary=summary, report=report)
+        try:
+            from . import files
+            files.update_call_sheet(call_id, "unresolved", summary)
+        except Exception:
+            pass
         db.update("contacts", contact["id"], last_call_at=ended, last_outcome="unresolved")
         db.log("call", "Call ended without a customer reply", call_id=call_id)
+        try:
+            from . import files
+            files.update_call_sheet(call_id, "unresolved", summary)
+        except Exception:
+            pass
         _schedule_retry(call)
         _check_campaign_done(call["campaign_id"])
         return db.q1("SELECT * FROM calls WHERE id=?", (call_id,))
@@ -644,6 +689,11 @@ async def finalize(call_id, status="completed"):
     db.update("calls", call_id, outcome=outcome, sentiment=res.get("sentiment") or "neutral",
               summary=res.get("summary") or "", key_points=res.get("key_points") or [], follow_up=follow,
               language=res.get("language_detected") or contact.get("language"), report=call_report)
+    try:
+        from . import files
+        files.update_call_sheet(call_id, outcome, res.get("summary") or "")
+    except Exception:
+        pass
     try:
         from . import discuss
         owner = discuss.owner_for_call(call)

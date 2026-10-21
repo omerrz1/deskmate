@@ -620,6 +620,8 @@ def company_put(c: CompanyIn):
             zoneinfo.ZoneInfo(c.timezone)
         except Exception:
             raise HTTPException(400, "Unknown time zone")
+    if c.website is not None and c.website.strip() != voices.get_setting("company_website", ""):
+        voices.set_setting("company_website_kb_id", "")
     for key, val in (("company_name", c.name), ("company_about", c.about), ("company_website", c.website), ("timezone", c.timezone)):
         if val is not None:
             voices.set_setting(key, val.strip()[:2000])
@@ -637,19 +639,22 @@ async def company_learn(l: LearnIn):
     import asyncio
     from . import webdemo
     try:
-        r = await asyncio.wait_for(webdemo.learn(l.url.strip()[:500]), 100)
+        saved_kb = str(voices.get_setting("company_website_kb_id", "") or "")
+        r = await asyncio.wait_for(webdemo.learn(l.url.strip()[:500], kb_id=int(saved_kb) if saved_kb.isdigit() else None), 180)
     except webdemo.Blocked as e:
         raise HTTPException(400, str(e))
     except asyncio.TimeoutError:
         raise HTTPException(504, "That website took too long to read.")
     name = voices.get_setting("company_name", "") or r["company"]
     db.update("knowledge_bases", r["kb_id"], name=name)
+    voices.set_setting("company_website_kb_id", str(r["kb_id"]))
     if not voices.get_setting("company_about", ""):
         about = (r.get("info") or {}).get("what_they_do") or ""
         if about:
             voices.set_setting("company_about", about[:2000])
     files.sync_company_doc()
-    return {"kb_id": r["kb_id"], "sections": r["sections"], "pages": len(r["pages"]), "about": voices.get_setting("company_about", "")}
+    return {"kb_id": r["kb_id"], "sections": r["sections"], "pages": len(r["pages"]),
+            "coverage_note": r.get("coverage_note"), "about": voices.get_setting("company_about", "")}
 
 
 # ---------- things to discuss with the admin ----------

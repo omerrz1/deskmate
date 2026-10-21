@@ -59,7 +59,7 @@ function Editor({ id, onChanged }) {
       </Panel>
 
       <Panel title={`Documents · ${kb.docs.length}`} right={<span className="actions"><button className="btn small ghost" disabled={busy} onClick={resort}>Sort with AI</button><button className="btn small" disabled={busy} onClick={() => file.current.click()}>Upload files</button></span>} pad={false}>
-        <input ref={file} type="file" multiple hidden accept=".txt,.md,.csv,.pdf,.xlsx" onChange={(e) => { upload(e.target.files); e.target.value = '' }} />
+        <input ref={file} type="file" multiple hidden accept=".txt,.md,.csv,.pdf,.docx,.xlsx" onChange={(e) => { upload(e.target.files); e.target.value = '' }} />
         <div className="pad">
           <p className="muted small">Things the agent can look up mid-call: FAQs, products or services, prices, requirements, policies. Upload PDFs, Excel, text or markdown files: long files are split into topics and sorted into categories automatically. Or write a topic below.</p>
           <div className="form" style={{ marginTop: 12 }}>

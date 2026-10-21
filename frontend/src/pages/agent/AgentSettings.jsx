@@ -59,7 +59,7 @@ export default function AgentSettings({ a, reload }) {
         </div>
         <label className="f">Personality<textarea rows="3" value={f.personality} onChange={set('personality')} /></label>
         <div className="row2">
-          <label className="f">Voice in meetings<select value={f.openai_voice} onChange={set('openai_voice')}>{VOICES.map((v) => <option key={v}>{v}</option>)}</select></label>
+          <label className="f">Voice for calls and meetings<select value={f.openai_voice} onChange={set('openai_voice')}>{VOICES.map((v) => <option key={v}>{v}</option>)}</select></label>
           <label className="f">Works<select value={f.autonomy} onChange={set('autonomy')}><option value="full">On their own, then reports back</option><option value="ask">Asks me before changing anything</option></select></label>
         </div>
         <label className="check"><input type="checkbox" checked={f.works_alone} onChange={(e) => setF({ ...f, works_alone: e.target.checked })} /> Works through their to-do list by themselves</label>

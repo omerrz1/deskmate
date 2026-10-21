@@ -1,6 +1,7 @@
 """The file systems: every person's own files, every AI employee's computer, the company drive and each project's drive.
 The point of most of these tests is what must NOT be reachable."""
 import unittest
+import json
 
 from app import agents, db, files, search, team
 
@@ -26,6 +27,34 @@ class DriveBase(Company):
 
 
 class EmployeeComputerTests(DriveBase):
+    async def test_recent_admin_instructions_are_loaded_before_task_planning(self):
+        aid = self.agent("Ethan")
+        with db.use(self.ws):
+            folder = files.folder_id(aid, "From admins")
+            db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                   (aid, "Course follow-up instructions", "doc", "Keep the call under one minute. Ask one question, then log the requested callback date.", folder, db.now(), db.now()))
+            context = agents._task_document_context(agents.get(aid), {"title": "Call course leads using the course follow-up instructions", "detail": "", "ref": ""})
+            self.assertIn("Keep the call under one minute", context)
+            self.assertIn("callback date", context)
+
+    async def test_employee_can_resolve_and_update_a_recent_sheet_by_title_then_call_outcome_syncs(self):
+        aid = self.agent("Ethan")
+        with db.use(self.ws):
+            did = db.run("INSERT INTO documents(agent_id,title,kind,body,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                         (aid, "leads", "sheet", json.dumps({"columns": ["name", "number", "status"],
+                                                               "rows": [["zubair", "+447723827344", ""]]}), db.now(), db.now()))
+            agent = agents.get(aid)
+            result, _ = await files.run_tool(agent, "edit_sheet", {"title": "the leads sheet",
+                "set_cells": [{"row": 1, "column": "status", "value": "calling"}]})
+            self.assertTrue(result["updated"])
+            contact_id = db.run("INSERT INTO contacts(name,phone,language,status,created_at) VALUES(?,?,?,?,?)",
+                                ("zubair", "+447723827344", "English", "new", db.now()))
+            call_id = db.run("INSERT INTO calls(contact_id,status,report_sheet_id,report_agent_id,created_at) VALUES(?,?,?,?,?)",
+                             (contact_id, "in_progress", did, aid, db.now()))
+            self.assertTrue(files.update_call_sheet(call_id, "callback_requested", "Asked for a call next week."))
+            sheet = json.loads(db.q1("SELECT body FROM documents WHERE id=?", (did,))["body"])
+            self.assertEqual(sheet["rows"][0], ["zubair", "+447723827344", "callback_requested"])
+
     async def test_every_employee_computer_has_folders_for_and_from_the_admins_listed_first(self):
         ava = self.agent("Ava")
         st, ls = await self.owner.get("/api/fs", query=f"owner={ava}")

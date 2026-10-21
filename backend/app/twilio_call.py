@@ -16,7 +16,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
-from . import chats, db, directory, integrations, wa_call
+from . import callengine, chats, db, directory, integrations, wa_call
 
 router = APIRouter()
 _permission_locks = weakref.WeakValueDictionary()
@@ -392,7 +392,7 @@ async def signed_form(request, secret, *, voice=False):
 async def call_status(ws: str, secret: str, cid: int, request: Request):
     form = await signed_form(request, secret, voice=True)
     sess = wa_call.SESSIONS.get((db.current(), cid))
-    call = db.q1('SELECT ext_id FROM calls WHERE id=?', (cid,))
+    call = db.q1('SELECT * FROM calls WHERE id=?', (cid,))
     if call and form.get('CallSid') == (sess.wa_call_id if isinstance(sess, Session) else call.get('ext_id')):
         state = form.get('CallStatus')
         if state == 'answered':
@@ -408,11 +408,33 @@ async def call_status(ws: str, secret: str, cid: int, request: Request):
                 else:
                     sess._spawn(sess.end('remote_ended' if state == 'completed' else 'no_answer' if state in ('busy', 'no-answer') else 'failed'))
             else:
-                status = 'failed' if state in ('completed', 'failed', 'canceled') else 'no_answer'
-                note = ('Twilio ended the call, but its AI audio session was unavailable; no conversation was recorded.'
-                        if state == 'completed' else 'The recipient did not answer.' if status == 'no_answer' else 'Twilio could not connect the call.')
-                db.update('calls', cid, status=status, ended_at=db.now(),
-                          duration=int(form.get('CallDuration') or 0), outcome='unresolved' if status == 'failed' else 'no_answer', summary=note)
+                # Twilio's completed means the phone call ended normally. A missing in-memory
+                # stream session is not evidence that the call failed: sessions are removed as
+                # teardown begins, so the callback can race the transcript/report finalizer.
+                seconds = int(form.get('CallDuration') or 0)
+                if state == 'completed':
+                    if call.get('status') == 'completed' and call.get('report'):
+                        pass  # Duplicate callback; preserve the already finalized report.
+                    else:
+                        # Let the common finalizer persist contact/campaign bookkeeping and a
+                        # structured report whether or not the media stream captured speech.
+                        db.update('calls', cid, status='in_progress', duration=seconds,
+                                  answered_at=call.get('answered_at') or (db.now() - seconds))
+                        await callengine.finalize(cid, 'completed')
+                else:
+                    status = 'no_answer' if state in ('busy', 'no-answer') else 'failed'
+                    note = ('The recipient did not answer (Twilio status: ' + state + ').'
+                            if status == 'no_answer' else 'Twilio could not connect the call (status: ' + state + ').')
+                    report = {'executive_summary': note, 'objective': call.get('reason') or '',
+                              'objective_result': 'unclear', 'conversation_flow': 'The call did not connect.',
+                              'customer_needs': [], 'questions_and_answers': [], 'objections_or_concerns': [],
+                              'commitments': [], 'key_facts_shared': [], 'follow_up_actions': [],
+                              'risks_or_gaps': ['No conversation transcript exists because the call did not connect.'],
+                              'outcome': status, 'sentiment': 'unknown', 'transcript_status': 'unavailable'}
+                    db.update('calls', cid, status=status, ended_at=db.now(), duration=seconds,
+                              outcome=status, summary=note, report=report)
+                    from . import files
+                    files.update_call_sheet(cid, status, note)
     return Response(status_code=204)
 
 

@@ -18,6 +18,20 @@ for _stmt in ("ALTER TABLE kb_docs ADD COLUMN category TEXT DEFAULT 'Other'", "A
     except Exception:
         pass
 
+_HAS_FTS = False
+try:
+    existed = bool(db.q1("SELECT name FROM sqlite_master WHERE type='table' AND name='kb_docs_search'"))
+    db.run("CREATE VIRTUAL TABLE IF NOT EXISTS kb_docs_search USING fts5(title, body, content='kb_docs', content_rowid='id')")
+    db.run("CREATE TRIGGER IF NOT EXISTS kb_docs_search_insert AFTER INSERT ON kb_docs BEGIN INSERT INTO kb_docs_search(rowid,title,body) VALUES(new.id,new.title,new.body); END")
+    db.run("CREATE TRIGGER IF NOT EXISTS kb_docs_search_delete AFTER DELETE ON kb_docs BEGIN INSERT INTO kb_docs_search(kb_docs_search,rowid,title,body) VALUES('delete',old.id,old.title,old.body); END")
+    db.run("CREATE TRIGGER IF NOT EXISTS kb_docs_search_update AFTER UPDATE OF title,body ON kb_docs BEGIN INSERT INTO kb_docs_search(kb_docs_search,rowid,title,body) VALUES('delete',old.id,old.title,old.body); INSERT INTO kb_docs_search(rowid,title,body) VALUES(new.id,new.title,new.body); END")
+    if not existed:
+        db.run("INSERT INTO kb_docs_search(kb_docs_search) VALUES('rebuild')")
+    _HAS_FTS = True
+except Exception:
+    # FTS5 is optional on custom SQLite builds; the lexical scan below remains a safe fallback.
+    _HAS_FTS = False
+
 CATEGORIES = ["Products & services", "Pricing & payment", "Requirements", "How to get started", "FAQ", "Policies", "Objection handling",
               "Contact & locations", "Support", "Other"]
 
@@ -88,7 +102,8 @@ def _chunks(doc):
         cur += block + "\n"
     if cur.strip():
         parts.append(cur)
-    return [f"[{doc['title']}]\n{p.strip()}" for p in parts]
+    source = f" | source: {doc['source']}" if doc.get("source") else ""
+    return [f"[{doc['title']}{source}]\n{p.strip()}" for p in parts]
 
 
 def _tok(s):
@@ -99,8 +114,26 @@ def search(kb_id, query, k=3, categories=None, category=None):
     q = _tok(query)
     if not q or not kb_id:
         return []
+    docs = []
+    if _HAS_FTS:
+        match = " OR ".join(f'"{term}"*' for term in sorted(q))
+        where = ["kb_docs_search MATCH ?", "d.kb_id=?"]
+        args = [match, kb_id]
+        if categories:
+            where.append("d.category IN (" + ",".join("?" for _ in categories) + ")")
+            args.extend(categories)
+        if category:
+            where.append("d.category=?")
+            args.append(category)
+        try:
+            docs = db.q(f"SELECT d.title,d.body,d.category,d.source FROM kb_docs_search JOIN kb_docs d ON d.id=kb_docs_search.rowid WHERE {' AND '.join(where)} ORDER BY bm25(kb_docs_search) LIMIT 120", args)
+        except Exception:
+            docs = []
+    if not docs:
+        docs = db.q("SELECT title,body,category,source FROM kb_docs WHERE kb_id=?", (kb_id,))
     scored = []
-    for d in db.q("SELECT title,body,category FROM kb_docs WHERE kb_id=?", (kb_id,)):
+    for d in docs:
+        d = dict(d)
         if categories and d["category"] not in categories:
             continue
         if category and d["category"] != category:
@@ -111,7 +144,16 @@ def search(kb_id, query, k=3, categories=None, category=None):
             if score:
                 scored.append((score, c))
     scored.sort(key=lambda x: -x[0])
-    return [c[:1500] for _, c in scored[:k]]
+    out, seen = [], set()
+    for _, chunk in scored:
+        normalized = chunk.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(chunk[:1500])
+        if len(out) >= max(1, min(12, int(k or 3))):
+            break
+    return out
 
 
 def add_doc(kb_id, title, text, kind="info", category=None, source=None):
@@ -182,6 +224,39 @@ async def ingest(kb_id, title, text, source=None):
 
 def extract_text(filename, data: bytes):
     name = (filename or "").lower()
+    if name.endswith(".docx"):
+        # Read Word's XML directly so DOCX support does not depend on a heavyweight
+        # office suite or an optional package being installed in production.
+        import zipfile
+        import xml.etree.ElementTree as ET
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        parts = []
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            if len(archive.infolist()) > 2500 or sum(item.file_size for item in archive.infolist()) > 40 * 1024 * 1024:
+                raise ValueError("Word document expands beyond the supported size")
+            names = ["word/document.xml"]
+            names.extend(sorted(n for n in archive.namelist() if re.fullmatch(r"word/(?:header|footer)\d+\.xml", n)))
+            names.extend(n for n in ("word/footnotes.xml", "word/endnotes.xml") if n in archive.namelist())
+            for part in names:
+                if part not in archive.namelist():
+                    continue
+                info = archive.getinfo(part)
+                if info.file_size > 15 * 1024 * 1024:
+                    continue
+                root = ET.fromstring(archive.read(part))
+                for paragraph in root.iter(ns + "p"):
+                    chunks = []
+                    for node in paragraph.iter():
+                        if node.tag == ns + "t" and node.text:
+                            chunks.append(node.text)
+                        elif node.tag == ns + "tab":
+                            chunks.append("\t")
+                        elif node.tag in (ns + "br", ns + "cr"):
+                            chunks.append("\n")
+                    line = "".join(chunks).strip()
+                    if line:
+                        parts.append(line)
+        return "\n".join(parts)
     if name.endswith(".pdf"):
         from pypdf import PdfReader
         return "\n\n".join((p.extract_text() or "") for p in PdfReader(io.BytesIO(data)).pages[:300])

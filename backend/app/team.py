@@ -53,6 +53,8 @@ def _ancestors(fid):
 
 
 def can_access_doc(agent, doc):
+    if agent is None:
+        return can_use_owner(None, doc["agent_id"])
     if can_use_owner(agent, doc["agent_id"]):
         return True
     aid = agent["id"]

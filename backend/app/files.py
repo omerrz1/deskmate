@@ -173,13 +173,13 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"title": _S, "body": {**_S, "description": "plain text or simple markdown"}, "folder": _FOLDER, "shared": _SHARED, "project": _PROJECT}, "required": ["title", "body"]}},
     {"name": "create_spreadsheet", "description": "Create a spreadsheet (call log, tracker, budget, lead list) from columns and rows and file it in a folder.",
      "parameters": {"type": "object", "properties": {"title": _S, "columns": {"type": "array", "items": _S}, "rows": {"type": "array", "items": {"type": "array", "items": _S}}, "folder": _FOLDER, "shared": _SHARED, "project": _PROJECT}, "required": ["title", "columns", "rows"]}},
-    {"name": "edit_sheet", "description": "Update a spreadsheet: add rows, change individual cells, add columns or delete rows. Rows and columns are numbered from 1 (columns may also be given by header name).",
-     "parameters": {"type": "object", "properties": {"id": _I, "add_rows": {"type": "array", "items": {"type": "array", "items": _S}},
+    {"name": "edit_sheet", "description": "Update a spreadsheet by its id OR by its exact title (for example title='leads'). If the admin names a sheet you just created, use that title; do not ask them for an id. Rows are numbered from 1 among data rows (the headers are separate).",
+     "parameters": {"type": "object", "properties": {"id": _I, "title": _S, "add_rows": {"type": "array", "items": {"type": "array", "items": _S}},
                                                     "set_cells": {"type": "array", "items": {"type": "object", "properties": {"row": _I, "column": _S, "value": _S}}},
-                                                    "add_columns": {"type": "array", "items": _S}, "delete_rows": {"type": "array", "items": _I}}, "required": ["id"]}},
-    {"name": "read_document", "description": "Read a document or spreadsheet by id. For long files, use offset/limit to read additional sections; for a spreadsheet, use query to find matching rows.", "parameters": {"type": "object", "properties": {"id": _I, "query": _S, "offset": _I, "limit": _I}, "required": ["id"]}},
-    {"name": "update_document", "description": "Replace or append to a document's text, or append rows to a spreadsheet, or rename it.",
-     "parameters": {"type": "object", "properties": {"id": _I, "body": _S, "append": _S, "add_rows": {"type": "array", "items": {"type": "array", "items": _S}}, "title": _S}, "required": ["id"]}},
+                                                    "add_columns": {"type": "array", "items": _S}, "delete_rows": {"type": "array", "items": _I}}}},
+    {"name": "read_document", "description": "Read a document or spreadsheet by id OR title. Use the title when the admin names a file; do not ask for an id. For long files, use offset/limit; for spreadsheets, use query to find matching rows.", "parameters": {"type": "object", "properties": {"id": _I, "title": _S, "query": _S, "offset": _I, "limit": _I}}},
+    {"name": "update_document", "description": "Replace or append to a document's text, or append rows to a spreadsheet, or rename it. Resolve by id or exact title; use the title when the admin names a file.",
+     "parameters": {"type": "object", "properties": {"id": _I, "file_title": _S, "body": _S, "append": _S, "add_rows": {"type": "array", "items": {"type": "array", "items": _S}}, "title": _S}}},
     {"name": "list_documents", "description": "Search file titles and contents, including uploaded PDFs, text, and spreadsheet cells, across accessible drives. If the first search misses, try a distinctive word or list files in folders.", "parameters": {"type": "object", "properties": {"query": _S}}},
     {"name": "list_files", "description": "Look inside a folder on your computer (or the shared drive): subfolders and files with ids. Empty path = the top level.", "parameters": {"type": "object", "properties": {"path": _S, "shared": _SHARED, "project": _PROJECT}}},
     {"name": "create_folder", "description": "Make a folder (and any parents) on your computer or the shared drive.", "parameters": {"type": "object", "properties": {"path": _S, "shared": _SHARED, "project": _PROJECT}, "required": ["path"]}},
@@ -197,6 +197,80 @@ def _sheet(d):
     t = json.loads(d["body"] or "{}")
     t.setdefault("columns", []); t.setdefault("rows", [])
     return t
+
+
+def resolve_document(agent, doc_id=None, title=None, kind=None):
+    """Find an accessible document by its supplied id or title, returning a useful ambiguity error."""
+    if doc_id:
+        doc = db.q1("SELECT * FROM documents WHERE id=?", (doc_id,))
+        if doc and (not kind or doc["kind"] == kind):
+            from . import team
+            if team.can_access_doc(agent, doc):
+                return doc, ""
+        return None, "That file does not exist or is not accessible."
+    wanted = str(title or "").strip().casefold()
+    wanted = re.sub(r"^(the\s+)", "", wanted)
+    wanted = re.sub(r"\s+(spreadsheet|sheet|document|file)$", "", wanted).strip()
+    if not wanted:
+        return None, "Give the file id or its title."
+    rows = db.q("SELECT * FROM documents WHERE lower(trim(title))=lower(trim(?)) AND (? IS NULL OR kind=?) ORDER BY updated_at DESC", (wanted, kind, kind))
+    from . import team
+    rows = [d for d in rows if team.can_access_doc(agent, d)]
+    if not rows:
+        # Allow a distinctive partial title if exact title is not found, but never guess across duplicates.
+        rows = db.q("SELECT * FROM documents WHERE lower(title) LIKE ? AND (? IS NULL OR kind=?) ORDER BY updated_at DESC LIMIT 30", ("%" + wanted.replace("%", "\\%") + "%", kind, kind))
+        rows = [d for d in rows if team.can_access_doc(agent, d)]
+    if len(rows) == 1:
+        return rows[0], ""
+    if len(rows) > 1:
+        return None, "More than one accessible file matches that title: " + ", ".join(f"{d['title']} (id {d['id']})" for d in rows[:8])
+    return None, f"No accessible file named '{title}' was found. Use list_documents to search."
+
+
+def update_call_sheet(call_id, outcome, summary=""):
+    call = db.q1("SELECT * FROM calls WHERE id=?", (call_id,))
+    if not call or not call.get("report_sheet_id"):
+        return False
+    from . import team
+    agent = db.q1("SELECT * FROM agents WHERE id=?", (call.get("report_agent_id"),)) if call.get("report_agent_id") else None
+    doc = db.q1("SELECT * FROM documents WHERE id=? AND kind='sheet'", (call["report_sheet_id"],))
+    if not doc or not team.can_access_doc(agent, doc):
+        return False
+    table = _sheet(doc)
+    rows, cols = table["rows"], table["columns"]
+    if not rows or not cols:
+        return False
+    configured_row = call.get("report_row")
+    row_index = int(configured_row) - 1 if configured_row else -1
+    if row_index < 0 or row_index >= len(rows):
+        contact = db.q1("SELECT name,phone FROM contacts WHERE id=?", (call["contact_id"],)) or {}
+        target_phone = re.sub(r"\D", "", contact.get("phone") or "")
+        target_name = (contact.get("name") or "").strip().casefold()
+        matches = []
+        for i, row in enumerate(rows):
+            values = {str(cols[j]).casefold(): str(row[j] if j < len(row) else "") for j in range(len(cols))}
+            name = next((v for k, v in values.items() if "name" in k), "").strip().casefold()
+            phone = next((v for k, v in values.items() if any(x in k for x in ("phone", "number", "mobile"))), "")
+            phone = re.sub(r"\D", "", phone)
+            if target_phone and phone and (phone.endswith(target_phone[-9:]) or target_phone.endswith(phone[-9:])) or (target_name and name == target_name):
+                matches.append(i)
+        if len(matches) != 1:
+            return False
+        row_index = matches[0]
+    status_col = str(call.get("report_status_column") or "status").casefold()
+    col_index = next((i for i, c in enumerate(cols) if str(c).strip().casefold() == status_col), None)
+    if col_index is None:
+        return False
+    while len(rows[row_index]) <= col_index:
+        rows[row_index].append("")
+    rows[row_index][col_index] = str(outcome or "unresolved")[:120]
+    summary_col = next((i for i, c in enumerate(cols) if str(c).strip().casefold() in ("call report", "call summary", "report", "summary")), None)
+    if summary_col is not None:
+        while len(rows[row_index]) <= summary_col:
+            rows[row_index].append("")
+        rows[row_index][summary_col] = str(summary or "")[:500]
+    db.update("documents", doc["id"], body=json.dumps(table, ensure_ascii=False), updated_at=db.now())
+    return True
 
 
 def _where(d):
@@ -235,11 +309,9 @@ async def _run_tool(agent, name, a):
         did = db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (owner, a["title"][:160], kind, body, fid, db.now(), db.now()))
         return {"document_id": did, "saved_in": path_of(fid)}, "/office?tab=files"
     if name == "read_document":
-        d = db.q1("SELECT * FROM documents WHERE id=?", (a["id"],))
-        if not d:
-            return {"error": "not found"}, None
-        if not team.can_access_doc(agent, d):
-            return {"error": "That file is private to someone else. Ask them to share it with you."}, None
+        d, err = resolve_document(agent, a.get("id"), a.get("title"), None)
+        if err:
+            return {"error": err}, None
         if d["kind"] == "sheet":
             t = _sheet(d)
             rows = t["rows"]
@@ -266,11 +338,9 @@ async def _run_tool(agent, name, a):
         offset = max(0, int(a.get("offset") or 0)); limit = min(20000, max(1, int(a.get("limit") or 8000)))
         return {"id": d["id"], "title": d["title"], "kind": d["kind"], "location": _where(d), "content": body[offset:offset + limit], "offset": offset, "total_characters": len(body), "has_more": offset + limit < len(body)}, "/office?tab=files"
     if name == "update_document":
-        d = db.q1("SELECT * FROM documents WHERE id=?", (a["id"],))
-        if not d:
-            return {"error": "not found"}, None
-        if not team.can_access_doc(agent, d):
-            return {"error": "That file is private to someone else. Ask them to share it with you."}, None
+        d, err = resolve_document(agent, a.get("id"), a.get("file_title"), None)
+        if err:
+            return {"error": err}, None
         if _protected(agent, d):
             return {"error": "The Company details document can only be edited by the admin or a manager. Ask one of them (ask_for_help) to add it."}, None
         body = d["body"]
@@ -290,11 +360,9 @@ async def _run_tool(agent, name, a):
         db.update("documents", d["id"], **f)
         return {"updated": True}, "/office?tab=files"
     if name == "edit_sheet":
-        d = db.q1("SELECT * FROM documents WHERE id=? AND kind='sheet'", (a["id"],))
-        if not d:
-            return {"error": "no spreadsheet with that id"}, None
-        if not team.can_access_doc(agent, d):
-            return {"error": "That spreadsheet is private to someone else. Ask them to share it with you."}, None
+        d, err = resolve_document(agent, a.get("id"), a.get("title"), "sheet")
+        if err:
+            return {"error": err}, None
         t = _sheet(d)
         for c in (a.get("add_columns") or [])[:20]:
             t["columns"].append(str(c)[:80])

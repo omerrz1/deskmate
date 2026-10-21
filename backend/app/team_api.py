@@ -547,8 +547,9 @@ def pulse():
 def central_get():
     return {
         "calls_enabled": voices.get_setting("calls_enabled", "1") == "1",
+        "call_route": voices.get_setting("call_route", "whatsapp_then_phone"),
         "voice_engine": voices.get_setting("voice_engine", "openai"),
-        "messaging_policy": voices.get_setting("messaging_policy", "approve"),
+        "messaging_policy": voices.get_setting("messaging_policy", "auto"),
         "admin_phone": voices.get_setting("admin_phone", ""),
         "live_question_timeout": int(voices.get_setting("live_question_timeout", "75") or 75),
         "discuss_email": voices.get_setting("discuss_email", "1") == "1",
@@ -562,6 +563,7 @@ def central_get():
 
 class CentralIn(BaseModel):
     calls_enabled: Optional[bool] = None
+    call_route: Optional[str] = None
     work_paused: Optional[bool] = None
     max_tasks_per_day: Optional[int] = None
     company_tasks_per_day: Optional[int] = None
@@ -572,6 +574,10 @@ class CentralIn(BaseModel):
 def central_put(c: CentralIn):
     if c.calls_enabled is not None:
         voices.set_setting("calls_enabled", "1" if c.calls_enabled else "0")
+    if c.call_route is not None:
+        if c.call_route not in ("whatsapp_then_phone", "whatsapp", "phone"):
+            raise HTTPException(400, "Choose WhatsApp with phone fallback, WhatsApp only, or phone only.")
+        voices.set_setting("call_route", c.call_route)
     if c.work_paused is not None:
         voices.set_setting("work_paused", "1" if c.work_paused else "0")
     for key, val, lo, hi in (("max_tasks_per_day", c.max_tasks_per_day, 1, 500), ("company_tasks_per_day", c.company_tasks_per_day, 1, 2000), ("work_pace_seconds", c.work_pace_seconds, 0, 600)):

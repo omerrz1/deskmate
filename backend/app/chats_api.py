@@ -1,4 +1,5 @@
 """HTTP API for the Chats page: conversations, replies, approvals, WhatsApp calls and the settings that wire it all up."""
+import asyncio
 import os
 import re
 from typing import Optional
@@ -91,9 +92,10 @@ async def chat_new(b: NewChat, request: Request):
     num = re.sub(r"\D", "", b.phone)
     if len(num) < 7:
         raise HTTPException(400, "Enter the number with its country code, like 447700900123.")
-    if not chats._inst("whatsapp_cloud"):
-        raise HTTPException(400, "Connect WhatsApp Business in Apps first.")
-    chat = chats.get_or_create("whatsapp", "whatsapp_cloud", num, b.name)
+    provider = "twilio" if chats._inst("twilio") else "whatsapp_cloud"
+    if not chats._inst(provider):
+        raise HTTPException(400, "Connect Twilio in Apps first.")
+    chat = chats.get_or_create("whatsapp", provider, num, b.name)
     r = await chats.send(chat["id"], b.template, admin=True, by=_who(request), template={"name": b.template, "language": b.language, "params": [str(x) for x in b.params][:20]})
     if r["state"] != "sent":
         raise HTTPException(400, r["message"])
@@ -107,7 +109,7 @@ def chat_detail(cid: int):
     if not d:
         raise HTTPException(404, "That chat was not found.")
     st, until = wa_call.perm_state(chats._chat(cid))
-    d["call"] = {"possible": d["channel"] == "whatsapp" and d["provider"] == "whatsapp_cloud" and wa_call.available(), "permission": st, "permission_until": until or None,
+    d["call"] = {"possible": d["channel"] == "whatsapp" and d["provider"] in ("twilio", "whatsapp_cloud") and wa_call.available(), "permission": st, "permission_until": until if 0 < until < 253402300799 else None,
                  "installed": wa_call.available()}
     return d
 
@@ -216,7 +218,7 @@ def settings_get():
     return {
         "reply_mode": chats.reply_mode(), "messaging_policy": chats.send_policy(), "call_policy": chats.call_policy(), "inbound_calls": chats.setting("wa_inbound_calls", "off"),
         "default_agent": chats.default_agent_id(), "connected": chats.connected(),
-        "webhooks": {"meta": f"{base}/meta", "twilio": f"{base}/twilio", "telegram": f"{base}/telegram"}, "verify_token": sec,
+        "webhooks": {"meta": f"{base}/meta", "twilio": f"{base}/twilio", "twilio_voice": f"{base}/twilio/voice", "telegram": f"{base}/telegram"}, "verify_token": sec,
         "app_secret_set": {p: bool(chats.cfg(p).get("app_secret")) for p in ("whatsapp_cloud", "instagram_business", "facebook_page")},
         "public_base_url": os.getenv("PUBLIC_BASE_URL", ""), "calling": wa_call.status(),
     }
@@ -286,18 +288,26 @@ async def telegram_connect(b: TelegramIn):
 
 @router.get("/chats-settings/calling")
 async def calling_state():
-    """Ask WhatsApp whether calling is switched on for the connected number."""
+    from . import twilio_setup
     try:
-        d = await wa_call.graph("GET", "/settings")
-    except wa_call.CallError as e:
-        raise HTTPException(400, str(e))
-    return {"calling": d.get("calling") or {}}
+        async with asyncio.timeout(45):
+            return await twilio_setup.inspect()
+    except TimeoutError:
+        raise HTTPException(504, "Twilio connection check timed out. Try again shortly.")
 
 
 @router.post("/chats-settings/calling/enable")
-async def calling_enable():
+async def calling_enable(request: Request):
+    from . import twilio_setup
+    session = request.state.session
+    if db.current() != db.company() or session.get('company_role', session.get('role')) not in ('owner', 'admin'):
+        raise HTTPException(403, "A company admin must configure Twilio from the company workspace.")
     try:
-        await wa_call.graph("POST", "/settings", {"calling": {"status": "ENABLED", "call_icon_visibility": "DEFAULT", "callback_permission_status": "ENABLED"}})
+        async with asyncio.timeout(60):
+            return await twilio_setup.configure()
     except wa_call.CallError as e:
         raise HTTPException(400, str(e))
-    return {"ok": True}
+    except integrations.AppError as e:
+        raise HTTPException(400, str(e))
+    except TimeoutError:
+        raise HTTPException(504, "Twilio setup timed out. Some steps may have completed. Check the connection and Twilio Console before repeating setup.")

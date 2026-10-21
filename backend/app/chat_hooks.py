@@ -189,8 +189,8 @@ def _messaging(obj, our_id, ev):
 # ---------- Twilio: texts and WhatsApp through a Twilio number ----------
 def _twilio_signature_ok(request, form, token):
     base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-    if not base:
-        return True  # the secret address is the protection; set PUBLIC_BASE_URL to also check Twilio's signature
+    if not base or not token:
+        return False  # Twilio callbacks require the public URL and a valid signature
     url = base + request.url.path + (("?" + request.url.query) if request.url.query else "")
     data = url + "".join(k + form[k] for k in sorted(form))
     want = base64.b64encode(hmac.new(token.encode(), data.encode(), hashlib.sha1).digest()).decode()
@@ -203,8 +203,14 @@ async def twilio_in(ws: str, secret: str, request: Request):
     raw = await _body(request)
     form = dict(parse_qsl(raw.decode("utf-8", errors="replace"), keep_blank_values=True))
     c = chats.cfg("twilio")
-    if not _twilio_signature_ok(request, form, c.get("auth_token", "")):
+    if form.get("AccountSid") != c.get("account_sid") or not _twilio_signature_ok(request, form, c.get("auth_token", "")):
         raise HTTPException(403, "Bad signature")
+    from . import twilio_call
+    if form.get("Body") == "VOICE_CALL_REQUEST":
+        if not os.getenv("PUBLIC_BASE_URL") or form.get("AccountSid") != c.get("account_sid") or form.get("To") != "whatsapp:" + c.get("whatsapp_from", ""):
+            raise HTTPException(403, "Signed permission webhook requires PUBLIC_BASE_URL and matching account")
+        if twilio_call.permission_reply(form):
+            return Response("<Response/>", media_type="text/xml")
     frm = form.get("From", "")
     channel = "whatsapp" if frm.startswith("whatsapp:") else "sms"
     num = chats._digits(frm)
@@ -260,3 +266,7 @@ async def telegram_in(ws: str, secret: str, request: Request):
     else:
         chats.ingest("telegram", "telegram", chat_id, text, name=name, handle=handle, msg_id=mid, kind=kind)
     return {"ok": True}
+
+
+from . import twilio_call
+router.include_router(twilio_call.router)

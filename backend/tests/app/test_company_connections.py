@@ -119,6 +119,19 @@ class CompanyConnections(Company):
             self.assertEqual(db.q('SELECT * FROM connectors'), [])
             self.assertEqual(len(connectors.listing()), 1)
 
+    async def test_twilio_phone_formatting_does_not_block_credential_update(self):
+        iid, _ = self.seed()
+        cfg = {"account_sid": "AC" + "a" * 32, "auth_token": "rotated-company-token",
+               "from_number": "+44 7876 813599", "whatsapp_from": "", "call_permission_content_sid": ""}
+        with mock.patch.object(integrations, "test", new_callable=mock.AsyncMock,
+                               return_value={"ok": False, "message": "test stub"}):
+            status, result = await self.owner.put(f"/api/apps/{iid}", {"config": cfg})
+        self.assertEqual(status, 200, result)
+        with db.use(self.ws):
+            saved = integrations._config(db.q1("SELECT * FROM integrations WHERE id=?", (iid,)))
+        self.assertEqual(saved["auth_token"], "rotated-company-token")
+        self.assertEqual(saved["from_number"], "+447876813599")
+
     async def test_oauth_cache_shared_and_invalidated_for_sibling_workspaces(self):
         iid, _ = self.seed()
         first = await self.child()

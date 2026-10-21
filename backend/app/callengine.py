@@ -16,6 +16,7 @@ AGENT_NAME = os.getenv("AGENT_NAME", "Maya")
 RING_TIMEOUT = 30
 IDLE_TIMEOUT = 90
 RECORD_CUSTOMER_TTS = False  # calls are not recorded
+_twilio_dial_lock = asyncio.Lock()
 
 PERSONAS = [
     ("cooperative", "friendly and cooperative, answers questions directly"),
@@ -33,6 +34,10 @@ def queue_campaign(campaign_id, limit=None):
     camp = db.q1("SELECT * FROM campaigns WHERE id=?", (campaign_id,))
     if not camp:
         raise ValueError("campaign not found")
+    if not camp.get("autopilot"):
+        problem = _outbound_problem()
+        if problem:
+            raise ValueError(problem)
     filters = db.jload(camp["filters"], {})
     contacts = find_contacts(filters, limit=5000)
     first_at = schedule.clamp(camp, max(db.now(), camp.get("start_at") or 0))
@@ -49,8 +54,8 @@ def queue_campaign(campaign_id, limit=None):
         attempts = db.q1("SELECT COUNT(*) n FROM calls WHERE campaign_id=? AND contact_id=?", (campaign_id, c["id"]))["n"]
         if attempts >= camp["max_attempts"]:
             continue
-        db.run("INSERT INTO calls(contact_id,campaign_id,attempt,status,language,created_at,not_before,reason) VALUES(?,?,?,?,?,?,?,?)",
-               (c["id"], campaign_id, attempts + 1, "queued", c["language"], db.now(), first_at, "initial"))
+        db.run("INSERT INTO calls(contact_id,campaign_id,attempt,status,language,created_at,not_before,reason,mode) VALUES(?,?,?,?,?,?,?,?,?)",
+               (c["id"], campaign_id, attempts + 1, "queued", c["language"], db.now(), first_at, "initial", "pstn"))
         queued += 1
     db.update("campaigns", campaign_id, status="scheduled" if (camp.get("start_at") or 0) > db.now() else "active", started_at=db.now())
     db.log("campaign", f"Campaign '{camp['name']}' started: {queued} calls queued", campaign_id=campaign_id)
@@ -410,8 +415,8 @@ def plan_followup(call, contact, camp, outcome, callback_at):
         return
     at = schedule.clamp(camp, max(at, db.now() + 60))
     attempts = db.q1("SELECT COUNT(*) n FROM calls WHERE campaign_id=? AND contact_id=?", (call["campaign_id"], call["contact_id"]))["n"]
-    db.run("INSERT INTO calls(contact_id,campaign_id,attempt,status,language,created_at,not_before,reason) VALUES(?,?,?,?,?,?,?,?)",
-           (call["contact_id"], call["campaign_id"], attempts + 1, "queued", call["language"], db.now(), at, reason))
+    db.run("INSERT INTO calls(contact_id,campaign_id,attempt,status,language,created_at,not_before,reason,mode) VALUES(?,?,?,?,?,?,?,?,?)",
+           (call["contact_id"], call["campaign_id"], attempts + 1, "queued", call["language"], db.now(), at, reason, "pstn"))
     if camp["status"] in ("completed",):
         db.update("campaigns", camp["id"], status="active")
     db.log("call", f"Automatic {reason} call scheduled for {contact.get('name')} on {schedule.describe(at)}", contact_id=contact["id"], campaign_id=camp["id"])
@@ -424,6 +429,11 @@ async def tick():
         db.update("campaigns", c["id"], status="active")
         db.log("campaign", f"Scheduled campaign '{c['name']}' started", campaign_id=c["id"])
     _expire()
+    db.run("UPDATE calls SET mode='pstn' WHERE status='queued' AND campaign_id IS NOT NULL AND COALESCE(mode,'')='live'")
+    # Campaign starts are explicit; each due call is now placed through Twilio
+    # Voice instead of waiting for the browser's simulated phone to poll it.
+    if not _twilio_dial_lock.locked():
+        asyncio.get_event_loop().create_task(_dial_twilio_due())
     running = len(SIMS)
     if running >= 2:
         return
@@ -433,6 +443,125 @@ async def tick():
             asyncio.get_event_loop().create_task(autosim_call(due["id"]))
             running += 1
             break
+
+
+async def _dial_twilio_due():
+    if _twilio_dial_lock.locked():
+        return
+    async with _twilio_dial_lock:
+        browser_calls = {r["id"] for r in db.q("SELECT id FROM calls WHERE status='queued' AND campaign_id IS NULL")}
+        global_limit = max(1, min(10, int(os.getenv("TWILIO_MAX_CONCURRENT_CALLS", "10"))))
+        skipped = set(browser_calls)
+        while True:
+            active = db.q1("SELECT COUNT(*) n FROM calls WHERE status IN ('ringing','in_progress') AND mode='pstn'")["n"]
+            if active >= global_limit:
+                break
+            due = next_due(live_only=False, skip=skipped, autopilot=False)
+            if not due:
+                break
+            call = db.q1("SELECT c.*,p.name contact_name,p.phone,p.do_not_call FROM calls c JOIN contacts p ON p.id=c.contact_id WHERE c.id=?", (due["id"],))
+            camp = db.q1("SELECT * FROM campaigns WHERE id=?", (call["campaign_id"],)) if call and call["campaign_id"] else None
+            if not camp or camp.get("autopilot"):
+                skipped.add(due["id"])
+                continue
+            campaign_active = db.q1("SELECT COUNT(*) n FROM calls WHERE campaign_id=? AND status IN ('ringing','in_progress') AND mode='pstn'", (camp["id"],))["n"]
+            campaign_limit = max(1, min(10, int(camp.get("concurrency") or 3)))
+            if campaign_active >= campaign_limit:
+                skipped.add(due["id"])
+                continue
+            if not call or not call.get("phone") or call.get("do_not_call"):
+                mark_missed(due["id"], "failed")
+                continue
+            try:
+                from . import agents, twilio_call, wa_call
+                twilio_call.voice_config()
+                agent = agents.get(camp.get("agent_id")) if camp.get("agent_id") else None
+                chat = {"id": None, "ext_id": call["phone"], "name": call.get("contact_name") or "Customer"}
+                db.update("calls", call["id"], status="ringing", mode="pstn", ringing_at=db.now())
+                sess = twilio_call.Session(db.current(), call["id"], chat, agent, camp.get("objective") or "Business call", "out", pstn=True)
+                wa_call.SESSIONS[(db.current(), call["id"])] = sess
+                await sess.place()
+                db.log("call", "Outbound Twilio Voice call started", call_id=call["id"])
+            except Exception as e:
+                msg = str(e)[:400]
+                db.update("calls", call["id"], status="failed", mode="pstn", ended_at=db.now(), outcome="unresolved", summary=msg)
+                db.log("error", f"Twilio Voice call failed: {msg}", call_id=call["id"])
+
+
+async def call_now(contact_id, objective, agent_id=None):
+    """Place one explicitly requested customer call immediately through Twilio Voice."""
+    from . import agents, costs, messaging, twilio_call, wa_call
+    contact = db.q1("SELECT * FROM contacts WHERE id=?", (contact_id,))
+    if not contact:
+        return {"error": "That contact could not be found."}
+    if not contact.get("phone"):
+        return {"error": "This contact has no phone number."}
+    phone_number = messaging.normalise(contact["phone"])
+    if not phone_number:
+        return {"error": "This contact's phone number is not valid international format. Set the workspace calling code or correct the contact number."}
+    if phone_number != contact["phone"]:
+        db.update("contacts", contact_id, phone=phone_number)
+        contact["phone"] = phone_number
+    if contact.get("do_not_call"):
+        return {"error": "This contact is marked do-not-call, so no call was placed."}
+    problem = _outbound_problem()
+    if problem:
+        return {"error": problem}
+    if agents.paused():
+        return {"error": "Work is paused. Resume the team before starting a call."}
+    agent = agents.get(agent_id) if agent_id else None
+    if agent:
+        why = costs.over_cap(agent["id"])
+        if why:
+            return {"error": f"Calls are paused: {why}."}
+    if len([1 for (ws, _), _sess in wa_call.SESSIONS.items() if ws == db.current()]) >= 2:
+        return {"error": "Two calls are already active. Try again when one ends."}
+
+    objective = (objective or "Follow up with the customer.").strip()[:500]
+    campaign_name = f"Direct call · {contact['name']} · {int(db.now())}"
+    campaign_id = db.run("INSERT INTO campaigns(name,objective,filters,status,max_attempts,created_at,started_at,agent_id) VALUES(?,?,?,?,?,?,?,?)",
+        (campaign_name, objective, json.dumps({"ids": [contact_id]}), "active", 1, db.now(), db.now(), agent_id))
+    call_id = db.run("INSERT INTO calls(contact_id,campaign_id,attempt,status,language,created_at,not_before,reason,mode,objective,direction) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (contact_id, campaign_id, 1, "queued", contact.get("language") or "English", db.now(), db.now(), "direct", "pstn", objective, "out"))
+
+    # Serialize with the campaign dialer so an immediate request cannot race it.
+    async with _twilio_dial_lock:
+        active = db.q1("SELECT COUNT(*) n FROM calls WHERE status IN ('ringing','in_progress') AND mode='pstn'")["n"]
+        if active >= 2:
+            db.update("calls", call_id, status="failed", ended_at=db.now(), outcome="unresolved", summary="Two calls are already active.")
+            return {"error": "Two calls are already active. Try again when one ends."}
+        try:
+            twilio_call.voice_config()
+            contact_view = {**contact, "name": contact.get("name") or "Customer"}
+            chat = {"id": None, "ext_id": contact_view["phone"], "name": contact_view["name"]}
+            db.update("calls", call_id, status="ringing", ringing_at=db.now())
+            sess = twilio_call.Session(db.current(), call_id, chat, agent, objective, "out", pstn=True)
+            wa_call.SESSIONS[(db.current(), call_id)] = sess
+            await sess.place()
+            db.log("call", "Direct Twilio Voice call started", call_id=call_id, contact_id=contact_id)
+            # A successful REST create only means Twilio accepted the request;
+            # it does not prove that the destination handset is ringing.
+            return {"call_id": call_id, "state": "initiated", "phone": contact_view["phone"], "contact": contact_view["name"]}
+        except Exception as e:
+            wa_call.SESSIONS.pop((db.current(), call_id), None)
+            message = str(e)[:400]
+            db.update("calls", call_id, status="failed", ended_at=db.now(), outcome="unresolved", summary=message)
+            db.log("error", f"Direct Twilio call failed: {message}", call_id=call_id)
+            return {"error": message, "call_id": call_id}
+
+
+def _outbound_problem():
+    """Validate the full outbound voice stack before telling an agent a call was queued."""
+    from . import keys, twilio_call
+    if voices.get_setting("calls_enabled", "1") != "1":
+        return "Phone calling is disabled in Settings → Calling."
+    if not keys.complete():
+        return "Connect an OpenAI API key in Apps; the call needs it for the live voice agent."
+    try:
+        twilio_call.voice_config()
+    except Exception as e:
+        return str(e)
+    return ""
 
 
 # ---------- finalize ----------

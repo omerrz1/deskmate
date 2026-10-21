@@ -64,11 +64,11 @@ def reply_mode():
 
 
 def send_policy():
-    return setting("messaging_policy", "approve")  # the same switch as texts: approve or auto
+    return setting("messaging_policy", "auto")  # the same switch as texts: auto unless explicitly set to approve
 
 
 def call_policy():
-    return "auto" if setting("wa_call_policy", "approve") == "auto" else "approve"
+    return "approve" if setting("wa_call_policy", "auto") == "approve" else "auto"
 
 
 def secret():
@@ -306,7 +306,21 @@ async def _dispatch(mid, via_tag=False):
         elif prov == "twilio":
             number = "+" + _digits(ext)
             if chat["channel"] == "whatsapp":
-                r = await _exec(prov, "send_whatsapp_media" if media.get("link") else "send_whatsapp", {"to": number, "body": text, **({"media_url": media["link"]} if media.get("link") else {})})
+                if msg["kind"] == "template":
+                    from . import twilio_call
+                    t = media.get("template") or {}
+                    sid = t.get("name", "")
+                    if not re.fullmatch(r"HX[0-9a-fA-F]{32}", sid):
+                        raise integrations.AppError("Enter the Twilio Content SID (HX…) for an approved WhatsApp template.")
+                    try:
+                        cfg = twilio_call.config()
+                        result = await twilio_call.request("Messages.json", {"From": "whatsapp:" + cfg["whatsapp_from"], "To": "whatsapp:" + number,
+                            "ContentSid": sid, "ContentVariables": json.dumps({str(i + 1): str(v) for i, v in enumerate(t.get("params") or [])})}, cfg=cfg)
+                        r = result.get("sid", "")
+                    except twilio_call.wa_call.CallError as e:
+                        raise integrations.AppError(str(e))
+                else:
+                    r = await _exec(prov, "send_whatsapp_media" if media.get("link") else "send_whatsapp", {"to": number, "body": text, **({"media_url": media["link"]} if media.get("link") else {})})
             else:
                 r = await _exec(prov, "send_mms" if media.get("link") else "send_sms", {"to": number, "body": text, **({"media_url": media["link"]} if media.get("link") else {})})
             ext_id = r if isinstance(r, str) else ""
@@ -663,7 +677,7 @@ TOOLS = [
     {"name": "close_chat", "description": "Mark a chat finished (it reopens if the customer writes again).", "parameters": {"type": "object", "properties": {"chat_id": {"type": "integer"}}, "required": ["chat_id"]}},
     {"name": "ask_call_permission", "description": "Ask a WhatsApp customer's permission to call them on WhatsApp. They tap Allow or Don't allow. Needed before call_on_whatsapp.",
      "parameters": {"type": "object", "properties": {"chat_id": {"type": "integer"}, "text": {**_S, "description": "one friendly sentence on why you would like to call"}}, "required": ["chat_id", "text"]}},
-    {"name": "call_on_whatsapp", "description": "Call a customer on WhatsApp now and talk with them by voice, for the reason you give. They must have allowed calls. It may wait for the admin's OK.",
+    {"name": "call_on_whatsapp", "description": "Call this customer using the workspace calling route (WhatsApp via Twilio, regular Twilio phone, or WhatsApp with phone fallback). WhatsApp calling requires customer permission; the configured calls approval policy still applies.",
      "parameters": {"type": "object", "properties": {"chat_id": {"type": "integer"}, "objective": {**_S, "description": "what the call is for and what a good outcome is"}}, "required": ["chat_id", "objective"]}},
 ]
 NAMES = {t["name"] for t in TOOLS}

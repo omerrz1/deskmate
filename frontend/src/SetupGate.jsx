@@ -4,10 +4,10 @@ import { api } from './api'
 
 const STEPS = [
   ['openai', 'Connect OpenAI', 'Your team thinks, writes, plans and talks in meetings with your own OpenAI account. You pay OpenAI directly, and cheap models are used for background work.', 'platform.openai.com/api-keys', 'https://platform.openai.com/api-keys', 'sk-…'],
-  ['eleven', 'Connect ElevenLabs', 'ElevenLabs gives your team natural voices on live phone calls. It is used for calls only; everything else stays on OpenAI.', 'elevenlabs.io → Profile → API keys', 'https://elevenlabs.io/app/settings/api-keys', 'sk_…'],
+  ['eleven', 'Choose your call voice', 'OpenAI already powers your team and WhatsApp calls. ElevenLabs is optional if you want its voice engine for calls; it is not needed to connect Twilio or make calls.', 'elevenlabs.io → Profile → API keys', 'https://elevenlabs.io/app/settings/api-keys', 'sk_…'],
 ]
 
-/** Nothing works until the company has connected its own OpenAI key, then ElevenLabs. */
+/** OpenAI is required; ElevenLabs is an optional call-voice provider. */
 export default function SetupGate({ children }) {
   const [s, setS] = useState(null)
   const [key, setKey] = useState('')
@@ -42,7 +42,7 @@ export default function SetupGate({ children }) {
           <p className="small muted">Get one at <a href={url} target="_blank" rel="noopener noreferrer">{where}</a>. It is checked with the provider, then stored encrypted on this server and never shown again.</p>
           {err && <p className="warn" role="alert">{err}</p>}
           <div className="actions"><button className="btn solid big" disabled={busy || key.trim().length < 20}>{busy ? 'Checking…' : 'Connect'}</button>
-            {at === 1 && <button type="button" className="btn ghost" onClick={skip}>Skip for now (no ElevenLabs phone voices)</button>}</div>
+          {at === 1 && <button type="button" className="btn ghost" onClick={skip}>Continue with OpenAI voice</button>}</div>
         </form>}
       </div>
     </div>

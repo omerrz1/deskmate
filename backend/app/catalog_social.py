@@ -251,12 +251,13 @@ FACEBOOK = app(
 
 # ---------------- Twilio: texts, WhatsApp and call history ----------------
 TWILIO = app(
-    "twilio", "Twilio (SMS and WhatsApp)", "Messaging", "💬",
-    "Text and WhatsApp customers both ways through your Twilio number, send picture messages, and look up recent messages and calls.",
+    "twilio", "Twilio (WhatsApp, phone calls and messaging)", "Messaging", "💬",
+    "Make WhatsApp calls and regular phone calls with your AI employees, request WhatsApp calling permission, and send WhatsApp and SMS messages.",
     [F("account_sid", "Account SID", "Starts with AC. Twilio Console → Account info.", validate=r"AC[0-9a-fA-F]{32}"),
      F("auth_token", "Auth token", "Twilio Console → Account info.", secret=True),
-     F("from_number", "Your Twilio phone number", "In international format, e.g. +14155550123.", validate=r"\+[1-9]\d{6,14}"),
-     F("whatsapp_from", "WhatsApp sender number (optional)", "Your approved WhatsApp number or the Twilio sandbox number, e.g. +14155238886.", required=False)],
+     F("from_number", "Phone caller ID and SMS number", "Required for regular phone calls. Use a Twilio number with Voice capability; also used for SMS and MMS.", required=False, validate=r"\+[1-9]\d{6,14}"),
+     F("whatsapp_from", "WhatsApp sender number", "For WhatsApp calls and messages: your registered Twilio WhatsApp sender, e.g. +441234567890.", required=False, validate=r"\+[1-9]\d{6,14}"),
+     F("call_permission_content_sid", "Voice Call Request Content SID", "Leave empty to create this automatically from Settings → Chats, or enter your existing Voice Call Request Content SID.", required=False, validate=r"HX[0-9a-fA-F]{32}")],
     {"type": "basic", "user": "{cfg.account_sid}", "pass": "{cfg.auth_token}"}, f"{TWILIO}/2010-04-01/Accounts/{{cfg.account_sid}}",
     [T("send_sms", "Send a text message.", {"to": P("Phone number in international format"), "body": P("Message text")}, ["to", "body"], True,
        method="POST", path="/Messages.json", encoding="form", body={"From": "{cfg.from_number}", "To": "{to}", "Body": "{body}"}, pick="sid"),

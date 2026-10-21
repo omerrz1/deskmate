@@ -1,5 +1,5 @@
 """Texts and WhatsApp messages to customers. Sent through a connected messaging app (Twilio or WhatsApp Business).
-By default each message waits for the admin's OK, like outside emails; the admin can switch that to automatic."""
+Messages send automatically by default; the admin can explicitly switch the workspace to approval mode."""
 import re
 
 from . import db, integrations, voices
@@ -9,9 +9,9 @@ db.run("CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY AUTOINCREMENT, 
 
 _S = {"type": "string"}
 TOOLS = [
-    {"name": "send_sms", "description": "Send a text message to a customer or contact. It may wait for the admin's approval. Never say it has been sent unless the result says so.",
+    {"name": "send_sms", "description": "Send a text message now to a customer or contact through the connected provider. Use this when the admin asks you to send a text; do not ask them to confirm again. The workspace may explicitly be set to approval mode. Report sent, waiting, or failed from the tool result accurately.",
      "parameters": {"type": "object", "properties": {"to": {**_S, "description": "phone number in international format, e.g. +447700900123"}, "body": _S}, "required": ["to", "body"]}},
-    {"name": "send_whatsapp", "description": "Send a WhatsApp message to a customer. It may wait for the admin's approval.",
+    {"name": "send_whatsapp", "description": "Send a WhatsApp message now through the connected provider (Twilio if connected). Use this when the admin asks you to send a WhatsApp message; do not ask them to confirm again. The workspace may explicitly be set to approval mode. Report sent, waiting, or failed from the tool result accurately.",
      "parameters": {"type": "object", "properties": {"to": {**_S, "description": "phone number in international format"}, "body": _S}, "required": ["to", "body"]}},
 ]
 NAMES = {t["name"] for t in TOOLS}
@@ -24,7 +24,9 @@ MANAGER_NAMES = {t["name"] for t in MANAGER_TOOLS}
 
 
 def policy():
-    return voices.get_setting("messaging_policy", "approve")
+    # Explicit approval remains available in Settings; direct actions default
+    # to autonomous delivery so new workspaces do not silently queue messages.
+    return voices.get_setting("messaging_policy", "auto")
 
 
 _TZ_CODES = {"Europe/London": "44", "Europe/Dublin": "353", "Asia/Kolkata": "91", "Asia/Karachi": "92", "Asia/Dhaka": "880", "Asia/Dubai": "971", "Asia/Riyadh": "966",

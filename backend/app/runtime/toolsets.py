@@ -15,7 +15,7 @@ def _with_agent(run_tool):
 
 async def _platform(ctx, name, a):
     """The tools the admin's copilot also has. A campaign an employee creates is theirs."""
-    res, link = await admin_agent.run_tool(name, a)
+    res, link = await admin_agent.run_tool(name, a, agent=ctx.agent)
     if name == "create_campaign" and isinstance(res, dict):
         cid = res.get("campaign_id") or res.get("id")
         if cid and ctx.agent:
@@ -27,13 +27,15 @@ def register(registry):
     add = registry.add_toolset
     add(admin_agent.TOOLS, _platform, group="platform")
     add(employee_tools.AGENT_TOOLS, employee_tools.run, group="employee")
+    # Keep direct customer communication ahead of broad app/tool catalogs: the
+    # runtime sends only the first MAX_TOOLS tools to the model.
+    add(messaging.TOOLS, _with_agent(messaging.run_tool), group="messaging")
+    add(messaging.MANAGER_TOOLS, _with_agent(messaging.run_tool), group="messaging", requires="manager")
+    add(chats.TOOLS, _with_agent(chats.run_tool), group="chats")
     add(office.TOOLS, _with_agent(office.run_tool), group="office")  # includes the file tools
     add(team.ALL, _with_agent(team.run_tool), group="team")
     add(employee_tools.CONNECTOR_TOOLS, employee_tools.run, group="connectors", requires="manager")
     add(apps.TOOLS, _with_agent(apps.run_tool), group="apps")
-    add(messaging.TOOLS, _with_agent(messaging.run_tool), group="messaging")
-    add(messaging.MANAGER_TOOLS, _with_agent(messaging.run_tool), group="messaging", requires="manager")
-    add(chats.TOOLS, _with_agent(chats.run_tool), group="chats")
     add(workbench.TOOLS, _with_agent(workbench.run_tool), group="workbench")
     add(meeting_bot.TOOLS, _with_agent(meeting_bot.run_tool), group="meeting_bot")
     add(discuss.TOOLS, _with_agent(discuss.run_tool), group="discuss")

@@ -70,6 +70,14 @@ function Calling() {
       <section className="panel"><div className="panel-b form-grid">
         <h3>Phone calling</h3>
         <label className="check"><input type="checkbox" checked={!c || c.calls_enabled} onChange={async (e) => { await api.put('/central', { calls_enabled: e.target.checked }); reload() }} /> Everyone on the team can make phone calls</label>
+        <label>Calls from customer chats
+          <select value={c?.call_route || 'whatsapp_then_phone'} onChange={async (e) => { await api.put('/central', { call_route: e.target.value }); reload() }}>
+            <option value="whatsapp_then_phone">WhatsApp call through Twilio, then phone fallback</option>
+            <option value="whatsapp">WhatsApp call only (Twilio)</option>
+            <option value="phone">Regular phone call through Twilio</option>
+          </select>
+          <small>Campaign calls use Twilio Voice to call the customer's phone number.</small>
+        </label>
         <div className="linkgrid">
           <Link className="linkcard" to="/data"><b>Customers</b><small>Upload and browse your customer list</small></Link>
           <Link className="linkcard" to="/campaigns"><b>Campaigns</b><small>Who gets called and why</small></Link>

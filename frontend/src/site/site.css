@@ -47,6 +47,28 @@
 .s-lead { font-size: clamp(17px, 1.7vw, 19.5px); color: var(--text2); line-height: 1.6; max-width: 560px; margin-bottom: 30px; }
 .s-trust { list-style: none; padding: 0; margin: 28px 0 0; display: flex; flex-wrap: wrap; gap: 8px 22px; color: var(--text2); font-size: 14.5px; }
 .s-trust li { display: inline-flex; align-items: center; gap: 7px; } .s-trust svg { color: var(--ok); }
+.employee-mac { position: relative; overflow: visible; padding: 0 0 12px; border: 1px solid color-mix(in srgb, var(--line3) 50%, transparent); border-radius: 19px; background: linear-gradient(145deg, #eef0f3, #c9cdd3 58%, #aeb3bb); box-shadow: 0 30px 65px -35px rgba(10, 15, 25, .48), 0 1px 2px rgba(255,255,255,.8) inset; }
+.employee-mac::after { content: ''; position: absolute; left: 23%; right: 23%; bottom: 4px; height: 3px; border-radius: 0 0 8px 8px; background: linear-gradient(90deg, transparent, #7d838c 12%, #e7e9ec 50%, #7d838c 88%, transparent); }
+.employee-macbar { height: 38px; display: grid; grid-template-columns: 1fr 2fr 1fr; align-items: center; padding: 0 13px; border-radius: 18px 18px 0 0; background: linear-gradient(#f8f9fb, #e4e6e9); border-bottom: 1px solid #cdd1d6; color: #666b73; }
+.employee-mac-dots { display: flex; gap: 6px; }
+.employee-mac-dots i { width: 10px; height: 10px; border-radius: 50%; background: #ff6058; box-shadow: 0 0 0 1px rgba(0,0,0,.08) inset; }
+.employee-mac-dots i:nth-child(2) { background: #ffbd2e; }
+.employee-mac-dots i:nth-child(3) { background: #28c840; }
+.employee-mac-title { text-align: center; font-size: 11px; font-weight: 550; letter-spacing: .01em; }
+.employee-mac-mark { justify-self: end; font-size: 13px; color: #8b9098; }
+.employee-macscreen { min-height: 440px; padding: clamp(26px, 3.2vw, 42px) clamp(24px, 3.6vw, 48px) 28px; border: 1px solid rgba(255,255,255,.8); border-top: 0; border-radius: 0 0 13px 13px; background: radial-gradient(100% 100% at 0 0, color-mix(in srgb, var(--accent-bg) 45%, var(--surface)), var(--surface) 70%); }
+.employee-kicker { display: inline-flex; align-items: center; gap: 10px; margin-bottom: 24px; color: var(--accent-text); font-size: 12px; line-height: 1; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+.employee-kicker::before { content: ''; width: 28px; height: 1px; background: currentColor; }
+.employee-title { font-size: clamp(44px, 6vw, 76px) !important; line-height: .99 !important; letter-spacing: -.058em !important; font-weight: 680 !important; }
+.employee-title em { color: var(--accent-text); font-family: Georgia, 'Times New Roman', serif; font-weight: 500; }
+.employee-lead { max-width: 510px; font-size: clamp(16px, 1.55vw, 18px); }
+.employee-ctas { gap: 12px; }
+.employee-ctas .s-btn { min-height: 52px; padding-inline: 21px; border-radius: 12px; }
+.employee-secondary { border: 1px solid var(--line2); background: var(--surface); gap: 10px; }
+.employee-trust { gap: 10px; margin-top: 30px; }
+.employee-trust li { padding: 7px 10px; border: 1px solid var(--line); border-radius: 999px; background: color-mix(in srgb, var(--surface) 76%, transparent); font-size: 12.5px; }
+.employee-trust svg { color: var(--accent-text); }
+@media (max-width: 640px) { .employee-macscreen { min-height: 0; padding: 25px 20px 24px; } .employee-mac-title { font-size: 10px; } }
 .s-hero-copy > * { animation: s-up .6s cubic-bezier(.2,.7,.2,1) backwards; }
 .s-hero-copy > :nth-child(2) { animation-delay: .06s; } .s-hero-copy > :nth-child(3) { animation-delay: .12s; } .s-hero-copy > :nth-child(4) { animation-delay: .18s; } .s-hero-copy > :nth-child(5) { animation-delay: .24s; }
 @keyframes s-up { from { opacity: 0; transform: translateY(14px); } }

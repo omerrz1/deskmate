@@ -61,6 +61,15 @@ def set_setting(key, value):
 
 def profiles():
     rows = db.q("SELECT * FROM voice_profiles ORDER BY language, id")
+    # New workspaces get their own database after this module has loaded, so
+    # import-time seeding only initializes `main`. Seed each tenant lazily.
+    if not rows:
+        _seed()
+        rows = db.q("SELECT * FROM voice_profiles ORDER BY language, id")
+    if not any(r["language"] == "English" for r in rows):
+        db.run("INSERT INTO voice_profiles(name,language,countries,voice_id,agent_name,dialect,created_at) VALUES(?,?,?,?,?,?,?)",
+               ("English", "English", "[]", "Xb7hH8MSUJpSbSDYk0k2", "", "natural English, warm, relaxed and conversational", db.now()))
+        rows = db.q("SELECT * FROM voice_profiles ORDER BY language, id")
     for r in rows:
         r["countries"] = db.jload(r["countries"], [])
         r["tuning"] = db.jload(r.get("tuning"), {})

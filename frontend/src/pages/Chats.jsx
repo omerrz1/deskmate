@@ -53,7 +53,7 @@ export default function Chats() {
   return (
     <div className="page wide chats-page">
       <PageHeader title="Chats" sub="Customers who write to you on WhatsApp, Instagram, Messenger, text or Telegram, and the replies your team sends."
-        actions={<><Link className="btn big" to="/settings/chats">Set up</Link>{settings?.connected?.whatsapp_cloud?.connected && <button className="btn solid big" onClick={() => setAdding(true)}><Icon name="plus" size={15} /> New WhatsApp chat</button>}</>} />
+        actions={<><Link className="btn big" to="/settings/chats">Set up</Link>{(settings?.connected?.twilio?.connected || settings?.connected?.whatsapp_cloud?.connected) && <button className="btn solid big" onClick={() => setAdding(true)}><Icon name="plus" size={15} /> New WhatsApp chat</button>}</>} />
       {none && (
         <EmptyState title="Connect a messaging app to get started" hint="Connect WhatsApp Business, Instagram, a Facebook Page, Twilio or Telegram, then point it at Deskmates in Settings → Chats. Your employees answer, and you stay in charge of what is sent."
           action={<><Link className="btn solid" to="/apps">Connect an app</Link> <Link className="btn" to="/settings/chats">How it works</Link></>} />
@@ -146,7 +146,7 @@ function Thread({ id, team, live, onChanged, onBack }) {
         {call.possible && !myCall && (call.permission === 'granted'
           ? <button className="btn small solid" disabled={busy} onClick={() => setCalling({ objective: '' })}><Icon name="phone" size={14} /> Call on WhatsApp</button>
           : <button className="btn small" disabled={busy || !d.window_open || d.call_perm === 'denied'} title={!d.window_open ? 'The 24-hour window has closed' : ''} onClick={() => act(() => api.post(`/chats/${id}/call-permission`, { text: '' }), 'Asked for permission to call')}><Icon name="phone" size={14} /> Ask permission to call</button>)}
-        {d.channel === 'whatsapp' && d.provider === 'whatsapp_cloud' && !call.installed && <small className="faint">Calls need the aiortc package on the server</small>}
+        {d.channel === 'whatsapp' && !call.installed && <small className="faint">Calls need the aiortc package on the server</small>}
       </div>
 
       {calling && (
@@ -172,9 +172,9 @@ function Thread({ id, team, live, onChanged, onBack }) {
 
       {closedWa ? (
         <div className="ch-tpl">
-          <p className="small"><b>WhatsApp only lets you start again with an approved template.</b> Enter the template's name exactly as in Meta Business Manager. The customer can reply freely for 24 hours once they answer.</p>
+          <p className="small"><b>WhatsApp only lets you start again with an approved template.</b> For Twilio, enter the approved template’s Content SID (HX…). For Meta, enter its template name. The customer can reply freely for 24 hours once they answer.</p>
           <div className="ch-tpl-row">
-            <label>Template name<input value={tpl.name} onChange={(e) => setTpl({ ...tpl, name: e.target.value })} placeholder="e.g. appointment_reminder" /></label>
+            <label>Template Content SID or name<input value={tpl.name} onChange={(e) => setTpl({ ...tpl, name: e.target.value })} placeholder="e.g. appointment_reminder" /></label>
             <label>Language<input value={tpl.language} onChange={(e) => setTpl({ ...tpl, language: e.target.value })} style={{ width: 100 }} /></label>
             <label>Values for {'{{1}}'}, {'{{2}}'}… <span className="faint">(comma separated)</span><input value={tpl.params} onChange={(e) => setTpl({ ...tpl, params: e.target.value })} placeholder="Priya, Tuesday 10am" /></label>
             <button className="btn solid" disabled={busy || !tpl.name.trim()} onClick={sendTemplate}>Send template</button>
@@ -250,7 +250,7 @@ function NewChat({ onClose, onDone }) {
         <p className="muted small" style={{ margin: '6px 0 12px' }}>WhatsApp only lets a business start a conversation with an approved message template. Once they reply, you can write freely for 24 hours.</p>
         <label className="f">Their number <span className="faint">(with country code)</span><input autoFocus value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} placeholder="447700900123" /></label>
         <label className="f">Their name <span className="faint">(optional)</span><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
-        <label className="f">Template name<input value={f.template} onChange={(e) => setF({ ...f, template: e.target.value })} placeholder="e.g. appointment_reminder" /></label>
+        <label className="f">Template Content SID or name<input value={f.template} onChange={(e) => setF({ ...f, template: e.target.value })} placeholder="e.g. appointment_reminder" /></label>
         <div style={{ display: 'flex', gap: 10 }}>
           <label className="f" style={{ width: 110 }}>Language<input value={f.language} onChange={(e) => setF({ ...f, language: e.target.value })} /></label>
           <label className="f" style={{ flex: 1 }}>Values for {'{{1}}'}, {'{{2}}'}… <span className="faint">(commas)</span><input value={f.params} onChange={(e) => setF({ ...f, params: e.target.value })} /></label>

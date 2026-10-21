@@ -9,8 +9,10 @@ export default function Data() {
   const nav = useNavigate()
   const [search, setSearch] = useState('')
   const [language, setLanguage] = useState('')
-  const qs = new URLSearchParams(Object.entries({ search, language }).filter(([, v]) => v)).toString()
+  const [datasetId, setDatasetId] = useState('')
+  const qs = new URLSearchParams(Object.entries({ search, language, dataset_id: datasetId }).filter(([, v]) => v)).toString()
   const [list, reload] = usePoll(`/contacts?limit=200&${qs}`, 0, [qs])
+  const [datasets] = usePoll('/datasets', 0)
   const [segs] = usePoll('/segments', 0, [list?.total])
   const [prev, setPrev] = useState(null)
   const [file, setFile] = useState(null)
@@ -69,11 +71,12 @@ export default function Data() {
         <Panel pad={false}>
           <div className="filters">
             <input placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <select value={datasetId} onChange={(e) => setDatasetId(e.target.value)}><option value="">All lead sheets</option>{(datasets || []).map((d) => <option key={d.id} value={d.id}>{d.name} ({d.row_count})</option>)}</select>
             <select value={language} onChange={(e) => setLanguage(e.target.value)}>
               <option value="">All languages</option>
               {(segs?.language || []).map((o) => <option key={o.v} value={o.v}>{o.v} ({o.n})</option>)}
             </select>
-            <button className="btn small" disabled={!list?.total} onClick={() => nav('/campaigns?new=1', { state: { filters: Object.fromEntries(Object.entries({ search, language }).filter(([, v]) => v)) } })}>Call these {list?.total || ''}</button>
+            <button className="btn small" disabled={!list?.total} onClick={() => nav('/campaigns?new=1', { state: { filters: Object.fromEntries(Object.entries({ search, language, dataset_id: datasetId }).filter(([, v]) => v)) } })}>Call these {list?.total || ''}</button>
           </div>
           <table className="tbl">
             <tbody>

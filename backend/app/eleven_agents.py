@@ -257,3 +257,18 @@ async def warm_agents():
                 await apply_tuning(p["id"])
             except Exception as e:
                 db.log("voice", f"Could not prepare the agent for '{p['name']}' yet ({type(e).__name__}); it will be created on the first call")
+
+
+async def warm_agents_all():
+    """Prepare call voices for each active company, not only the legacy main tenant."""
+    from . import directory
+    for workspace_id in directory.active_ids():
+        try:
+            with db.use(workspace_id):
+                await warm_agents()
+        except Exception as e:
+            try:
+                with db.use(workspace_id):
+                    db.log("voice", f"Could not prewarm ElevenLabs voices ({type(e).__name__}); first call will prepare its agent")
+            except Exception:
+                pass

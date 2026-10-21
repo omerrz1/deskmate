@@ -211,6 +211,7 @@ export function Home({ st }) {
     <>
       <section className="s-hero"><div className="s-wrap s-hero-grid">
         <div className="s-hero-copy">
+          {st?.authenticated ? <>
           <span className="s-pill"><i /> AI employees for your business</span>
           <h1>Hire an AI team that gets the work done.</h1>
           <p className="s-lead">Deskmates gives your business a team of AI employees. Each one has a name, an email address, a phone and a virtual computer of their own. They handle email, plan and run projects, write documents and hold voice conversations, while you stay in charge.</p>
@@ -220,6 +221,24 @@ export function Home({ st }) {
             <li><Icon name="check" size={15} /> Calls are never recorded</li>
             <li><Icon name="check" size={15} /> Emails can wait for your approval</li>
           </ul>
+          </> : <div className="employee-mac">
+          <div className="employee-macbar" aria-hidden="true">
+            <span className="employee-mac-dots"><i /><i /><i /></span>
+            <span className="employee-mac-title">Deskmates — AI employees</span>
+            <span className="employee-mac-mark">⌘</span>
+          </div>
+          <div className="employee-macscreen">
+          <span className="employee-kicker">AI employees for your business</span>
+          <h1 className="employee-title">Hire an AI team<br />that gets the work<br /><em>done.</em></h1>
+          <p className="s-lead employee-lead">Deskmates gives your business a team of AI employees. Each one has a name, an email address, a phone and a virtual computer of their own. They handle email, plan and run projects, write documents and hold voice conversations, while you stay in charge.</p>
+          <div className="s-cta-row employee-ctas"><Primary st={st} /><Link className="s-btn big employee-secondary" to="/product">See what it does <Icon name="arrow" size={16} /></Link></div>
+          <ul className="s-trust employee-trust" aria-label="Key points">
+            <li><Icon name="check" size={15} /> Bring your own OpenAI key</li>
+            <li><Icon name="check" size={15} /> Calls are never recorded</li>
+            <li><Icon name="check" size={15} /> Emails can wait for your approval</li>
+          </ul>
+          </div>
+          </div>}
         </div>
         <HeroMock />
       </div></section>

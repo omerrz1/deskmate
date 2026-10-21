@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, usePoll } from '../api'
 import { AppIcon, EmptyState, PageHeader, Skeleton, Switch, useTitle } from '../ui'
 import { useConfirm, useToast } from '../Feedback'
@@ -30,10 +30,10 @@ export default function Apps() {
   const asked = (reqs || []).find((r) => r.app_key === want)
 
   useEffect(() => {  // arriving from an employee's request: open that app's form straight away
-    if (!want || !cat || sel || !canManage) return
+    if (!want || !cat || !inst || sel || !canManage) return
     const spec = cat.find((a) => a.id === want)
-    if (spec) setSel({ spec })
-  }, [want, cat, canManage]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (spec) setSel({ spec, inst: spec.multi ? undefined : installed.find(i => i.kind === spec.id) })
+  }, [want, cat, inst, canManage]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const addable = useMemo(() => (cat || []).filter((a) => !a.builtin), [cat])
   const cats = useMemo(() => {  // categories with how many apps each holds, biggest first
@@ -146,8 +146,10 @@ export default function Apps() {
 }
 
 function AppModal({ sel, asked, onClose, onSaved }) {
+  const navigate = useNavigate()
   const toast = useToast()
   const { spec, inst } = sel
+  const primaryField = f => f.required || (spec.id === 'twilio' && f.key === 'whatsapp_from')
   const [vals, setVals] = useState(inst ? { ...inst.config } : Object.fromEntries(spec.fields.filter(f => f.default !== undefined).map(f => [f.key, f.default])))
   const [step, setStep] = useState(inst ? 1 : 0)
   const [savedId, setSavedId] = useState(inst?.id)
@@ -164,7 +166,7 @@ function AppModal({ sel, asked, onClose, onSaved }) {
       const r = savedId ? await api.put(`/apps/${savedId}`, { config: vals }) : await api.post('/apps', { kind: spec.id, config: vals })
       if (r.id) setSavedId(r.id)
       setRes(r.test); onSaved()
-      if (!r.test || r.test.ok) { toast.ok(inst ? `${spec.name} updated` : `${spec.name} connected`); onClose() }
+      if (!r.test || r.test.ok) { toast.ok(inst ? `${spec.name} updated` : `${spec.name} connected`); onClose(); if (spec.id === 'twilio') navigate('/settings/chats') }
     } catch (e) { setMsg(e.message) }
     setBusy(false)
   }
@@ -180,13 +182,13 @@ function AppModal({ sel, asked, onClose, onSaved }) {
           {spec.help && <div className="tip">{spec.help}</div>}
           {step === 1 && <p className="small muted">Paste the details below. Secret values are hidden after saving.</p>}
           {spec.fields.length === 0 && <p className="small">This app needs no account or key.</p>}
-          {step === 1 && spec.fields.filter(f => f.required).map((f) => (
+          {step === 1 && spec.fields.filter(primaryField).map((f) => (
             <label key={f.key} className="f">{f.label}{!f.required && <span className="faint"> (optional)</span>}{f.secret && inst?.secrets_set?.[f.key] && <span className="ok small" style={{ margin: 0 }}> saved, leave empty to keep</span>}
               <input type={f.secret && !showSecrets ? 'password' : 'text'} autoComplete="new-password" value={vals[f.key] ?? ''} placeholder={f.placeholder || (f.default ? `Default: ${f.default}` : '')} onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })} />
               {f.help && <small className="muted">{f.help}</small>}
             </label>
           ))}
-          {step === 1 && spec.fields.some(f => !f.required) && <details><summary>Optional settings</summary><div className="form-grid">{spec.fields.filter(f => !f.required).map(f => <label className="f" key={f.key}>{f.label}<input type={f.secret && !showSecrets ? 'password' : 'text'} autoComplete="off" value={vals[f.key] ?? ''} placeholder={f.placeholder || ''} onChange={e => setVals({ ...vals, [f.key]: e.target.value })}/>{f.help && <small className="muted">{f.help}</small>}</label>)}</div></details>}
+          {step === 1 && spec.fields.some(f => !primaryField(f)) && <details><summary>Optional settings</summary><div className="form-grid">{spec.fields.filter(f => !primaryField(f)).map(f => <label className="f" key={f.key}>{f.label}<input type={f.secret && !showSecrets ? 'password' : 'text'} autoComplete="off" value={vals[f.key] ?? ''} placeholder={f.placeholder || ''} onChange={e => setVals({ ...vals, [f.key]: e.target.value })}/>{f.help && <small className="muted">{f.help}</small>}</label>)}</div></details>}
           {step === 1 && spec.fields.some(f => f.secret) && <label className="connection-reveal"><input type="checkbox" checked={showSecrets} onChange={e => setShowSecrets(e.target.checked)}/> Show entered secret values</label>}
           <details>
             <summary className="muted" style={{ cursor: 'pointer' }}>What your team will be able to do ({spec.tools.length})</summary>
@@ -219,8 +221,8 @@ function Messaging() {
     <section>
       <h3 className="sec-h">Texts and WhatsApp</h3>
       <p className="muted small" style={{ marginBottom: 10 }}>Whether a message to a customer goes out straight away or waits for your approval. Needs Twilio or WhatsApp Business connected.</p>
-      <select style={{ maxWidth: 320 }} value={c?.messaging_policy || 'approve'} onChange={async (e) => { try { await api.put('/outbox/policy', { messaging_policy: e.target.value }); reload(); toast.ok('Saved') } catch (x) { toast.err(x.message) } }}>
-        <option value="approve">Wait for my approval (recommended)</option><option value="auto">Send straight away</option>
+      <select style={{ maxWidth: 320 }} value={c?.messaging_policy || 'auto'} onChange={async (e) => { try { await api.put('/outbox/policy', { messaging_policy: e.target.value }); reload(); toast.ok('Saved') } catch (x) { toast.err(x.message) } }}>
+        <option value="auto">Send automatically</option><option value="approve">Wait for my approval</option>
       </select>
     </section>
   )

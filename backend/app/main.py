@@ -63,7 +63,7 @@ async def _start_scheduler():
     agents.set_loop(asyncio.get_running_loop())
     asyncio.create_task(bus.pump())
     asyncio.create_task(meeting_bot.loop())
-    asyncio.create_task(eleven_agents.warm_agents())
+    asyncio.create_task(eleven_agents.warm_agents_all())
 
     async def loop():
         last_purge = {}
@@ -566,6 +566,7 @@ class CampaignIn(BaseModel):
     start_at: Optional[float] = None
     autopilot: bool = False
     agent_id: Optional[int] = None
+    concurrency: int = 3
 
 
 def campaign_out(r):
@@ -574,6 +575,7 @@ def campaign_out(r):
     r["followup"] = schedule.followup_of(r)
     r["call_window"] = schedule.window_of(r)
     r["kb_categories"] = db.jload(r.get("kb_categories"), [])
+    r["concurrency"] = int(r.get("concurrency") or 3)
     r["next_call_at"] = (db.q1("SELECT MIN(not_before) t FROM calls WHERE campaign_id=? AND status='queued'", (r["id"],)) or {}).get("t")
     p = db.q1("""SELECT COUNT(*) total, COALESCE(SUM(status='completed'),0) completed, COALESCE(SUM(status='queued'),0) queued,
                  COALESCE(SUM(status IN ('no_answer','declined')),0) missed, COALESCE(SUM(status IN ('ringing','in_progress')),0) live
@@ -590,12 +592,43 @@ def campaigns():
 
 @app.post("/api/campaigns")
 def campaign_create(c: CampaignIn):
-    cid = db.run("INSERT INTO campaigns(name,objective,instructions,filters,status,max_attempts,retry_delay_min,voice,kb_id,kb_categories,followup,call_window,start_at,autopilot,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (c.name, c.objective, c.instructions, json.dumps(c.filters), "draft", c.max_attempts, c.retry_delay_min, c.voice, c.kb_id, json.dumps(c.kb_categories), json.dumps(c.followup), json.dumps(c.call_window), c.start_at, int(c.autopilot), db.now()))
+    concurrency = max(1, min(10, int(c.concurrency)))
+    cid = db.run("INSERT INTO campaigns(name,objective,instructions,filters,status,max_attempts,retry_delay_min,voice,kb_id,kb_categories,followup,call_window,start_at,autopilot,concurrency,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (c.name, c.objective, c.instructions, json.dumps(c.filters), "draft", c.max_attempts, c.retry_delay_min, c.voice, c.kb_id, json.dumps(c.kb_categories), json.dumps(c.followup), json.dumps(c.call_window), c.start_at, int(c.autopilot), concurrency, db.now()))
     if c.agent_id and agents.get(c.agent_id):
         db.run("UPDATE campaigns SET agent_id=? WHERE id=?", (c.agent_id, cid))
     db.log("campaign", f"Campaign '{c.name}' created", campaign_id=cid)
     return campaign_out(db.q1("SELECT * FROM campaigns WHERE id=?", (cid,)))
+
+
+@app.get("/api/campaigns/{cid}/export.xlsx")
+def campaign_export(cid: int):
+    from io import BytesIO
+    from openpyxl import Workbook
+    campaign = db.q1("SELECT * FROM campaigns WHERE id=?", (cid,))
+    if not campaign:
+        raise HTTPException(404, "Campaign not found")
+    filters = db.jload(campaign.get("filters"), {})
+    dataset_id = filters.get("dataset_id")
+    contacts = (db.q("SELECT * FROM contacts WHERE dataset_id=? ORDER BY id", (dataset_id,)) if dataset_id else
+                crm.find_contacts(filters, limit=10000))
+    if len(contacts) > 10000:
+        raise HTTPException(413, "Export is limited to 10,000 contacts")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Call results"
+    ws.append(["Name", "Phone", "Email", "Company", "Language", "Lead status", "Call status", "Outcome", "Sentiment", "Call summary", "Key points", "Callback", "Attempts", "Last called"])
+    for contact in contacts:
+        row = dict(contact)
+        latest = db.q1("SELECT status,outcome,sentiment,summary,key_points,follow_up,attempt,ended_at,created_at FROM calls WHERE campaign_id=? AND contact_id=? ORDER BY id DESC LIMIT 1", (cid, row["id"])) or {}
+        ws.append([row.get("name"), row.get("phone"), row.get("email"), row.get("company"), row.get("language"), row.get("status"), latest.get("status", "not called"), latest.get("outcome"), latest.get("sentiment"), latest.get("summary"), "; ".join(db.jload(latest.get("key_points"), [])), latest.get("follow_up"), latest.get("attempt", 0), latest.get("ended_at") or latest.get("created_at")])
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for col, width in {"A": 24, "B": 18, "C": 28, "D": 24, "F": 16, "G": 16, "H": 22, "J": 55, "K": 40, "L": 22}.items():
+        ws.column_dimensions[col].width = width
+    out = BytesIO()
+    wb.save(out)
+    return StreamingResponse(iter([out.getvalue()]), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="campaign-{cid}-results.xlsx"'})
 
 
 @app.post("/api/campaigns/{cid}/start")
@@ -987,9 +1020,39 @@ def meeting_list(chat: bool = False):
 @app.get("/api/meetings/{mid}")
 def meeting_get(mid: int):
     m = agents.meeting_detail(mid)
-    if not m:
+    if not m or m.get("status") == "deleted":
         raise HTTPException(404)
     return _meeting_public(m)
+
+
+class MeetingTitle(BaseModel):
+    title: str
+
+
+@app.patch("/api/meetings/{mid}")
+def meeting_rename(mid: int, body: MeetingTitle):
+    row = db.q1("SELECT kind FROM meetings WHERE id=?", (mid,))
+    title = re.sub(r"\s+", " ", body.title).strip()[:80]
+    if not row or row["kind"] != "admin_chat":
+        raise HTTPException(404, "chat not found")
+    if not title:
+        raise HTTPException(400, "Give this chat a name.")
+    db.update("meetings", mid, title=title)
+    return {"id": mid, "title": title}
+
+
+@app.delete("/api/meetings/{mid}")
+def meeting_delete(mid: int):
+    row = db.q1("SELECT kind FROM meetings WHERE id=?", (mid,))
+    if not row or row["kind"] != "admin_chat":
+        raise HTTPException(404, "chat not found")
+    conn, lock = db._get()
+    with lock:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM meeting_msgs WHERE meeting_id=?", (mid,))
+        conn.execute("DELETE FROM meetings WHERE id=? AND kind='admin_chat'", (mid,))
+        conn.commit()
+    return {"ok": True}
 
 
 class RTIn(BaseModel):
@@ -1093,9 +1156,16 @@ def meeting_attach(mid: int, body: MeetingAttachmentIn):
 
 @app.post("/api/meetings/{mid}/message")
 async def meeting_message(mid: int, body: MeetingMsg):
-    llm.client()
     if not body.text.strip():
         raise HTTPException(400, "empty message")
+    meeting = agents.meeting_detail(mid)
+    if not meeting or meeting.get("kind") != "admin_chat" or meeting.get("status") != "live":
+        raise HTTPException(404, "chat not found")
+    if meeting.get("title") == "New chat":
+        first_line = re.sub(r"\s+", " ", body.text.strip()).strip()[:80]
+        if first_line:
+            db.run("UPDATE meetings SET title=? WHERE id=? AND title='New chat'", (first_line, mid))
+    llm.client()
     return sse(agents.meeting_message(mid, body.text.strip()))
 
 

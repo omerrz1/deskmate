@@ -1,14 +1,9 @@
-"""WhatsApp voice calls with people who message us, through Meta's WhatsApp Business Calling API.
+"""Customer voice calls over Twilio WhatsApp or Twilio Voice.
 
-How a call works:
-  1. The customer has written to us (chats.py) and tapped Allow on our call-permission request. Without that Meta refuses a business-started call.
-  2. We start a WebRTC connection of our own, send Meta its offer, and Meta rings the customer's WhatsApp.
-  3. When they answer, audio flows over WebRTC between the customer and this server, and this server connects it to a live voice AI:
-     OpenAI Realtime (speech to speech) or an ElevenLabs agent, with the same instructions and tools as every other call.
-  4. The conversation is written down as a transcript (never recorded), and when the call ends it is summarised like any other call, on the Calls page and in the chat.
-A customer who calls us first can be answered the same way when that is switched on. Needs the `aiortc` package, and a server the customer's WhatsApp can reach by UDP
-(set WA_STUN, and WA_TURN_URL, WA_TURN_USER, WA_TURN_PASS if the server is behind a strict firewall).
-Meta's own rules apply: permission first, limited requests, some countries excluded, and Meta bills business-started calls to the business."""
+Twilio uses signed HTTPS callbacks and bidirectional Media Streams. Existing Meta
+chats keep their WebRTC transport. Both share consent, call limits, AI engines,
+transcripts and summaries; audio is not recorded.
+"""
 import asyncio
 import base64
 import fractions
@@ -18,7 +13,7 @@ import time
 
 import httpx
 
-from . import chats, db, integrations, llm
+from . import chats, db, integrations, llm, voices
 
 try:  # the rest of the app works without it; only WhatsApp calling needs it
     import av
@@ -150,7 +145,8 @@ def perm_state(chat):
 
 
 async def refresh_permission(chat):
-    """Ask WhatsApp whether this customer currently allows calls (they may have allowed it earlier, or revoked it)."""
+    if chat["provider"] == "twilio":
+        return perm_state(chat)
     try:
         d = await graph("GET", "/call_permissions", params={"user_wa_id": chat["ext_id"]})
     except CallError:
@@ -167,8 +163,8 @@ async def refresh_permission(chat):
 
 async def ask_permission(chat_id, text, agent=None, admin=False):
     chat = chats._chat(chat_id)
-    if not chat or chat["channel"] != "whatsapp" or chat["provider"] != "whatsapp_cloud":
-        return {"error": "WhatsApp calls need a WhatsApp Business (Meta) chat."}
+    if not chat or chat["channel"] != "whatsapp" or chat["provider"] not in ("twilio", "whatsapp_cloud"):
+        return {"error": "WhatsApp calls need a connected Twilio or WhatsApp Business chat."}
     st, _ = perm_state(chat)
     if st == "granted":
         return {"note": "They have already allowed calls. You can call them now."}
@@ -186,10 +182,14 @@ async def ask_permission(chat_id, text, agent=None, admin=False):
 
 async def _send_permission(chat, text, agent=None, mid=None):
     try:
-        d = await chats._exec("whatsapp_cloud", "request_call_permission", {"to": chat["ext_id"], "text": text})
-    except integrations.AppError as e:
+        if voices.get_setting("call_route", "whatsapp_then_phone") != "phone":
+            from . import twilio_call
+            d = await twilio_call.send_permission(chat)
+        else:
+            d = await chats._exec("whatsapp_cloud", "request_call_permission", {"to": chat["ext_id"], "text": text})
+    except (integrations.AppError, CallError) as e:
         return {"error": str(e)}
-    ext = (((d or {}).get("messages") or [{}])[0].get("id")) if isinstance(d, dict) else ""
+    ext = (d.get("sid") or (((d or {}).get("messages") or [{}])[0].get("id"))) if isinstance(d, dict) else ""
     db.update("chats", chat["id"], call_perm_asked_at=time.time())
     if mid:
         db.update("chat_messages", mid, status="sent", ext_id=ext or "", sent_at=db.now())
@@ -218,14 +218,20 @@ def _campaign_for(agent):
                   (name, "Talk with the customer who messaged us on WhatsApp.", "draft", 1, db.now(), aid, (kb or {}).get("id")))
 
 
-def _checks(chat, agent):
-    if not HAVE_RTC:
+def _checks(chat, agent, rtc=True):
+    if rtc and not HAVE_RTC:
         raise CallError("WhatsApp calling needs the 'aiortc' package on the server (pip install aiortc).")
-    if chat["channel"] != "whatsapp" or chat["provider"] != "whatsapp_cloud":
-        raise CallError("WhatsApp calls need a WhatsApp Business (Meta) chat.")
+    if chat["channel"] != "whatsapp" or chat["provider"] not in ("twilio", "whatsapp_cloud"):
+        raise CallError("WhatsApp calls need a connected Twilio or WhatsApp Business chat.")
+    if chat["provider"] == "twilio":
+        from . import twilio_call
+        twilio_call.config()
+        twilio_call.base_url()
     contact = db.q1("SELECT do_not_call FROM contacts WHERE id=?", (chat["contact_id"],)) if chat["contact_id"] else None
     if contact and contact["do_not_call"]:
         raise CallError("This customer asked not to be called.")
+    if any(ws == db.current() and s.chat['id'] == chat['id'] for (ws, _), s in SESSIONS.items()):
+        raise CallError("A call with this customer is already starting or in progress.")
     if len([1 for k in SESSIONS if k[0] == db.current()]) >= 2 or len(SESSIONS) >= MAX_CALLS:
         raise CallError("Too many WhatsApp calls are running right now. Try again in a minute.")
     from . import agents, costs
@@ -235,7 +241,7 @@ def _checks(chat, agent):
             raise CallError(f"Calls are paused: {why}.")
     if agents.paused():
         raise CallError("Work is paused (the Pause button), so no calls are placed.")
-    n = db.q1("SELECT COUNT(*) n FROM calls WHERE chat_id=? AND mode='whatsapp' AND direction='out' AND created_at>?", (chat["id"], db.now() - 86400))["n"]
+    n = db.q1("SELECT COUNT(*) n FROM calls WHERE chat_id=? AND mode IN ('whatsapp','phone') AND direction='out' AND created_at>?", (chat["id"], db.now() - 86400))["n"]
     if n >= MAX_PER_CHAT_PER_DAY:
         raise CallError("Already called this customer three times today.")
 
@@ -250,7 +256,7 @@ async def request_call(chat_id, objective, agent=None):
         chats.add_message(chat_id, "out", objective, "call_request", None, "", "pending_approval", (agent or {}).get("id"), (agent or {}).get("name", ""))
         return {"state": "waiting_for_approval", "note": "The call is waiting for the admin's OK. Tell the customer a call is coming soon, not that it has started."}
     r = await start(chat_id, (agent or {}).get("id"), objective, by=(agent or {}).get("name", ""))
-    return r if "error" in r else {"state": "calling", "call_id": r["call_id"], "note": "The call is ringing now. The result will appear in the chat and on the Calls page."}
+    return r if "error" in r else {"state": "initiated", "call_id": r["call_id"], "note": "Twilio accepted the call request; the recipient's phone is not confirmed as ringing yet. The result will appear in the chat and on the Calls page."}
 
 
 async def start(chat_id, agent_id, objective, by="admin"):
@@ -260,38 +266,66 @@ async def start(chat_id, agent_id, objective, by="admin"):
     if not chat:
         return {"error": "That chat no longer exists."}
     agent = agents.get(agent_id) if agent_id else agents.get(chat["agent_id"] or chats.default_agent_id() or 0)
+    route = voices.get_setting("call_route", "whatsapp_then_phone")
     try:
-        _checks(chat, agent)
-        st, _ = perm_state(chat)
-        if st != "granted":
-            st, _ = await refresh_permission(chat)
-        if st != "granted":
-            raise CallError("This customer has not allowed WhatsApp calls yet. Ask their permission first.")
+        _checks(chat, agent, rtc=False)  # All outbound routes now use Twilio's media stream transport.
+        if route != "phone":
+            from . import twilio_call
+            twilio_call.config()
+            st, _ = perm_state(chat)
+            if st != "granted":
+                st, _ = await refresh_permission(chat)
+            if st != "granted":
+                raise CallError("This customer has not allowed WhatsApp calls yet. Ask their permission first; phone fallback only applies after a permitted WhatsApp call fails to connect.")
+        else:
+            from . import twilio_call
+            twilio_call.voice_config()
         contact_id = chat["contact_id"] or chats.contact_for_phone(chat["ext_id"], chat["name"])
         db.update("chats", chat["id"], contact_id=contact_id)
         cid = db.run("INSERT INTO calls(contact_id,campaign_id,status,mode,direction,objective,chat_id,language,created_at,ringing_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                     (contact_id, _campaign_for(agent), "ringing", "whatsapp", "out", objective, chat["id"], "English", db.now(), db.now()))
+                     (contact_id, _campaign_for(agent), "ringing", "phone" if route == "phone" else "whatsapp", "out", objective, chat["id"], "English", db.now(), db.now()))
     except CallError as e:
         return {"error": str(e)}
-    chats.add_message(chat["id"], "out", f"Calling on WhatsApp. {objective}", "call", None, "", "sent", (agent or {}).get("id"), by or "", call_id=cid)
-    sess = Session(db.current(), cid, chat, agent, objective, "out")
-    SESSIONS[(db.current(), cid)] = sess
+    chats.add_message(chat["id"], "out", f"Calling by {'phone' if route == 'phone' else 'WhatsApp'}. {objective}", "call", None, "", "sent", (agent or {}).get("id"), by or "", call_id=cid)
+    from .twilio_call import Session as session_type
+    sess = None
     try:
+        sess = session_type(db.current(), cid, chat, agent, objective, "out", **({'pstn': True} if route == "phone" else {}))
+        SESSIONS[(db.current(), cid)] = sess
         await sess.place()
     except Exception as e:
+        db.log("error", f"Call start failed ({type(e).__name__}): {str(e)[:180]}", call_id=cid)
+        # Only deterministic Twilio 4xx rejections prove that no call was placed;
+        # ambiguous timeouts/server errors must never trigger a duplicate call.
+        if route == "whatsapp_then_phone" and isinstance(e, Exception) and getattr(e, 'status', None) and 400 <= e.status < 500 and e.status != 429:
+            try:
+                await sess._close_transport()
+                from .twilio_call import Session as TwilioSession
+                sess = TwilioSession(db.current(), cid, chat, agent, objective, "out", pstn=True)
+                SESSIONS[(db.current(), cid)] = sess
+                await sess.place()
+                db.update("calls", cid, mode="phone")
+                return {"call_id": cid}
+            except Exception as fallback_error:
+                e = fallback_error
         msg = str(e) if isinstance(e, CallError) else f"The call could not be started ({type(e).__name__})."
-        await sess.end("failed", msg)
+        if sess:
+            await sess.end("failed", msg)
+        else:
+            db.update("calls", cid, status="failed", ended_at=db.now(), outcome="unresolved", summary=msg)
+            chats.add_message(chat["id"], "out", msg, "call", None, "", "sent", None, "Deskmates", call_id=cid)
         return {"error": msg}
     return {"call_id": cid}
 
 
 # ---------- a live call ----------
 class Session:
-    def __init__(self, ws, call_id, chat, agent, objective, direction):
+    def __init__(self, ws, call_id, chat, agent, objective, direction, rtc=True):
         self.ws, self.call_id, self.chat, self.agent, self.objective, self.direction = ws, call_id, chat, agent, objective, direction
-        self.pc = RTCPeerConnection(_ice())
-        self.out = PcmTrack(24000)
-        self.pc.addTrack(self.out)
+        self.pc = RTCPeerConnection(_ice()) if rtc else None
+        self.out = PcmTrack(24000) if rtc else None
+        if self.pc:
+            self.pc.addTrack(self.out)
         self.engine = None
         self.wa_call_id = ""
         self.answered = False
@@ -301,7 +335,8 @@ class Session:
         self.last_voice = time.time()
         self.tasks = []
         self.answer_set = False
-        self.pc.on("track", self._on_track)
+        if self.pc:
+            self.pc.on("track", self._on_track)
 
     def _spawn(self, coro):
         async def run():
@@ -315,6 +350,8 @@ class Session:
             finally:
                 db._tenant.reset(tok)
         t = asyncio.get_running_loop().create_task(run())
+        # A task canceled before its first step never enters run(); close its coroutine too.
+        t.add_done_callback(lambda _: coro.close())
         self.tasks.append(t)
         return t
 
@@ -420,6 +457,12 @@ class Session:
         self.lines.append({"role": "agent" if who == "agent" else "customer", "text": text, "t": round(time.time() - (self.t_answer or time.time()), 1), "audio": []})
         db.update("calls", self.call_id, transcript=json.dumps(self.lines, ensure_ascii=False))
 
+    async def _terminate(self):
+        await graph("POST", "/calls", {"messaging_product": "whatsapp", "call_id": self.wa_call_id, "action": "terminate"})
+
+    async def _close_transport(self):
+        await self.pc.close()
+
     # -- ending --
     async def end(self, outcome="completed", note=""):
         if self.ended:
@@ -431,7 +474,7 @@ class Session:
         SESSIONS.pop((self.ws, self.call_id), None)
         if self.wa_call_id and outcome != "remote_ended":
             try:
-                await graph("POST", "/calls", {"messaging_product": "whatsapp", "call_id": self.wa_call_id, "action": "terminate"})
+                await self._terminate()
             except Exception:
                 pass
         if self.engine:
@@ -440,7 +483,7 @@ class Session:
             except Exception:
                 pass
         try:
-            await self.pc.close()
+            await self._close_transport()
         except Exception:
             pass
         for t in self.tasks:
@@ -456,18 +499,24 @@ async def _finish(sess, outcome, note):
     try:
         if not sess.answered:
             status = {"no_answer": "no_answer", "remote_ended": "no_answer", "declined": "declined"}.get(outcome, "failed")
-            db.update("calls", cid, status=status, outcome="no_answer" if status != "failed" else "unresolved", ended_at=db.now(),
-                      summary=note or {"no_answer": "They did not answer.", "declined": "They declined the call."}.get(status, "The call did not connect."))
+            call = db.q1("SELECT campaign_id FROM calls WHERE id=?", (cid,))
+            if call and call.get("campaign_id") and status in ("no_answer", "declined"):
+                callengine.mark_missed(cid, status)
+            else:
+                db.update("calls", cid, status=status, outcome="no_answer" if status != "failed" else "unresolved", ended_at=db.now(),
+                          summary=note or {"no_answer": "They did not answer.", "declined": "They declined the call."}.get(status, "The call did not connect."))
             text = note or ("They did not answer." if status == "no_answer" else "They declined the call." if status == "declined" else "The call did not connect.")
-            chats.add_message(sess.chat["id"], "out", text, "call", None, "", "sent", None, "Deskmates", call_id=cid)
+            if sess.chat and sess.chat.get("id"):
+                chats.add_message(sess.chat["id"], "out", text, "call", None, "", "sent", None, "Deskmates", call_id=cid)
             return
         row = await callengine.finalize(cid, "completed")
-        dur = int(row["duration"] or 0)
-        text = f"WhatsApp call ended ({dur // 60}:{dur % 60:02d}). {row['summary'] or ''}".strip()
-        chats.add_message(sess.chat["id"], "out", text, "call", None, "", "sent", None, "Deskmates", call_id=cid)
+        if sess.chat and sess.chat.get("id"):
+            dur = int(row["duration"] or 0)
+            text = f"{('Phone' if getattr(sess, 'pstn', False) else 'WhatsApp')} call ended ({dur // 60}:{dur % 60:02d}). {row['summary'] or ''}".strip()
+            chats.add_message(sess.chat["id"], "out", text, "call", None, "", "sent", None, "Deskmates", call_id=cid)
         if sess.agent:
             from . import team
-            team.log_event(sess.agent["id"], "call", "phone", f"WhatsApp call with {chats.title(sess.chat)}: {row['outcome']}", {"call": cid, "summary": (row["summary"] or "")[:300]})
+            team.log_event(sess.agent["id"], "call", "phone", f"{('Phone' if getattr(sess, 'pstn', False) else 'WhatsApp')} call with {chats.title(sess.chat) if sess.chat and sess.chat.get('id') else (sess.chat or {}).get('name', 'customer')}: {row['outcome']}", {"call": cid, "summary": (row["summary"] or "")[:300]})
     except Exception as e:
         db.log("error", f"Could not write up WhatsApp call {cid}: {type(e).__name__}", call_id=cid)
 
@@ -490,7 +539,7 @@ async def _in_ws(ws, coro):
 
 
 def live_calls():
-    return [{"call_id": cid, "chat_id": s.chat["id"], "who": chats.title(s.chat), "answered": s.answered, "direction": s.direction, "lines": s.lines[-12:],
+    return [{"call_id": cid, "chat_id": (s.chat or {}).get("id"), "who": chats.title(s.chat) if s.chat and s.chat.get("id") else (s.chat or {}).get("name", "Customer"), "answered": s.answered, "direction": s.direction, "lines": s.lines[-12:],
              "seconds": int(time.time() - s.t_answer) if s.t_answer else 0} for (ws, cid), s in SESSIONS.items() if ws == db.current()]
 
 

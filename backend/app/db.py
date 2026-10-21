@@ -173,7 +173,7 @@ CREATE INDEX IF NOT EXISTS idx_contacts_ds ON contacts(dataset_id);
 """
 with _lock:
     _conn.executescript(SCHEMA)
-    for stmt in ("ALTER TABLE calls ADD COLUMN recording TEXT", "ALTER TABLE campaigns ADD COLUMN institution TEXT", "ALTER TABLE campaigns ADD COLUMN kb_id INTEGER", "ALTER TABLE campaigns ADD COLUMN followup TEXT", "ALTER TABLE campaigns ADD COLUMN call_window TEXT", "ALTER TABLE campaigns ADD COLUMN start_at REAL", "ALTER TABLE campaigns ADD COLUMN kb_categories TEXT", "ALTER TABLE campaigns ADD COLUMN autopilot INTEGER DEFAULT 0", "ALTER TABLE calls ADD COLUMN reason TEXT"):
+    for stmt in ("ALTER TABLE calls ADD COLUMN recording TEXT", "ALTER TABLE campaigns ADD COLUMN institution TEXT", "ALTER TABLE campaigns ADD COLUMN kb_id INTEGER", "ALTER TABLE campaigns ADD COLUMN followup TEXT", "ALTER TABLE campaigns ADD COLUMN call_window TEXT", "ALTER TABLE campaigns ADD COLUMN start_at REAL", "ALTER TABLE campaigns ADD COLUMN kb_categories TEXT", "ALTER TABLE campaigns ADD COLUMN autopilot INTEGER DEFAULT 0", "ALTER TABLE campaigns ADD COLUMN concurrency INTEGER DEFAULT 3", "ALTER TABLE calls ADD COLUMN reason TEXT"):
         try:
             _conn.execute(stmt)
         except sqlite3.OperationalError:

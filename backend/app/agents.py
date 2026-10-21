@@ -129,6 +129,68 @@ MEETING_REQUESTS = ("MEETING TURN RULES (override all general autonomy and manag
                     "Never treat a side conversation as a request. If unsure whether they addressed you, stay quiet.")
 
 
+def verified_twilio_reply(text, tools):
+    """Stop a model from turning an old Twilio error into a new call result."""
+    names = {t.get("name") for t in tools or [] if isinstance(t, dict)}
+    if re.search(r"\b(?:ringing now|call (?:is|was|has been) ringing)\b", text or "", re.I):
+        return "Twilio has not confirmed that the recipient’s phone is ringing yet."
+    if not names.intersection({"call_contact", "call_on_whatsapp"}) and re.search(r"\b(?:call (?:was|has been) (?:placed|started|queued)|calling (?:them|the customer) now)\b", text or "", re.I):
+        return "I haven’t run the call tool in this turn, so I can’t say a call was placed or is ringing. No new call was started."
+    if names.intersection({"call_contact", "get_call", "list_calls"}):
+        return text
+    unsupported = re.search(
+        r"\b(?:rejected|failed) again\b|\bconfirm(?:s|ing)?\s+(?:an?\s+)?auth|"
+        r"\binvalid\s+(?:account sid|sid|auth(?:entication)?|credentials)\b|"
+        r"\bnotify the admin\b|\bupdat(?:e|ing) the credentials\b",
+        text or "", re.I)
+    if "20003" not in (text or "") or not unsupported:
+        return text
+    return ("I haven’t checked or placed a new call in this reply, so I can’t say it was rejected again or that the saved credentials are invalid. "
+            "The latest 20003 message needs a fresh call record or Twilio connection check before I can diagnose it. I’ll report the verified result directly, without asking whether to notify an admin.")
+
+
+_CALL_PHONE = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{6,}\d)(?!\w)")
+
+
+def _explicit_call_args(text, previous_messages):
+    """Resolve an explicit one-person call request, including an accepted retry offer.
+
+    This safety rail runs the actual call tool from the API process, where its live
+    media session is retained. It prevents a language model from merely claiming
+    that an unexecuted call is ringing.
+    """
+    from . import messaging
+    current = (text or "").strip()
+    prior_agent = next((m.get("text", "") for m in reversed(previous_messages) if m.get("role") == "agent"), "")
+    current_call_intent = bool(re.search(r"\b(?:call|phone|dial)\b", current, re.I)
+                               and not re.search(r"\b(?:no call|call (?:wasn['’]?t|was not)|not call|don['’]?t call)\b", current, re.I))
+    retry_intent = bool(re.search(r"\b(?:try again|retry|call again|another call)\b", current, re.I))
+    accepted_retry = bool(re.search(r"\b(?:yes|yeah|yep|please do|go ahead|try again|retry)\b", current, re.I)
+                          and re.search(r"\b(?:call|calling|dial)\b", prior_agent, re.I)
+                          and re.search(r"\b(?:again|retry|try)\b", prior_agent, re.I))
+    if not (current_call_intent or retry_intent or accepted_retry):
+        return None
+    if re.search(r"\b(?:don['’]?t|do not|cancel|stop|not now|don['’]?t call)\b", current, re.I):
+        return None
+
+    candidates = [current] + [m.get("text", "") for m in reversed(previous_messages) if m.get("role") == "admin"]
+    for candidate in candidates:
+        for match in reversed(list(_CALL_PHONE.finditer(candidate or ""))):
+            phone = messaging.normalise(match.group(0))
+            if phone:
+                return {"phone": phone, "objective": "Ask for any update in a friendly and polite manner."}
+
+    # A retry can refer to a number omitted from the confirmation. Use the last
+    # outbound call's contact only when the recent assistant explicitly offered
+    # to retry; do not guess a recipient for a generic "yes".
+    if accepted_retry:
+        last = db.q1("SELECT p.phone FROM calls c JOIN contacts p ON p.id=c.contact_id WHERE c.direction='out' ORDER BY c.id DESC LIMIT 1")
+        phone = messaging.normalise((last or {}).get("phone"))
+        if phone:
+            return {"phone": phone, "objective": "Ask for any update in a friendly and polite manner."}
+    return None
+
+
 def in_live_meeting(agent_id):
     """True while this employee is in a meeting with the admin that is still active (a message in the last 15 minutes). Their to-dos wait until it ends."""
     for m in db.q("SELECT id,agent_ids,created_at FROM meetings WHERE status='live' AND kind!='admin_chat'"):
@@ -174,6 +236,17 @@ def meeting_prompt(agent, others, kind, live=False):
         org += f"YOUR PROJECTS: {', '.join(r['name'] for r in mine)} (use project_status). Start a project yourself when work needs several people, and invite the right teammates.\n"
     org += ("NEEDS A HUMAN? If something is out of your scope or needs a person to set up (an account, a payment, a decision, a permission, a missing connection), do not guess or stall: "
             "use request_meeting to ask the admin for a meeting and say exactly what you need.\n")
+    org += ("COMMUNICATION TOOLS: Before saying you cannot send a message or make a WhatsApp call, inspect and use your available tools. "
+            "send_sms and send_whatsapp send through connected providers; reply_chat replies in the current customer conversation. "
+            "ask_call_permission requests the customer's WhatsApp consent when the workspace calling route uses WhatsApp; call_on_whatsapp follows the configured Twilio WhatsApp/phone route and fallback. "
+            "A tool result is authoritative: report queued, sent, failed, disconnected, or waiting for customer consent accurately. "
+            "Never claim a capability is unavailable merely because an admin approval setting is enabled.\n")
+    org += ("PHONE CALLS: When the admin asks for one call now, use call_contact with the phone number and objective; a contact name is optional and the system can create a minimal contact. "
+            "A state='initiated' result means Twilio accepted the call request, not that the recipient's handset is ringing. Never claim ringing without provider confirmation; report the exact error on failure. "
+            "Do not queue a one-person campaign, ask whether to start after the admin already said call now, or suggest the softphone. Use schedule_call only when they ask for a later time, and campaigns for multiple people. "
+            "When the admin presents a previous call failure, inspect list_calls or get_call before diagnosing it. For Twilio error 20003, report the exact provider diagnosis: if it identifies an unapproved Primary Compliance Profile, tell the admin to complete Trust Hub KYC and wait for Twilio Approved; do not blame credentials or suggest a Voice API toggle. If the Account check passed but there is no more specific diagnosis, explain that the call request was denied and point to Twilio Monitor → Debugger. Never claim a call failed 'again' unless call_contact was used in this turn. Never ask the admin whether to notify another admin or arrange a meeting with the admin; give the actionable finding directly.\n")
+    org += ("LEAD LISTS: If the admin explicitly asks you to call a selected spreadsheet or lead list, start that campaign without asking them to approve every recipient; pass confirmed=true because the admin's direct request authorizes that list. "
+            "Campaign calls dial through Twilio in the background. Report the queued count accurately, and use list_calls/list_campaigns to check progress before claiming outcomes or producing the final call report. Respect do-not-call records and calling hours.\n")
     live_kind = kind in ("one_to_one", "group")
     if kind == "customer_chat":
         audience_note = "NOTE: you are replying to a CUSTOMER in a written chat on behalf of the company. The customer may be an outsider: never share internal details, other customers' data, passwords or how you work. Your final answer is sent to them as your reply."
@@ -263,7 +336,7 @@ def start_meeting(agent_ids, title="", chat=False):
     if not ags:
         raise ValueError("pick at least one agent")
     kind = "admin_chat" if chat else "one_to_one" if len(ags) == 1 else "group"
-    title = title or ("Chat: " + ", ".join(a["name"] for a in ags) if chat else f"1:1 with {ags[0]['name']}" if kind == "one_to_one" else "Team meeting")
+    title = title or ("New chat" if chat else f"1:1 with {ags[0]['name']}" if kind == "one_to_one" else "Team meeting")
     mid = db.run("INSERT INTO meetings(title,kind,agent_ids,created_at) VALUES(?,?,?,?)", (title, kind, json.dumps([a["id"] for a in ags]), db.now()))
     for a in ags:
         team.log_event(a["id"], "meeting", "calendar", f"Joined a meeting with the admin: {title}", {"meeting": mid})
@@ -294,6 +367,7 @@ async def meeting_message(mid, text):
         return
     db.run("INSERT INTO meeting_msgs(meeting_id,role,text,created_at) VALUES(?,?,?,?)", (mid, "admin", text[:4000], db.now()))
     ags = m["agents"]
+    direct_call_done = False
     for ag in await _responders(text, ags, mid):
         hist = []
         for r in db.q("SELECT role,agent_id,text,attachments FROM meeting_msgs WHERE meeting_id=? ORDER BY id DESC LIMIT 30", (mid,))[::-1]:
@@ -306,6 +380,29 @@ async def meeting_message(mid, text):
                 who = (get(r["agent_id"]) or {}).get("name", "A colleague")
                 hist.append({"role": "user", "content": f"[{who} said]: {r['text'] or ''}" + (("\n" + files_note) if files_note else "")})
         yield {"type": "speaker", "agent_id": ag["id"], "name": ag["name"]}
+        forced_call = _explicit_call_args(text, m["messages"])
+        if forced_call and direct_call_done:
+            yield {"type": "agent_pass", "agent_id": ag["id"]}
+            continue
+        if forced_call:
+            direct_call_done = True
+            yield {"type": "tool_start", "name": "call_contact", "args": forced_call, "agent_id": ag["id"]}
+            try:
+                result, link = await run_agent_tool({**ag, "live_admin": True, "_meeting_id": mid}, "call_contact", forced_call)
+            except Exception as exc:
+                result, link = {"error": f"Call action failed ({type(exc).__name__})."}, None
+            if not isinstance(result, dict):
+                result = {"error": "Call action returned no verified result."}
+            used = [{"name": "call_contact", "link": link, "ok": "error" not in result}]
+            yield {"type": "tool_result", "name": "call_contact", "link": link, "ok": used[0]["ok"], "agent_id": ag["id"]}
+            if result.get("error"):
+                final = f"I couldn’t place the call: {result['error']}"
+            else:
+                final = f"Twilio accepted the call request to {result.get('phone') or forced_call['phone']}. I can’t confirm that the recipient’s phone is ringing yet."
+            db.run("INSERT INTO meeting_msgs(meeting_id,role,agent_id,text,tools,created_at) VALUES(?,?,?,?,?,?)",
+                   (mid, "agent", ag["id"], final, json.dumps(used), db.now()))
+            yield {"type": "agent_done", "agent_id": ag["id"], "name": ag["name"], "text": final, "tools": used}
+            continue
         final, used = "", []
         async for ev in run_loop(ag, hist, m["kind"], ags, meeting_id=mid):
             if ev["type"] == "token":
@@ -317,6 +414,7 @@ async def meeting_message(mid, text):
         if final.strip().lower().startswith("[pass]") or not final.strip():
             yield {"type": "agent_pass", "agent_id": ag["id"]}
             continue
+        final = verified_twilio_reply(final, used)
         db.run("INSERT INTO meeting_msgs(meeting_id,role,agent_id,text,tools,created_at) VALUES(?,?,?,?,?,?)",
                (mid, "agent", ag["id"], final, json.dumps(used), db.now()))
         yield {"type": "agent_done", "agent_id": ag["id"], "name": ag["name"], "text": final, "tools": used}

@@ -3,12 +3,17 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api, apiFetch, stream, usePoll } from '../api'
 import Avatar from '../Avatar'
 import { useTitle } from '../ui'
+import { useConfirm, usePrompt, useToast } from '../Feedback'
 
 function initials(title = '') { return title.replace(/^Chat: /, '').split(/[ ,]/).filter(Boolean).slice(0, 2).map((x) => x[0]).join('').toUpperCase() }
+function chatTitle(title = '') { return title.startsWith('Chat: ') ? `Chat with ${title.slice(6)}` : title || 'New chat' }
 function stamp(ts) { return ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '' }
 
 export default function TeamChat() {
   useTitle('Team chat')
+  const confirm = useConfirm()
+  const prompt = usePrompt()
+  const toast = useToast()
   const [params, setParams] = useSearchParams()
   const id = params.get('id')
   const [agents] = usePoll('/agents', 0)
@@ -17,6 +22,7 @@ export default function TeamChat() {
   const [filter, setFilter] = useState('')
   const [selected, setSelected] = useState(() => params.get('agent') ? [Number(params.get('agent'))] : [])
   const [text, setText] = useState('')
+  const [newTitle, setNewTitle] = useState('')
   const [busy, setBusy] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [partial, setPartial] = useState(null)
@@ -37,8 +43,19 @@ export default function TeamChat() {
   async function create() {
     if (!selected.length || lock.current) return
     lock.current = true; setBusy(true); setError('')
-    try { const r = await api.post('/meetings', { agent_ids: selected, chat: true }); await reload(); setParams({ id: r.id }); setSelected([]) }
+    try { const r = await api.post('/meetings', { agent_ids: selected, title: newTitle.trim(), chat: true }); await reload(); setParams({ id: r.id }); setSelected([]); setNewTitle('') }
     catch (e) { setError(e.message) } finally { lock.current = false; setBusy(false) }
+  }
+  async function renameCurrent() {
+    const next = await prompt({ title: 'Name this chat', label: 'Chat name', value: room?.title || '', placeholder: 'e.g. Spring campaign planning', confirm: 'Save name' })
+    if (!next) return
+    try { const r = await api.patch(`/meetings/${id}`, { title: next }); setRoom((old) => ({ ...old, title: r.title })); await reload(); toast.ok('Chat renamed') }
+    catch (e) { setError(e.message) }
+  }
+  async function removeChat(chatId, title) {
+    if (!(await confirm({ title: 'Delete this chat?', body: `“${chatTitle(title)}” and its messages will be permanently removed. Shared-drive files will stay in the drive.`, confirm: 'Delete chat', danger: true }))) return
+    try { await api.del(`/meetings/${chatId}`); if (String(chatId) === id) { abort.current?.abort(); setRoom(null); setParams({}) } await reload(); toast.ok('Chat deleted') }
+    catch (e) { setError(e.message) }
   }
   async function refreshRoom() { const r = await api.get(`/meetings/${id}`); setRoom(r) }
   async function send(e) {
@@ -91,9 +108,9 @@ export default function TeamChat() {
         <label className="tc-search"><span>⌕</span><input aria-label="Search chats" placeholder="Search chats" value={filter} onChange={(e) => setFilter(e.target.value)} /></label>
         <div className="tc-section-label">CHATS</div>
         <div className="tc-threads">
-          {filteredChats.map((c) => <button key={c.id} className={`tc-thread ${String(c.id) === id ? 'active' : ''}`} onClick={() => setParams({ id: c.id })}>
-            <span className="tc-thread-icon">{initials(c.title) || '•'}</span><span className="tc-thread-copy"><b>{c.title.replace(/^Chat: /, '')}</b><small>{stamp(c.created_at)}</small></span>
-          </button>)}
+          {filteredChats.map((c) => <div key={c.id} className={`tc-thread-row ${String(c.id) === id ? 'active' : ''}`}><button className="tc-thread" onClick={() => setParams({ id: c.id })}>
+            <span className="tc-thread-icon">{initials(chatTitle(c.title)) || '•'}</span><span className="tc-thread-copy"><b>{chatTitle(c.title)}</b><small>{stamp(c.created_at)}</small></span>
+          </button><button className="tc-thread-delete" onClick={() => removeChat(c.id, c.title)} aria-label={`Delete ${chatTitle(c.title)}`} title="Delete chat">×</button></div>)}
           {!filteredChats.length && <div className="tc-no-chats">{filter ? 'No matching chats' : 'Your conversations will show here'}</div>}
         </div>
         <button className="tc-create-link" onClick={() => { setSelected([]); setParams({}) }}>＋ <span>Start a new chat</span></button>
@@ -102,9 +119,10 @@ export default function TeamChat() {
         {!room && error && <div className="tc-error" role="alert">{error}</div>}
         {!id ? <div className="tc-new-room"><span className="tc-eyebrow">NEW CONVERSATION</span><h2>Who would you like to chat with?</h2><p>Pick one or more teammates. You can share files in the conversation.</p>
           <div className="tc-agent-picker">{(agents || []).map((a) => <label key={a.id} className={selected.includes(a.id) ? 'picked' : ''}><input type="checkbox" checked={selected.includes(a.id)} disabled={!selected.includes(a.id) && selected.length >= 6} onChange={(e) => setSelected((s) => e.target.checked ? [...s, a.id] : s.filter((i) => i !== a.id))} /><Avatar agent={a} size={36} /><span><b>{a.name}</b><small>{a.role}</small></span><i>{selected.includes(a.id) ? '✓' : ''}</i></label>)}</div>
+          {selected.length > 0 && <label className="tc-title-field">Name this chat <span className="muted">(optional)</span><input maxLength={80} placeholder={selected.length === 1 ? `Chat with ${agents?.find(a => a.id === selected[0])?.name || 'your teammate'}` : 'e.g. Product launch planning'} value={newTitle} onChange={e => setNewTitle(e.target.value)}/></label>}
           {agents?.length === 0 && <p><Link to="/">Add teammates first</Link></p>}<button className="btn solid tc-start" onClick={create} disabled={busy || !selected.length}>Start chat</button>
         </div> : !room ? <div className="team-chat-loading"><i/><span>Opening chat…</span></div> : <>
-          <header className="tc-room-head"><div className="tc-room-avatars">{room.agents.slice(0, 4).map((a) => <Avatar key={a.id} agent={a} size={34}/>)}</div><div className="tc-room-heading"><h2>{room.title.replace(/^Chat: /, '')}</h2><span>{room.agents.map((a) => a.name).join(', ')}</span></div><span className="tc-room-status"><i/> Team chat</span></header>
+          <header className="tc-room-head"><div className="tc-room-avatars">{room.agents.slice(0, 4).map((a) => <Avatar key={a.id} agent={a} size={34}/>)}</div><div className="tc-room-heading"><h2>{chatTitle(room.title)}</h2><span>{room.agents.map((a) => a.name).join(', ')}</span></div><button className="tc-room-action" onClick={renameCurrent}>Rename</button><button className="tc-room-action danger" onClick={() => removeChat(room.id, room.title)}>Delete</button><span className="tc-room-status"><i/> Team chat</span></header>
           <div className="tc-transcript" aria-live="polite" aria-relevant="additions text">
             {!room.messages.length && <div className="tc-empty"><div className="tc-empty-icon">✳</div><h3>Start with a message</h3><p>Ask a question, share a document, or work through an idea together.</p></div>}
             {room.messages.map((m, i) => <article key={m.id} className={`tc-message ${m.role === 'admin' ? 'mine' : ''} ${fileOnly(m) ? 'attachment-only' : ''}`}>

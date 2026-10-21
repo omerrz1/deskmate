@@ -13,7 +13,7 @@ const TEMPLATES = [
 ]
 
 function Form({ initial, onDone }) {
-  const [f, setF] = useState({ name: '', objective: '', instructions: '', max_attempts: 3, retry_delay_min: 1, voice: '', kb_id: '', agent_id: '', ...initial.form })
+  const [f, setF] = useState({ name: '', objective: '', instructions: '', max_attempts: 3, retry_delay_min: 1, concurrency: 3, voice: '', kb_id: '', agent_id: '', ...initial.form })
   const [kbs] = usePoll('/kb', 0)
   const [team] = usePoll('/agents', 0)
   useEffect(() => { if ((kbs || []).length === 1 && !f.kb_id) setF((x) => ({ ...x, kb_id: String(kbs[0].id) })) }, [kbs]) // eslint-disable-line
@@ -87,6 +87,7 @@ function Form({ initial, onDone }) {
         <div className="sect">
           <h5>Automatic follow-up</h5>
           <div className="form-row">
+            <label>Simultaneous calls<select value={f.concurrency} onChange={(e) => setF({ ...f, concurrency: +e.target.value })}>{[1, 2, 3, 5, 8, 10].map((n) => <option key={n} value={n}>{n} at a time</option>)}</select><span className="faint">Account limit also applies; start small and increase after a successful test.</span></label>
             <label>Retry unanswered, up to<input type="number" min="1" max="10" value={f.max_attempts} onChange={(e) => setF({ ...f, max_attempts: +e.target.value })} /></label>
             <label>Wait before retry (minutes)<input type="number" min="0" value={f.retry_delay_min} onChange={(e) => setF({ ...f, retry_delay_min: +e.target.value })} /></label>
             <label>Follow up interested people after (days)<input type="number" min="1" value={fu.nudge_days} onChange={(e) => setFu({ ...fu, nudge_days: +e.target.value })} /></label>
@@ -142,7 +143,7 @@ export default function Campaigns() {
               <div className="meter"><i style={{ width: `${pct}%` }} /></div>
               <p className="muted small">{p.completed} talked · {p.missed} missed · {p.queued} pending of {c.audience}</p>
               <p className="muted small">
-                {c.call_window ? `Calls ${c.call_window.start}–${c.call_window.end}` : 'Any time'}
+                {c.concurrency || 3} simultaneous · {c.call_window ? `Calls ${c.call_window.start}–${c.call_window.end}` : 'Any time'}
                 {c.next_call_at ? ` · next ${new Date(c.next_call_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}
                 {c.followup?.nudge_max ? ` · follow-up after ${c.followup.nudge_days}d` : ''}
               </p>
@@ -150,6 +151,7 @@ export default function Campaigns() {
                 {c.status !== 'active' && c.status !== 'scheduled' && <button className="btn small solid" onClick={() => act(`/campaigns/${c.id}/start`, 'Campaign started.')}>Start</button>}
                 {c.status === 'active' && <button className="btn small ghost" onClick={() => act(`/campaigns/${c.id}/stop`, 'Campaign stopped.')}>Stop</button>}
                 <button className="btn small ghost" onClick={() => nav(`/calls?campaign=${c.id}`)}>Results</button>
+                <a className="btn small ghost" href={`/api/campaigns/${c.id}/export.xlsx`}>Excel report</a>
                 <button className="link" onClick={async () => { await api.del(`/campaigns/${c.id}`); reload() }}>Delete</button>
               </div>
             </Panel>

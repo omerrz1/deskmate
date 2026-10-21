@@ -25,6 +25,35 @@ class AppError(Exception):
     pass
 
 
+def twilio_error_hint(code, message="", service="messaging"):
+    """Turn common Twilio trial recipient failures into steps the admin can act on."""
+    code = str(code or "")
+    detail = str(message or "").lower()
+    if code == "20003" and "primary compliance profile" in detail and ("not approved" in detail or "kyc" in detail):
+        return ("Twilio is blocking API access because the account's Primary Compliance Profile has not been approved. "
+                "Complete or correct the profile in Twilio Console → Communications → Trust Hub → Profiles → Primary, "
+                "submit it, and wait until its status is Twilio Approved. This is a Twilio KYC/profile approval issue, not an Account SID or Auth Token error.")
+    if code == "572002" or "verified recipient" in detail or ("trial phone number" in detail and "destination" in detail):
+        return ("Twilio trial restriction: verify this recipient in Twilio Console → Messaging → Try out WhatsApp. "
+                "Trial WhatsApp only sends to verified recipients and uses preset templates; upgrade the account for normal business messaging. "
+                "https://www.twilio.com/docs/usage/trials/try-out-whatsapp")
+    if code == "21608" or ("trial" in detail and "verified" in detail and service == "voice"):
+        return ("Twilio trial restriction: verify this phone number in Twilio Console → Phone Numbers → Manage → Verified Caller IDs, "
+                "or upgrade the account to call unverified numbers. https://www.twilio.com/docs/usage/trials")
+    if service == "voice" and code == "21219":
+        return ("Twilio trial restriction: this destination is not a verified recipient. Verify it in Twilio Console → Phone Numbers → Manage → Verified Caller IDs, "
+                "or upgrade the account to call unverified numbers. https://www.twilio.com/docs/api/errors/21219")
+    if service == "voice" and code in ("21210", "21212"):
+        return ("Twilio rejected the caller ID. In Apps → Twilio, set Phone caller ID to an active Twilio Voice number on this account or a verified caller ID. "
+                "https://www.twilio.com/docs/api/errors/" + code)
+    if service == "voice" and code in ("21211", "21214", "21217"):
+        return ("Twilio rejected this destination number. Check that it is a valid E.164 number (for the UK, +44 followed by the number without its leading 0) "
+                "and that it can receive calls. https://www.twilio.com/docs/api/errors/" + code)
+    if service == "voice" and code == "21215":
+        return "Twilio is blocking calls to this destination country. Enable the country in Twilio Console → Voice → Settings → Geo permissions. https://www.twilio.com/docs/api/errors/21215"
+    return ""
+
+
 # ---------- templating ----------
 def _dig(obj, path):
     cur = obj
@@ -164,6 +193,12 @@ def validate_config(spec, cfg, partial=False):
     for f in spec["fields"]:
         v = cfg.get(f["key"])
         v = ("" if v is None else str(v)).strip()
+        # Twilio phone fields are commonly pasted from the Console with
+        # spaces or punctuation. Store them in canonical E.164 form so a
+        # cosmetic formatting issue doesn't reject the entire credential
+        # update (including a newly rotated Auth Token).
+        if spec.get("id") == "twilio" and f["key"] in ("from_number", "whatsapp_from"):
+            v = re.sub(r"[\s().-]+", "", v)
         if not v and f.get("default") and not partial:
             v = f["default"]
         if not v:
@@ -254,6 +289,10 @@ async def _request(inst, spec, cfg, step, ctx, client):
     except Exception:
         data = r.text
     if r.status_code >= 400:
+        if inst.get("kind") == "twilio" and isinstance(data, dict):
+            hint = twilio_error_hint(data.get("code"), data.get("message"), "messaging")
+            if hint:
+                raise AppError(hint)
         msg = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
         raise AppError(f"{spec['name']} answered {r.status_code}: {scrub(msg, inst)[:300]}")
     return data

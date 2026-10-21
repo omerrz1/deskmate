@@ -16,6 +16,37 @@ def activity(agent_id):
     return [dict(r) for r in db.q("SELECT tool,app,ok,summary FROM agent_activity WHERE agent_id=? ORDER BY id", (agent_id,))]
 
 
+class VerifiedTwilioReplyTests(unittest.TestCase):
+    def test_rejects_unverified_claims_without_a_call_or_lookup_tool(self):
+        reply = "The call was rejected again with error 20003, confirming invalid credentials. Notify the admin?"
+        corrected = agents.verified_twilio_reply(reply, [])
+        self.assertIn("can’t say it was rejected again", corrected)
+        self.assertNotIn("Notify the admin?", corrected)
+
+    def test_keeps_claim_after_a_call_or_call_record_lookup(self):
+        reply = "The call was rejected again with error 20003."
+        self.assertEqual(agents.verified_twilio_reply(reply, [{"name": "call_contact"}]), reply)
+        self.assertEqual(agents.verified_twilio_reply(reply, [{"name": "get_call"}]), reply)
+
+    def test_rejects_ringing_claim_without_call_action(self):
+        reply = "The call to 07447781753 is ringing now."
+        corrected = agents.verified_twilio_reply(reply, [{"name": "list_calls"}])
+        self.assertIn("Twilio has not confirmed", corrected)
+        unplaced = agents.verified_twilio_reply("The call has been placed.", [])
+        self.assertIn("No new call was started", unplaced)
+
+    def test_explicit_retry_resolves_the_recent_number_and_directive(self):
+        history = [
+            {"role": "admin", "text": "Please call 07447781753 and ask for any update."},
+            {"role": "agent", "text": "Would you like me to try calling again or check something else?"},
+        ]
+        with mock.patch("app.messaging.default_code", return_value="44"):
+            args = agents._explicit_call_args("yes try again!", history)
+            complaint = agents._explicit_call_args("no call received", history)
+        self.assertEqual(args, {"phone": "+447447781753", "objective": "Ask for any update in a friendly and polite manner."})
+        self.assertIsNone(complaint)
+
+
 class Base(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
@@ -39,6 +70,25 @@ class Base(unittest.IsolatedAsyncioTestCase):
         return events, client
 
 
+class MeetingCallExecutionTests(Base):
+    async def test_accepted_call_retry_runs_in_the_meeting_process_and_reports_the_tool_result(self):
+        mid = agents.start_meeting([self.ava], chat=True)
+        agents.log_line(mid, "admin", None, "Please call 07447781753 and ask for any update.")
+        agents.log_line(mid, "agent", self.ava, "Would you like me to try calling again?")
+        with mock.patch.object(agents, "_responders", new_callable=mock.AsyncMock, return_value=[self.agent(self.ava)]), \
+             mock.patch.object(agents, "run_agent_tool", new_callable=mock.AsyncMock,
+                               return_value=({"call_id": 27, "state": "initiated", "phone": "+447447781753"}, "/calls")) as run_tool, \
+             mock.patch("app.messaging.default_code", return_value="44"):
+            events = await collect(agents.meeting_message(mid, "yes try again!"))
+        run_tool.assert_awaited_once()
+        self.assertEqual(run_tool.await_args.args[1], "call_contact")
+        self.assertEqual(run_tool.await_args.args[2]["phone"], "+447447781753")
+        self.assertTrue(any(e.get("type") == "tool_result" and e.get("ok") for e in events))
+        saved = db.q1("SELECT text,tools FROM meeting_msgs WHERE meeting_id=? AND role='agent' ORDER BY id DESC LIMIT 1", (mid,))
+        self.assertIn("can’t confirm", saved["text"])
+        self.assertEqual(json.loads(saved["tools"])[0]["name"], "call_contact")
+
+
 class WiringTests(Base):
     def test_the_harness_is_built_once_and_has_every_tool_in_the_documented_order(self):
         h = runtime.employees()
@@ -59,6 +109,9 @@ class WiringTests(Base):
         self.assertNotIn("list_documents", [t["name"] for t in ben])  # files are switched off for Ben
         self.assertNotIn("list_connectors", [t["name"] for t in ava])  # manager powers
         self.assertIn("list_connectors", [t["name"] for t in mia])
+        for employee_tools in (ava, ben, mia):
+            names = {t["name"] for t in employee_tools}
+            self.assertTrue({"send_sms", "send_whatsapp", "reply_chat", "ask_call_permission", "call_on_whatsapp"} <= names)
 
     def test_the_live_meeting_tool_list_is_everything_when_no_one_is_named(self):
         self.assertEqual(len(agents.realtime_tools(None)), len(runtime.employees().registry))

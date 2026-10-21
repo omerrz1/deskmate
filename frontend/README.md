@@ -1,8 +1,12 @@
-# React + Vite
+# Deskmates frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+The Deskmates web application is built with React and Vite. Run `npm run dev` for local development and `npm run build` to produce the production site in `dist/`.
 
-Currently, two official plugins are available:
+The frontend uses the `/api` path for its backend requests. Configure the hosting app to publish this repository's `main` branch and serve the contents of `dist/`.
+
+## React and Oxlint
+
+The project uses the official Vite React plugin:
 
 - [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
 - [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)

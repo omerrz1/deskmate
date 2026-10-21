@@ -1432,7 +1432,7 @@ async def kb_resort(kid: int):
 
 @app.get("/api/kb/{kid}/docs/{doc_id}")
 def kb_doc(kid: int, doc_id: int):
-    d = db.q1("SELECT id,title,kind,body FROM kb_docs WHERE id=? AND kb_id=?", (doc_id, kid))
+    d = db.q1("SELECT id,title,kind,body,source FROM kb_docs WHERE id=? AND kb_id=?", (doc_id, kid))
     if not d:
         raise HTTPException(404)
     return d

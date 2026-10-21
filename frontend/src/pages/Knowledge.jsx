@@ -91,7 +91,10 @@ function Editor({ id, onChanged }) {
                       <td className="num">{Math.round(d.size / 100) / 10}k</td>
                       <td className="num"><button className="link" onClick={async (e) => { e.stopPropagation(); await api.del(`/kb/${id}/docs/${d.id}`); reload(); onChanged() }}>Delete</button></td>
                     </tr>
-                    {open?.id === d.id && <tr><td colSpan="4"><pre className="docview">{open.body}</pre></td></tr>}
+                    {open?.id === d.id && <tr><td colSpan="4">
+                      {open.source && open.source !== 'imported' && <p className="muted small">Source: <a href={open.source} target="_blank" rel="noreferrer">{open.source}</a></p>}
+                      <pre className="docview">{open.body}</pre>
+                    </td></tr>}
                   </Fragment>
                 ))}
               </tbody></table>

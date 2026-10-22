@@ -86,6 +86,9 @@ export default function Settings({ embedded = false }) {
   const [settings, reloadS] = usePoll('/settings', 0)
   const [profiles, reload] = usePoll('/voice-profiles', 0)
   const [countries] = usePoll('/countries', 0)
+  const [keys] = usePoll('/setup', 0)
+  const engine = settings?.voice_engine || 'elevenlabs'
+  const elevenReady = keys ? !!keys.eleven?.connected : undefined  // undefined until the key status has loaded
   const [edit, setEdit] = useState(null)
   const [callVoice, setCallVoice] = useState(null)
   const [msg, setMsg] = useState('')
@@ -99,18 +102,26 @@ export default function Settings({ embedded = false }) {
       {msg && <div className="notice" onClick={() => setMsg('')}>{msg}</div>}
 
       <Panel title="Which voice engine makes the calls?">
+        <p className={`small ${engine === 'elevenlabs' && elevenReady !== false ? 'muted' : ''}`} role="status">
+          {engine !== 'elevenlabs'
+            ? <><b>Calls use the OpenAI voice.</b> It sounds more robotic than ElevenLabs. Choose ElevenLabs below for the natural voice.</>
+            : elevenReady === false
+              ? <><b>ElevenLabs is not connected, so calls fall back to the OpenAI voice.</b> Add your ElevenLabs key under Connections to get the natural voice.</>
+              : <><b>Calls are set to use ElevenLabs voices.</b> The OpenAI voice further down is only a backup.</>}
+        </p>
         <div className="modes">
-          {[['elevenlabs', 'ElevenLabs', 'Native-sounding voices per country, set up under Voice profiles below.'],
-            ['openai', 'OpenAI Realtime', 'One model hears and speaks (gpt-realtime-2.1). Fastest to respond, works in every language.']].map(([k, t, d]) => (
-            <label key={k} className={`mode-card ${(settings?.voice_engine || 'elevenlabs') === k ? 'on' : ''}`}>
-              <input type="radio" name="engine" checked={(settings?.voice_engine || 'elevenlabs') === k} onChange={async () => { await api.put('/settings', { voice_engine: k }); reloadS() }} />
+          {[['elevenlabs', 'ElevenLabs (recommended)', 'The most natural, human-sounding voices, with a voice profile per country set up under Voice profiles below.'],
+            ['openai', 'OpenAI Realtime (backup)', 'One model hears and speaks (gpt-realtime-2.1). Fast and works in every language, but sounds more synthetic.']].map(([k, t, d]) => (
+            <label key={k} className={`mode-card ${engine === k ? 'on' : ''}`}>
+              <input type="radio" name="engine" checked={engine === k} onChange={async () => { await api.put('/settings', { voice_engine: k }); reloadS() }} />
               <div><b>{t}</b><small>{d}</small></div>
             </label>
           ))}
         </div>
       </Panel>
 
-      <Panel title="Default voice for calls">
+      <Panel title="Backup voice (OpenAI)">
+        <p className="muted small">Only used when ElevenLabs is switched off or can’t connect. Each call’s report says which voice it used and why.</p>
         <label>OpenAI Realtime voice
           <select value={selectedVoice} onChange={async (e) => {
             const v = e.target.value
@@ -119,7 +130,7 @@ export default function Settings({ embedded = false }) {
           }}>
             {['marin', 'cedar', 'coral', 'sage', 'ballad', 'verse', 'ash', 'alloy', 'echo', 'shimmer'].map((v) => <option key={v} value={v}>{v}</option>)}
           </select>
-          <span className="faint">Used when an employee or campaign has no voice selected. Employee and campaign voice choices take priority. ElevenLabs calls use the matching language voice profile above.</span>
+          <span className="faint">Used when an employee or campaign has no voice selected. Employee and campaign voice choices take priority. marin and cedar sound the most natural. ElevenLabs calls use the matching language voice profile below.</span>
         </label>
         <VoiceTest voice={selectedVoice} />
       </Panel>

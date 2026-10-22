@@ -161,6 +161,32 @@ async def request(path, data=None, client=None, cfg=None, *, service='voice', js
             await client.aclose()
 
 
+async def sender_check(cfg):
+    """Ask Twilio what the text sender really is, so 'not a valid SMS number' comes with the cause and the numbers that would work. Never raises."""
+    sender = cfg.get('sms_sender') or cfg.get('sms_service') or ''
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5)) as client:
+            owned = (await request('IncomingPhoneNumbers.json', client=client, cfg=cfg, params={'PageSize': 50})).get('incoming_phone_numbers') or []
+            mine = {n.get('phone_number'): n.get('capabilities') or {} for n in owned}
+            if sender.startswith('+') and sender in mine:
+                said = (f'Sender check: {sender} is a number on this Twilio account and can send texts, so the cause is elsewhere (permission to text this country, or the number not being registered for UK texting).'
+                        if mine[sender].get('sms') else f'Sender check: {sender} is on this Twilio account but has NO SMS capability (voice only), so it cannot send texts.')
+            elif sender.startswith('+'):
+                verified = (await request('OutgoingCallerIds.json', client=client, cfg=cfg, params={'PhoneNumber': sender})).get('outgoing_caller_ids') or []
+                said = (f'Sender check: {sender} is only a Verified Caller ID. Twilio can show it on calls but cannot send texts from it.' if verified
+                        else f'Sender check: {sender} is not a phone number on this Twilio account, so Twilio will not text from it.')
+            elif sender.startswith('MG'):
+                said = 'Sender check: texts go through a Messaging Service. Open it in Twilio Console and make sure its sender pool holds an SMS-capable number.'
+            elif sender:
+                said = f"Sender check: texts are sent under the name '{sender}'. Trial accounts and some countries refuse name senders."
+            else:
+                said = 'Sender check: no sender is set. Add an SMS sender (or a caller ID) in Apps → Twilio.'
+    except Exception:
+        return ''
+    good = [n for n, c in mine.items() if n and c.get('sms')]
+    return said + ' SMS-capable numbers on this account: ' + (', '.join(good[:5]) if good else 'none. Buy one in Twilio Console → Phone Numbers → Buy a number (tick SMS), then enter it as the SMS sender in Apps → Twilio.')
+
+
 async def send_permission(chat):
     key = (db.current(), chat['id'])
     lock = _permission_locks.setdefault(key, asyncio.Lock())

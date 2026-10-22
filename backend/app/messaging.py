@@ -111,7 +111,14 @@ async def _dispatch(row):
     inputs["text" if action == "send_text" else "body"] = row["body"]
     res = await integrations.call(key, action, inputs)
     ok = "error" not in res
-    db.update("outbox", row["id"], status="sent" if ok else "failed", error="" if ok else str(res["error"])[:300], provider=key, sent_at=db.now() if ok else None)
+    error = "" if ok else str(res["error"])
+    if not ok and key == "twilio" and re.search(r"errors/(21606|21659|21660)\b", error):
+        try:  # "not a valid SMS number" is about the sender: look it up and say what is wrong with it and which numbers would work
+            from . import twilio_call
+            error = (error + " " + await twilio_call.sender_check(integrations._config(integrations.get_by_key("twilio")))).strip()
+        except Exception:
+            pass
+    db.update("outbox", row["id"], status="sent" if ok else "failed", error=error[:1200], provider=key, sent_at=db.now() if ok else None)
     db.log("agent", f"{row['channel'].upper()} {'sent' if ok else 'FAILED'} to {row['to_addr']}")
     if ok:
         try:  # keep it in the person's chat, so their reply continues the same conversation
@@ -172,7 +179,7 @@ async def run_tool(agent, name, a):
             to, contact_id = person["phone"], person["id"]
         r = await send(agent, "sms" if name == "send_sms" else "whatsapp", to, a.get("body"), contact_id=contact_id)
         if r.get("state") == "failed":
-            r = {**r, "note_for_you": r.get("note_for_you") or "Tell the admin the exact reason and the fix. The person you are talking to is the admin, so do not offer to notify the admin."}
+            r = {**r, "note_for_you": r.get("note_for_you") or "Tell the admin the exact reason and the fix, quoting any 'Sender check' and 'SMS-capable numbers' sentences word for word. The person you are talking to is the admin, so do not offer to notify the admin."}
         return r, None
     if name == "list_pending_messages":
         return [{"id": r["id"], "channel": r["channel"], "to": r["to_addr"], "body": r["body"], "from": r["agent_name"]} for r in pending()], "/inbox"

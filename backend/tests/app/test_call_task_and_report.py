@@ -461,3 +461,43 @@ class SmsSenderTests(CallReportBase):
         for bad in ("ab", "12345678", "Far Too Long A Name"):
             with self.assertRaises(integrations.AppError):
                 integrations.validate_config(spec, {**base, "sms_from": bad})
+
+
+class SmsSenderCheckTests(CallReportBase):
+    TWILIO_ERROR = "Twilio can't send texts from the saved number. https://www.twilio.com/docs/api/errors/21659"
+
+    async def check(self, sender, owned, verified=()):
+        async def fake(path, data=None, client=None, cfg=None, **kw):
+            if path == "IncomingPhoneNumbers.json":
+                return {"incoming_phone_numbers": owned}
+            return {"outgoing_caller_ids": [{"phone_number": v} for v in verified]}
+        with mock.patch.object(twilio_call, "request", side_effect=fake):
+            return await twilio_call.sender_check({"sms_sender": sender})
+
+    async def test_a_verified_caller_id_is_named_as_the_reason_texts_fail(self):
+        """Calls can show a Verified Caller ID but Twilio cannot text from it: say so, and list what would work."""
+        said = await self.check("+441234567890", [{"phone_number": "+15550001111", "capabilities": {"voice": True, "sms": True}}], verified=["+441234567890"])
+        self.assertIn("only a Verified Caller ID", said)
+        self.assertIn("+15550001111", said)
+
+    async def test_a_voice_only_number_and_a_name_sender_are_explained(self):
+        voice_only = await self.check("+441234567890", [{"phone_number": "+441234567890", "capabilities": {"voice": True, "sms": False}}])
+        self.assertIn("NO SMS capability", voice_only)
+        self.assertIn("none. Buy one", voice_only)
+        self.assertIn("refuse name senders", await self.check("AALondon", []))
+
+    async def test_a_failed_text_carries_the_sender_check_and_a_broken_check_never_hides_the_error(self):
+        from app import integrations, messaging
+        with db.use(self.ws):
+            rid = db.run("INSERT INTO outbox(channel,to_addr,body,created_at) VALUES(?,?,?,?)", ("sms", "+447447781753", "hi", db.now()))
+            row = db.q1("SELECT * FROM outbox WHERE id=?", (rid,))
+            with mock.patch.object(integrations, "call", new_callable=mock.AsyncMock, return_value={"error": self.TWILIO_ERROR}), \
+                 mock.patch.object(twilio_call, "sender_check", new_callable=mock.AsyncMock, return_value="Sender check: only a Verified Caller ID."):
+                self.assertFalse(await messaging._dispatch(row))
+            error = db.q1("SELECT error FROM outbox WHERE id=?", (rid,))["error"]
+            self.assertIn("errors/21659", error)
+            self.assertIn("Sender check: only a Verified Caller ID.", error)
+            with mock.patch.object(integrations, "call", new_callable=mock.AsyncMock, return_value={"error": self.TWILIO_ERROR}), \
+                 mock.patch.object(twilio_call, "sender_check", new_callable=mock.AsyncMock, side_effect=RuntimeError("boom")):
+                self.assertFalse(await messaging._dispatch(row))
+            self.assertIn("errors/21659", db.q1("SELECT error FROM outbox WHERE id=?", (rid,))["error"])

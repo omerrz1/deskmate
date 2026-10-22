@@ -555,9 +555,9 @@ def central_get():
         "discuss_email": voices.get_setting("discuss_email", "1") == "1",
         "work_paused": agents.paused(), "max_tasks_per_day": agents.per_agent_limit(), "company_tasks_per_day": agents.company_limit(), "work_pace_seconds": agents._pace(),
         "tasks_today": agents._runs_today(),
-        "models": {"agent_work": llm.CHEAP_MODEL, "meetings_voice": llm.MEETING_REALTIME_MODEL, "meetings_voice_replies": "gpt-4o-mini-tts", "summaries_and_reports": llm.CHEAP_MODEL,
+        "models": {"chat_with_you": llm.EMPLOYEE_MODEL, "agent_work": llm.CHEAP_MODEL, "meetings_voice": llm.MEETING_REALTIME_MODEL, "meetings_voice_replies": "gpt-4o-mini-tts", "summaries_and_reports": llm.CHEAP_MODEL,
                    "phone_calls": llm.REALTIME_MODEL if voices.get_setting("voice_engine", "elevenlabs") == "openai" else "ElevenLabs agent (calls only)"},
-        "elevenlabs_rule": "ElevenLabs is used only for live phone calls, and only when the call voice engine is set to ElevenLabs. Meetings, email, tasks, reports and everything else use OpenAI's cheaper models.",
+        "elevenlabs_rule": "ElevenLabs is used only for live phone calls, and only when the call voice engine is set to ElevenLabs. When you talk to an employee or the copilot they use the stronger model (chat_with_you); background tasks, summaries and reports use OpenAI's cheaper models.",
     }
 
 

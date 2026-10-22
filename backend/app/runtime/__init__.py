@@ -35,7 +35,8 @@ def employees() -> Harness:
     """The harness every AI employee runs on (meetings, to-dos, customer chats, practice runs, live meeting tool calls)."""
     from . import hooks, policies, toolsets
     h = Harness(name="employees", system_prompt=_prompt, max_tools=MAX_TOOLS,
-                model=ChatModel(lambda: llm.client(), lambda: llm.CHEAP_MODEL, temperature=0.8, scope=_scope))
+                model=ChatModel(lambda: llm.client(), lambda: llm.CHEAP_MODEL, temperature=llm.EMPLOYEE_TEMPERATURE, scope=_scope,
+                                model_for=lambda ctx: llm.employee_model_for(ctx.kind), skip_temperature=llm.rejects_temperature))
     toolsets.register(h.registry)
     policies.install(h.policies)
     hooks.install(h.hooks)

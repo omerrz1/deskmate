@@ -1,6 +1,8 @@
 """A call has to do the task it was given, sound like the voice that was chosen, and tell whoever asked what happened."""
 import asyncio
+import contextlib
 import json
+import unittest
 from unittest import mock
 
 from app import agents, callengine, costs, db, eleven_agents, files, knowledge, llm, voices, wa_call
@@ -1219,3 +1221,48 @@ class SheetChoresStayWithTheSystemTests(CallReportBase):
             with mock.patch.object(agents, "run_loop", fake_loop):
                 await agents.follow_up_after_call(mid, aid, "Search the ingredients.")
         self.assertIn("do not edit that sheet's cells for this call yourself", seen["note"])
+
+
+class SmarterWhereItMattersTests(unittest.TestCase):
+    """The admin-facing employee and the copilot get the stronger model and a low temperature; background work stays cheap."""
+
+    def test_the_stronger_model_is_used_only_when_the_admin_is_talking_to_the_employee(self):
+        for kind in ("one_to_one", "group", "admin_chat"):
+            self.assertEqual(llm.employee_model_for(kind), llm.EMPLOYEE_MODEL, kind)
+        for kind in ("work", "external", "practice"):
+            self.assertEqual(llm.employee_model_for(kind), llm.CHEAP_MODEL, kind)
+        self.assertNotEqual(llm.EMPLOYEE_MODEL, llm.CHEAP_MODEL)
+        self.assertLessEqual(llm.EMPLOYEE_TEMPERATURE, 0.3)
+
+    def test_reasoning_models_are_never_sent_a_temperature_they_would_reject(self):
+        for m in ("gpt-5", "gpt-5-mini", "o4-mini", "o3"):
+            self.assertTrue(llm.rejects_temperature(m), m)
+        for m in ("gpt-4.1", "gpt-4.1-mini", "gpt-4o"):
+            self.assertFalse(llm.rejects_temperature(m), m)
+
+    def test_the_request_carries_the_model_and_temperature_chosen_for_the_kind_of_work(self):
+        import asyncio
+        from harness import ChatModel, RunContext
+        from tests.harness.fakes import FakeClient, collect, say
+
+        async def ask(kind, **env):
+            client = FakeClient(say("ok"))
+            model = ChatModel(lambda: client, lambda: llm.CHEAP_MODEL, temperature=0.3, model_for=lambda ctx: llm.employee_model_for(ctx.kind), skip_temperature=llm.rejects_temperature)
+            with (mock.patch.multiple(llm, **env) if env else contextlib.nullcontext()):
+                await collect(model.stream(RunContext(kind=kind), [{"role": "user", "content": "hi"}], None))
+            return client.requests[0]
+        chat = asyncio.run(ask("admin_chat"))
+        self.assertEqual((chat["model"], chat["temperature"]), (llm.EMPLOYEE_MODEL, 0.3))
+        background = asyncio.run(ask("work"))
+        self.assertEqual(background["model"], llm.CHEAP_MODEL)
+        swapped = asyncio.run(ask("admin_chat", EMPLOYEE_MODEL="gpt-5-mini"))
+        self.assertEqual(swapped["model"], "gpt-5-mini")
+        self.assertNotIn("temperature", swapped)  # would otherwise be a 400 from OpenAI
+
+    def test_the_employee_harness_and_the_copilot_are_wired_to_it(self):
+        from app import admin_agent, runtime
+        for model in (runtime.employees().model, admin_agent.COPILOT.model):
+            self.assertEqual(model.temperature, llm.EMPLOYEE_TEMPERATURE)
+        self.assertEqual(runtime.employees().model.model_name(mock.Mock(kind="admin_chat")), llm.EMPLOYEE_MODEL)
+        self.assertEqual(runtime.employees().model.model_name(mock.Mock(kind="work")), llm.CHEAP_MODEL)
+        self.assertEqual(admin_agent.COPILOT.model.model_name(mock.Mock(kind="copilot")), llm.EMPLOYEE_MODEL)

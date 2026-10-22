@@ -236,7 +236,7 @@ Live snapshot: {s['contacts']} contacts, {s['calls_total']} calls, {s['live']} l
 def _copilot():
     """The copilot is a harness too: the same loop as the employees', with only the platform tools and no rules to apply."""
     h = Harness(name="copilot", system_prompt=lambda ctx: system_prompt(),
-                model=ChatModel(lambda: llm.client(), lambda: llm.CHEAP_MODEL),
+                model=ChatModel(lambda: llm.client(), lambda: llm.EMPLOYEE_MODEL, temperature=llm.EMPLOYEE_TEMPERATURE, skip_temperature=llm.rejects_temperature),
                 config=LoopConfig(max_steps=6, result_limit=6000, strip_final=False, report_tools=False, format_error=lambda e: {"error": str(e)}))
 
     async def run(ctx, name, a):

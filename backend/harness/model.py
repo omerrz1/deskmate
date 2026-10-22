@@ -38,26 +38,35 @@ class Turn:
 
 class ChatModel:
     def __init__(self, client: Callable[[], Any], model: Union[str, Callable[[], str]], *, temperature: Optional[float] = None,
-                 scope: Optional[Callable[[RunContext], Any]] = None):
+                 scope: Optional[Callable[[RunContext], Any]] = None, model_for: Optional[Callable[[RunContext], str]] = None,
+                 skip_temperature: Optional[Callable[[str], bool]] = None):
         """client: called on every request (so a changed API key is picked up); model: a name or a function returning one;
-        scope: optional `(ctx) -> context manager` wrapped around the request, for example to attribute its cost."""
+        scope: optional `(ctx) -> context manager` wrapped around the request, for example to attribute its cost;
+        model_for: optional `(ctx) -> model name`, so different kinds of work can run on different models (it wins over `model`);
+        skip_temperature: optional `(model) -> bool` for models that reject a temperature setting."""
         self._client = client
         self._model = model
         self.temperature = temperature
         self._scope = scope
+        self._model_for = model_for
+        self._skip_temperature = skip_temperature
 
     @property
     def model(self) -> str:
         return self._model() if callable(self._model) else self._model
 
+    def model_name(self, ctx: RunContext) -> str:
+        return self._model_for(ctx) if self._model_for else self.model
+
     async def stream(self, ctx: RunContext, messages: list, tools: Optional[list]) -> AsyncIterator[Union[TextDelta, Turn]]:
+        model = self.model_name(ctx)
         kw = {}
         if tools:
             kw["tools"] = tools
-        if self.temperature is not None:
+        if self.temperature is not None and not (self._skip_temperature and self._skip_temperature(model)):
             kw["temperature"] = self.temperature
         with (self._scope(ctx) if self._scope else nullcontext()):
-            stream = await self._client().chat.completions.create(model=self.model, messages=messages, stream=True, **kw)
+            stream = await self._client().chat.completions.create(model=model, messages=messages, stream=True, **kw)
         content, calls = "", {}
         async for chunk in stream:
             if not chunk.choices:

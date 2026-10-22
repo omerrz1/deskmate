@@ -23,6 +23,20 @@ def eleven_key():
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4.1")          # strong in Arabic/Hindi/Urdu/Bengali, as fast as mini
 # Everything that is not a live phone call uses cheap models: meetings, background work, summaries, reports.
 CHEAP_MODEL = os.getenv("CHEAP_MODEL", "gpt-4.1-mini")
+# Employees and the copilot used to run entirely on the cheap model at temperature 0.8. Where the admin is talking to them and an action can go wrong
+# (calls, texts, sheet edits) they now use the stronger model; background to-dos, summaries and reports stay on the cheap one.
+EMPLOYEE_MODEL = os.getenv("EMPLOYEE_MODEL", CHAT_MODEL)
+EMPLOYEE_MODEL_KINDS = tuple(k.strip() for k in os.getenv("EMPLOYEE_MODEL_KINDS", "one_to_one,group,admin_chat").split(",") if k.strip())
+EMPLOYEE_TEMPERATURE = float(os.getenv("EMPLOYEE_TEMPERATURE", "0.3"))  # copying a phone number or a link exactly is not a place for creativity
+
+
+def employee_model_for(kind):
+    return EMPLOYEE_MODEL if kind in EMPLOYEE_MODEL_KINDS else CHEAP_MODEL
+
+
+def rejects_temperature(model):
+    """OpenAI's reasoning models (gpt-5 family, o-series) only accept their default temperature and answer 400 to any other."""
+    return bool(re.match(r"(gpt-5|o\d)", str(model or "")))
 MEETING_REALTIME_MODEL = os.getenv("MEETING_REALTIME_MODEL", "gpt-realtime-2.1-mini")
 STT_MODEL = os.getenv("STT_MODEL", "gpt-4o-transcribe")  # far better than whisper-1 on South Asian + Arabic speech
 TTS_MODEL = os.getenv("TTS_MODEL", "gpt-4o-mini-tts")    # steerable, natural, multilingual

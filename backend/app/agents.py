@@ -289,7 +289,7 @@ async def refine_call_args(args, text):
     """The admin's sentence holds three things: what to say on the phone, how to sound, and what to do afterwards. Only the first two belong
     on the call; a cheap model separates them. Without a model the rule-based objective stands."""
     try:
-        res = await asyncio.wait_for(llm.complete_json(_CALL_BRIEF_SYSTEM, _CALL_PHONE.sub("[number]", (text or "")[:1500])), 10)
+        res = await asyncio.wait_for(llm.complete_json(_CALL_BRIEF_SYSTEM, _CALL_PHONE.sub("[number]", (text or "")[:1500]), model=llm.CHAT_MODEL), 10)  # what the phone call is told: worth the stronger model
     except Exception:
         return args
     if not isinstance(res, dict):

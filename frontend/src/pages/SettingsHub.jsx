@@ -102,6 +102,7 @@ function Costs() {
       <h3>What costs money</h3>
       <p className="small"><b>{c.elevenlabs_rule}</b></p>
       <table className="costtable"><tbody>
+        {M.chat_with_you && <tr><td>Talking to an employee or the copilot (where they place calls, send texts and edit sheets)</td><td><code>{M.chat_with_you}</code></td><td className="muted small">Stronger model: fewer mistakes where it matters</td></tr>}
         <tr><td>Day-to-day work (email, to-dos, reports, projects, training)</td><td><code>{M.agent_work}</code></td><td className="muted small">Small, cheap text model</td></tr>
         <tr><td>Live voice in meetings</td><td><code>{M.meetings_voice}</code></td><td className="muted small">Mini voice model</td></tr>
         <tr><td>Summaries and minutes</td><td><code>{M.summaries_and_reports}</code></td><td className="muted small">Small, cheap text model</td></tr>

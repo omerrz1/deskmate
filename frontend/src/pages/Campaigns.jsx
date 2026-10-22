@@ -13,7 +13,7 @@ const TEMPLATES = [
 ]
 
 function Form({ initial, onDone }) {
-  const [f, setF] = useState({ name: '', objective: '', instructions: '', max_attempts: 3, retry_delay_min: 1, concurrency: 3, voice: '', kb_id: '', agent_id: '', ...initial.form })
+  const [f, setF] = useState({ name: '', objective: '', instructions: '', after_sms: '', after_sms_when: 'interested', max_attempts: 3, retry_delay_min: 1, concurrency: 10, voice: '', kb_id: '', agent_id: '', ...initial.form })
   const [kbs] = usePoll('/kb', 0)
   const [team] = usePoll('/agents', 0)
   useEffect(() => { if ((kbs || []).length === 1 && !f.kb_id) setF((x) => ({ ...x, kb_id: String(kbs[0].id) })) }, [kbs]) // eslint-disable-line
@@ -68,6 +68,14 @@ function Form({ initial, onDone }) {
           <label>Group<select value={filters.tags || ''} onChange={(e) => sf('tags', e.target.value)}><option value="">All</option>{(segs?.tags || []).map((o) => <option key={o.v} value={o.v}>{o.v} ({o.n})</option>)}</select></label>
         </div>
         <label>Extra context for the agent <span className="faint">(optional: offers, deadlines, anything special)</span><textarea rows="2" value={f.instructions} onChange={(e) => setF({ ...f, instructions: e.target.value })} placeholder="e.g. September intake closes on 15 Aug. Mention the early-bird bursary." /></label>
+        <label>Text them after the call <span className="faint">(optional: sent automatically; {'{name}'} is their first name, {'{link}'} your main link, {'{company}'} your company)</span>
+          <textarea rows="2" maxLength={600} value={f.after_sms} onChange={(e) => setF({ ...f, after_sms: e.target.value })} placeholder="e.g. Hi {name}, thanks for talking to us. Here are the course details: {link}" /></label>
+        {f.after_sms.trim() && <label>Who gets that text?
+          <select value={f.after_sms_when} onChange={(e) => setF({ ...f, after_sms_when: e.target.value })}>
+            <option value="interested">People who showed interest or asked for a call back</option>
+            <option value="answered">Everyone who spoke to the agent (except those who said no or asked us to stop)</option>
+            <option value="never">Nobody (keep the text saved but switched off)</option>
+          </select></label>}
         <div className="sect">
           <h5>When to call</h5>
           <div className="chips">

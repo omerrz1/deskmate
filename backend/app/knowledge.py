@@ -351,15 +351,18 @@ async def lookup_company(query, call_id=None, kb_id=None):
     if kb_id:
         hits.extend(search(kb_id, query, k=4))
     website_id = voices.get_setting("company_website_kb_id", "")
-    if website_id and str(website_id) != str(kb_id):
-        hits.extend(search(website_id, query, k=6))
+    company_ws = db.company()  # the website knowledge is kept once, in the company's own workspace, and every workspace of the company searches it
+    if website_id and (str(website_id) != str(kb_id) or company_ws != db.current()):
+        with db.use(company_ws):
+            hits.extend(search(website_id, query, k=6))
     terms = _tok(query) - _STOP
     coverage = max((len(terms & _tok(hit)) for hit in hits), default=0)
     if not hits or coverage < min(2, len(terms)):
         url = voices.get_setting("company_website", "").strip()
         if url:
             # Calls must not wait for a full crawl. Inspect relevant known pages concurrently.
-            sources = db.q("SELECT DISTINCT source FROM kb_docs WHERE kb_id=?", (website_id,)) if website_id else []
+            with db.use(company_ws):
+                sources = db.q("SELECT DISTINCT source FROM kb_docs WHERE kb_id=?", (website_id,)) if website_id else []
             terms = _tok(query) - _STOP
             urls = sorted([r["source"] for r in sources if str(r["source"]).startswith("http")],
                           key=lambda u: -len(terms & _tok(u)))[:5]

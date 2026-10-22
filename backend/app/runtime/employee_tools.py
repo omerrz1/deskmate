@@ -108,16 +108,17 @@ async def _company_website_kb(refresh=False):
     if not url:
         return None, "No company website is linked yet. Add it in Settings → Company."
     kb_id = voices.get_setting("company_website_kb_id", "")
-    if kb_id and db.q1("SELECT id FROM knowledge_bases WHERE id=?", (kb_id,)) and not refresh:
-        return int(kb_id), ""
-    try:
-        result = await asyncio.wait_for(webdemo.learn(url, kb_id=int(kb_id) if kb_id else None), timeout=600)
-    except webdemo.Blocked as e:
-        return None, str(e)
-    except asyncio.TimeoutError:
-        return None, "The website crawl exceeded its time limit. It did not complete; try again later."
-    except Exception as e:
-        return None, f"The company website could not be read ({type(e).__name__})."
+    with db.use(db.company()):  # the website knowledge is kept once, in the company's own workspace, shared by all of its workspaces
+        if kb_id and db.q1("SELECT id FROM knowledge_bases WHERE id=?", (kb_id,)) and not refresh:
+            return int(kb_id), ""
+        try:
+            result = await asyncio.wait_for(webdemo.learn(url, kb_id=int(kb_id) if kb_id else None), timeout=600)
+        except webdemo.Blocked as e:
+            return None, str(e)
+        except asyncio.TimeoutError:
+            return None, "The website crawl exceeded its time limit. It did not complete; try again later."
+        except Exception as e:
+            return None, f"The company website could not be read ({type(e).__name__})."
     kb_id = result["kb_id"]
     voices.set_setting("company_website_kb_id", str(kb_id))
     return kb_id, ""
@@ -128,9 +129,10 @@ async def learn_company_website(agent, a):
     kb_id, error = await _company_website_kb(refresh=True)
     if error:
         return {"error": error}, None
-    return {"kb_id": kb_id, "knowledge_base": (knowledge.get_kb(kb_id) or {}).get("name"),
-            "sections": db.q1("SELECT COUNT(*) n FROM kb_docs WHERE kb_id=?", (kb_id,))["n"],
-            "status": "ready"}, "/knowledge"
+    with db.use(db.company()):
+        name = (knowledge.get_kb(kb_id) or {}).get("name")
+        sections = db.q1("SELECT COUNT(*) n FROM kb_docs WHERE kb_id=?", (kb_id,))["n"]
+    return {"kb_id": kb_id, "knowledge_base": name, "sections": sections, "status": "ready"}, "/knowledge"
 
 
 @tool("search_company_website")
@@ -138,7 +140,8 @@ async def search_company_website(agent, a):
     kb_id, error = await _company_website_kb()
     if error:
         return {"error": error}, None
-    hits = knowledge.search(kb_id, str(a["query"])[:500], k=8)
+    with db.use(db.company()):
+        hits = knowledge.search(kb_id, str(a["query"])[:500], k=8)
     sources = list(dict.fromkeys(re.findall(r"source:\s*(https?://[^\s\]]+)", "\n".join(hits))))
     return {"kb_id": kb_id, "results": hits or ["NOTHING FOUND in the crawled website pages. Do not guess; say you could not verify the answer."],
             "sources": sources}, "/knowledge"

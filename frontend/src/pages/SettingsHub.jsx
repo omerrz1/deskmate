@@ -131,6 +131,8 @@ export function CompanyForm({ onDone }) {
   return (
     <section className="panel"><div className="panel-b form-grid">
       <h3>Your company</h3>
+      <p className="muted small">Name, description, website and time zone are shared by every workspace of {c.shared ? (c.company_workspace || 'your company') : 'your company'}: change them once and all of them, and their callers, use the new details.{c.shared && !c.can_edit && ' Only a company admin can change them, so they are read-only here.'}</p>
+      <fieldset disabled={!c.can_edit} style={{ border: 0, padding: 0, margin: 0, display: 'contents' }}>
       <label className="f">Company name<input value={f.name} onChange={set('name')} placeholder="e.g. Acme Plumbing" /></label>
       <label className="f">What does the company do?<textarea rows="4" value={f.about} onChange={set('about')} placeholder="A few sentences: who you serve, what you sell, how you work. Your team reads this before every task." /></label>
       <label className="f">Website (optional)<input value={f.website} onChange={set('website')} placeholder="https://yourcompany.com" /></label>
@@ -141,6 +143,7 @@ export function CompanyForm({ onDone }) {
       <label className="f">Time zone<input list="tzs" value={f.timezone} onChange={set('timezone')} /><datalist id="tzs">{c.timezones.map((z) => <option key={z} value={z} />)}</datalist></label>
       {msg && <p className={msg === 'Saved.' ? 'ok small' : 'warn small'}>{msg}</p>}
       <div className="actions"><button className="btn solid" disabled={!f.name.trim()} onClick={save}>Save</button></div>
+      </fieldset>
     </div></section>
   )
 }

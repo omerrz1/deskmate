@@ -389,6 +389,8 @@ def templates_playbook(bid: str, b: PlaybookTplIn):
 
 @app.on_event("shutdown")
 async def _close_browser():
+    from . import files
+    files.flush_sheet_updates()  # call results still waiting to be written into their sheets
     await browser_tools.shutdown()
 
 
@@ -569,7 +571,9 @@ class CampaignIn(BaseModel):
     start_at: Optional[float] = None
     autopilot: bool = False
     agent_id: Optional[int] = None
-    concurrency: int = 3
+    concurrency: int = 10  # calls at once for this campaign, never more than Settings → Calling allows for the whole workspace
+    after_sms: str = ""
+    after_sms_when: str = "interested"
 
 
 def campaign_out(r):
@@ -600,6 +604,9 @@ def campaign_create(c: CampaignIn):
                  (c.name, c.objective, c.instructions, json.dumps(c.filters), "draft", c.max_attempts, c.retry_delay_min, c.voice, c.kb_id, json.dumps(c.kb_categories), json.dumps(c.followup), json.dumps(c.call_window), c.start_at, int(c.autopilot), concurrency, db.now()))
     if c.agent_id and agents.get(c.agent_id):
         db.run("UPDATE campaigns SET agent_id=? WHERE id=?", (c.agent_id, cid))
+    if c.after_sms_when not in ("never", "interested", "answered"):
+        raise HTTPException(400, "after_sms_when must be never, interested or answered")
+    db.update("campaigns", cid, after_sms=c.after_sms.strip()[:600], after_sms_when=c.after_sms_when)
     db.log("campaign", f"Campaign '{c.name}' created", campaign_id=cid)
     return campaign_out(db.q1("SELECT * FROM campaigns WHERE id=?", (cid,)))
 

@@ -71,6 +71,20 @@ def _near_known(num):
     return next(iter(hits.values())) if len(hits) == 1 else None
 
 
+def people_called_from_chat(agent, hours=6):
+    """The people this chat has just phoned: who "text them" or a mistyped number most likely means. Newest first, each once."""
+    mid = (agent or {}).get("_meeting_id")
+    if not mid:
+        return []
+    rows = db.q("SELECT p.* FROM calls c JOIN contacts p ON p.id=c.contact_id WHERE c.report_meeting_id=? AND c.created_at>? ORDER BY c.id DESC LIMIT 20", (mid, db.now() - hours * 3600))
+    seen, out = set(), []
+    for r in rows:
+        if r["id"] not in seen:
+            seen.add(r["id"])
+            out.append(r)
+    return out
+
+
 def find_contact(who):
     """A saved contact from a name or an id. -> (contact, problem)."""
     who = str(who or "").strip()
@@ -137,8 +151,8 @@ async def send(agent, channel, to, body, contact_id=None, call_id=None):
     bad = _why_invalid(num)
     if bad:
         near = _near_known(num)
-        return {"state": "failed", "message": bad + (f" Did you mean {near['phone']} ({near['name']})? Send it to that number if so." if near else ""),
-                "note_for_you": "Nothing was sent. Tell the admin exactly this, and retry with the saved contact's name instead of typing the number."}
+        return {"state": "failed", "message": f"Nothing was sent. The number typed into this tool was {num}. " + bad + (f" Did you mean {near['phone']} ({near['name']})? Send it to that number if so." if near else ""),
+                "note_for_you": "The number that was rejected is the one typed into the tool above, not any number the admin wrote. Retry with the saved contact's name (contact=) instead of typing digits, and never claim a number is invalid unless this tool said so."}
     body = str(body or "").strip()[:1500]
     if not body:
         return {"state": "failed", "message": "There is no message to send."}
@@ -171,13 +185,26 @@ def pending():
 
 async def run_tool(agent, name, a):
     if name in ("send_sms", "send_whatsapp"):
-        to, contact_id = a.get("to"), None
+        to, contact_id, used_saved = a.get("to"), None, ""
         if a.get("contact"):  # a saved contact's own number beats a number the model typed out
             person, problem = find_contact(a["contact"])
             if problem:
                 return {"state": "failed", "message": problem}, None
             to, contact_id = person["phone"], person["id"]
+        else:
+            typed = normalise(to)
+            if not typed or _why_invalid(typed):  # a number with a digit lost, or none at all: the person this chat just phoned is who was meant
+                recent = people_called_from_chat(agent)
+                close = [p for p in recent if typed and _one_edit_apart(typed, normalise(p["phone"]))]
+                pick = close[0] if len(close) == 1 else (recent[0] if (not typed and len(recent) == 1) else None)
+                if pick:
+                    to, contact_id = pick["phone"], pick["id"]
+                    used_saved = f"The number given was not valid, so I used the saved number for {pick['name']}: {normalise(pick['phone']) or pick['phone']}."
+                elif not typed and len(recent) > 1:
+                    return {"state": "failed", "message": "This chat has phoned " + ", ".join(f"{p['name']} ({p['phone']})" for p in recent[:4]) + ". Say which one to text, by name."}, None
         r = await send(agent, "sms" if name == "send_sms" else "whatsapp", to, a.get("body"), contact_id=contact_id)
+        if used_saved:
+            r = {**r, "message": f"{used_saved} {r.get('message', '')}".strip(), "note_for_you": "Tell the admin which saved number was used. Do not count digits or comment on the number's length."}
         if r.get("state") == "failed":
             r = {**r, "note_for_you": r.get("note_for_you") or "Tell the admin the exact reason and the fix, quoting any 'Sender check' and 'SMS-capable numbers' sentences word for word. The person you are talking to is the admin, so do not offer to notify the admin."}
         return r, None

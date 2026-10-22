@@ -50,7 +50,27 @@ def _ensure_english():
 
 
 
+# One set of company details for the whole company, whichever of its workspaces is open. A new workspace used to start with only its own name
+# as "the company", so its callers introduced themselves as e.g. "Sales team", and it had no company website knowledge.
+COMPANY_WIDE = {"company_name", "company_about", "company_website", "company_website_kb_id", "timezone", "default_calling_code", "main_link", "application_link"}
+
+
+def home_of(key):
+    """The workspace a setting is kept in: company-wide details in the company's own workspace, everything else in the open one."""
+    if key in COMPANY_WIDE:
+        try:
+            return db.company()
+        except RuntimeError:  # no workspace selected (start-up): behave as before
+            pass
+    return db.current()
+
+
 def get_setting(key, default=None):
+    with db.use(home_of(key)):
+        return _get_setting(key, default)
+
+
+def _get_setting(key, default=None):
     r = db.q1("SELECT value FROM settings WHERE key=?", (key,))
     if key == "voice_engine":
         # "openai" saved before ElevenLabs became the default was the old default, not a decision: only a choice made since then sticks
@@ -63,7 +83,8 @@ def get_setting(key, default=None):
 
 
 def set_setting(key, value):
-    db.run("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, value))
+    with db.use(home_of(key)):
+        db.run("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, value))
     if key == "voice_engine":
         db.run("INSERT OR REPLACE INTO settings(key,value) VALUES('voice_engine_chosen','1')")
 

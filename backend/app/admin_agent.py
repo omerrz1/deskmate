@@ -18,7 +18,9 @@ TOOLS = [
         "instructions": {"type": "string", "description": "Extra style/script guidance for the agent"},
         "filters": {"type": "object", "description": "Segment filter: language, status, last_outcome, tags, search, dataset_id"},
         "kb_id": {"type": "integer", "description": "Knowledge base id (persona + facts). Use list_knowledge_bases."},
-        "max_attempts": {"type": "integer"}, "concurrency": {"type": "integer", "minimum": 1, "maximum": 100}}, "required": ["name", "objective"]}},
+        "max_attempts": {"type": "integer"}, "concurrency": {"type": "integer", "minimum": 1, "maximum": 100},
+        "after_sms": {"type": "string", "description": "A text to send automatically after each call, e.g. 'Hi {name}, here are the course details: https://…'. {name} is their first name, {link} the company's main link, {company} the company name."},
+        "after_sms_when": {"type": "string", "enum": ["interested", "answered", "never"], "description": "Who gets it: interested = only people who showed interest (default), answered = everyone who spoke to the agent"}}, "required": ["name", "objective"]}},
     {"name": "schedule_call", "description": "Schedule a call to one customer at a specific local date/time (ISO-8601, e.g. 2026-10-14T15:00:00). Respects the campaign's calling hours.", "parameters": {"type": "object", "properties": {
         "contact_id": {"type": "integer"}, "when": {"type": "string"}, "campaign_id": {"type": "integer"}, "objective": {"type": "string"}, "kb_id": {"type": "integer"}}, "required": ["contact_id", "when"]}},
     {"name": "list_scheduled_calls", "description": "Upcoming scheduled / automatic follow-up calls.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
@@ -73,7 +75,9 @@ async def run_tool(name, a, agent=None):
         f = a.get("filters") or {}
         cid = db.run("INSERT INTO campaigns(name,objective,instructions,filters,status,max_attempts,kb_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
                      (a["name"], a["objective"], a.get("instructions", ""), json.dumps(f), "draft", a.get("max_attempts") or 3, a.get("kb_id"), db.now()))
-        db.update("campaigns", cid, concurrency=max(1, min(100, int(a.get("concurrency") or 3))))
+        db.update("campaigns", cid, concurrency=max(1, min(100, int(a.get("concurrency") or 10))))
+        if a.get("after_sms"):
+            db.update("campaigns", cid, after_sms=str(a["after_sms"]).strip()[:600], after_sms_when=a.get("after_sms_when") if a.get("after_sms_when") in ("never", "interested", "answered") else "interested")
         n = crm.count_contacts(f)
         db.log("agent", f"Admin copilot created campaign '{a['name']}' ({n} contacts)", campaign_id=cid)
         return {"campaign_id": cid, "matching_contacts": n}, "/campaigns"

@@ -1,8 +1,9 @@
 """A call has to do the task it was given, sound like the voice that was chosen, and tell whoever asked what happened."""
+import asyncio
 import json
 from unittest import mock
 
-from app import agents, callengine, costs, db, eleven_agents, files, llm, voices, wa_call
+from app import agents, callengine, costs, db, eleven_agents, files, knowledge, llm, voices, wa_call
 from .test_twilio_call import TwilioFixture, twilio_call
 
 
@@ -120,6 +121,7 @@ class CampaignReportTests(CallReportBase):
                           (sam, camp, "completed", "pstn", "success", "Sam likes pizza.", talk, json.dumps({"objective_answer": "Favourite meal: pizza"}), sheet, aid, db.now()))
             db.run("INSERT INTO calls(contact_id,campaign_id,status,mode,outcome,summary,created_at) VALUES(?,?,?,?,?,?,?)", (kim, camp, "no_answer", "pstn", "no_answer", "No answer.", db.now()))
             self.assertTrue(files.update_call_sheet(done, "success", "Sam likes pizza."))
+            files.flush_sheet_updates()
             callengine._check_campaign_done(camp)
             callengine._check_campaign_done(camp)
             posted = self.chat_text(mid)
@@ -411,7 +413,7 @@ class SmsNumberTests(CallReportBase):
             self.assertIn("not a valid UK mobile number", result["message"])
             self.assertIn("Did you mean +447447781753 (Omer)?", result["message"])
             self.assertEqual(db.q("SELECT id FROM outbox"), [])
-            self.assertIn("retry with the saved contact", result["note_for_you"])
+            self.assertIn("Retry with the saved contact", result["note_for_you"])
 
     async def test_a_text_to_a_saved_contact_uses_the_saved_number(self):
         from app import messaging
@@ -501,3 +503,444 @@ class SmsSenderCheckTests(CallReportBase):
                  mock.patch.object(twilio_call, "sender_check", new_callable=mock.AsyncMock, side_effect=RuntimeError("boom")):
                 self.assertFalse(await messaging._dispatch(row))
             self.assertIn("errors/21659", db.q1("SELECT error FROM outbox WHERE id=?", (rid,))["error"])
+
+
+class SendDetailsTests(CallReportBase):
+    """Regression: a customer asking about business courses was told 'the team will send you the options' and nothing was ever sent."""
+
+    def new_call(self, **fields):
+        aid, mid = self.make_chat()
+        call = self.make_call(mid, aid, objective="Call them and sell a course they want. Send a link from the website.", **fields)
+        contact = db.q1("SELECT contact_id FROM calls WHERE id=?", (call,))["contact_id"]
+        db.update("contacts", contact, phone="+447447781753", email="")
+        return aid, call, contact
+
+    async def test_the_caller_texts_the_details_itself_to_the_number_it_is_calling(self):
+        from app import agent_tools, messaging
+        with db.use(self.ws):
+            _, call, contact = self.new_call()
+            send = mock.AsyncMock(return_value={"state": "sent", "message": "Sent."})
+            with mock.patch.object(messaging, "send", send):
+                result = await agent_tools.arun(call, "send_information", {
+                    "channel": "sms", "what": "business courses", "to": "+449999999999",  # a number the model made up is ignored
+                    "message": "AA London College business courses: Level 5 Diploma in Business Management, Level 3 Certificate. https://example.com/business"})
+            self.assertTrue(result.startswith("Sent."))
+            self.assertEqual(send.await_args.args[1:3], ("sms", "+447447781753"))
+            self.assertIn("https://example.com/business", send.await_args.args[3])
+            self.assertEqual(db.q1("SELECT kind,status FROM call_actions WHERE call_id=?", (call,)), {"kind": "information_sent", "status": "done"})
+
+    async def test_a_failed_send_is_logged_for_the_team_and_the_caller_is_told_what_to_say(self):
+        from app import agent_tools, messaging
+        with db.use(self.ws):
+            _, call, _ = self.new_call()
+            with mock.patch.object(messaging, "send", mock.AsyncMock(return_value={"state": "failed", "message": "Sender check: only a Verified Caller ID."})):
+                result = await agent_tools.arun(call, "send_information", {"message": "Details https://example.com"})
+            self.assertIn("couldn't send the message just now", result)
+            self.assertIn("make sure it reaches them shortly", result)
+            self.assertEqual(db.q1("SELECT kind,status FROM call_actions WHERE call_id=?", (call,)), {"kind": "send_information", "status": "pending"})
+
+    async def test_no_more_than_three_messages_go_out_on_one_call(self):
+        from app import agent_tools, messaging
+        with db.use(self.ws):
+            _, call, _ = self.new_call()
+            send = mock.AsyncMock(return_value={"state": "sent", "message": "Sent."})
+            with mock.patch.object(messaging, "send", send):
+                for _ in range(5):
+                    await agent_tools.arun(call, "send_information", {"message": "More details"})
+            self.assertEqual(send.await_count, 3)
+
+    async def test_email_needs_an_address_and_goes_through_the_employees_mailbox(self):
+        from app import agent_tools, office
+        with db.use(self.ws):
+            aid, call, contact = self.new_call()
+            asked = await agent_tools.arun(call, "send_information", {"channel": "email", "message": "Details"})
+            self.assertIn("Ask for their email address", asked)
+            db.update("contacts", contact, email="omer@example.com")
+            with mock.patch.object(office, "queue_email", return_value=(1, "queued")) as queue:
+                result = await agent_tools.arun(call, "send_information", {"channel": "email", "what": "business courses", "message": "Details https://example.com"})
+            self.assertIn("on its way", result)
+            self.assertEqual((queue.call_args.args[0], queue.call_args.args[1]), (aid, "omer@example.com"))
+
+    async def test_a_missing_message_is_written_from_the_company_facts(self):
+        from app import agent_tools, messaging
+        with db.use(self.ws):
+            _, call, _ = self.new_call()
+            send = mock.AsyncMock(return_value={"state": "sent", "message": "Sent."})
+            with mock.patch.object(messaging, "send", send), mock.patch.object(agent_tools, "_compose_text", new_callable=mock.AsyncMock, return_value="Business courses: https://example.com/b"):
+                await agent_tools.arun(call, "send_information", {"what": "business courses"})
+            self.assertEqual(send.await_args.args[3], "Business courses: https://example.com/b")
+
+    async def test_the_brief_says_look_it_up_first_then_send_it_yourself_and_push_for_the_text(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            sell = callengine.call_context(self.make_call(mid, aid, objective="Call them and sell a course they want. Send a link from the website."))
+            prompt = callengine.system_prompt(*sell, realtime=True, external=True)
+            for needle in ("call lookup_info BEFORE you answer", "Never say \"the team will send it\"", "Shall I text you the details and the link right now?",
+                           "saved admin answers, the company's own details and files first, then the company website", "lookup_info first"):
+                self.assertIn(needle, prompt)
+            self.assertNotIn("they want details sent (email/WhatsApp/SMS). Say it will arrive shortly", prompt)
+            meal = callengine.call_context(self.make_call(mid, aid, objective="Ask them what their favourite meal is"))
+            self.assertNotIn("HOW YOU ANSWER AND FOLLOW UP", callengine.system_prompt(*meal, realtime=True, external=True))  # a one-question call stays short
+
+    async def test_changed_tool_definitions_are_pushed_to_elevenlabs_not_left_stale(self):
+        """The agent only knows the tools ElevenLabs holds, so send_information needs its new `message` field there."""
+        with db.use(self.ws):
+            sent = []
+
+            class Http:
+                async def post(self, url, json=None, timeout=None):
+                    sent.append(("POST", json["tool_config"]["name"]))
+                    return mock.Mock(status_code=200, json=lambda: {"id": "tool_" + json["tool_config"]["name"]}, text="")
+
+                async def patch(self, url, json=None, timeout=None):
+                    sent.append(("PATCH", json["tool_config"]["name"]))
+                    return mock.Mock(status_code=200, json=lambda: {}, text="")
+
+            db.run("DELETE FROM el_tools")
+            db.run("INSERT INTO el_tools(name,tool_id) VALUES('send_information','tool_old')")  # registered before it could carry a message
+            await eleven_agents._extra_tool_ids(Http())
+            self.assertIn(("PATCH", "send_information"), sent)
+            self.assertIn(("POST", "search_web"), sent)
+            sent.clear()
+            await eleven_agents._extra_tool_ids(Http())
+            self.assertEqual(sent, [])  # unchanged tools are left alone
+
+
+class BigSheetTests(CallReportBase):
+    """A campaign over a long sheet: results are written in batches, onto the right row, however the sheet changed meanwhile."""
+
+    def lead_sheet(self, n=6):
+        rows = [[f"Lead {i}", f"+4477009{i:05d}", ""] for i in range(n)]
+        did = db.run("INSERT INTO documents(agent_id,title,kind,body,created_at,updated_at) VALUES(0,'Leads','sheet',?,?,?)",
+                     (json.dumps({"columns": ["Name", "Phone", "status"], "rows": rows}), db.now(), db.now()))
+        contacts = []
+        for i, row in enumerate(rows, 1):
+            cid = db.run("INSERT INTO contacts(name,phone,language,status,extra,created_at) VALUES(?,?,?,?,?,?)",
+                         (row[0], row[1], "English", "new", json.dumps({"__source_row": i}), db.now()))
+            contacts.append(cid)
+        camp = db.run("INSERT INTO campaigns(name,objective,filters,status,created_at) VALUES('Big','Ask','{}','active',?)", (db.now(),))
+        ds = db.run("INSERT INTO datasets(name,filename,columns,row_count,created_at,source_doc_id) VALUES('Leads','l.csv','[]',?,?,?)", (n, db.now(), did))
+        for cid in contacts:
+            db.update("contacts", cid, dataset_id=ds)
+        calls = [db.run("INSERT INTO calls(contact_id,campaign_id,status,mode,report_sheet_id,created_at) VALUES(?,?,?,?,?,?)", (cid, camp, "completed", "pstn", did, db.now())) for cid in contacts]
+        return did, contacts, calls
+
+    def table(self, did):
+        return json.loads(db.q1("SELECT body FROM documents WHERE id=?", (did,))["body"])
+
+    async def test_results_wait_a_moment_and_are_then_written_in_one_go(self):
+        with db.use(self.ws):
+            did, _, calls = self.lead_sheet()
+            before = db.q1("SELECT updated_at FROM documents WHERE id=?", (did,))["updated_at"]
+            with mock.patch.object(files, "SHEET_FLUSH_SECONDS", 0.05):
+                for i, call in enumerate(calls[:4]):
+                    self.assertTrue(files.update_call_sheet(call, "interested", f"Summary {i}"))
+                self.assertEqual(self.table(did)["rows"][0][2], "")  # nothing has been rewritten yet
+                with mock.patch.object(db, "update", wraps=db.update) as write:
+                    await asyncio.sleep(0.4)
+                self.assertEqual([c for c in write.call_args_list if c.args[0] == "documents"].__len__(), 1)  # four results, one write
+            rows = self.table(did)["rows"]
+            self.assertEqual([r[2] for r in rows[:4]], ["interested"] * 4)
+            self.assertEqual(rows[3][3], "Summary 3")
+            self.assertEqual(rows[4][2], "")
+            self.assertGreater(db.q1("SELECT updated_at FROM documents WHERE id=?", (did,))["updated_at"], before)
+
+    async def test_a_sheet_edited_in_between_still_gets_each_result_on_the_right_lead(self):
+        """Regression guard for batching: rows moved while results were waiting must not receive someone else's result."""
+        with db.use(self.ws):
+            did, _, calls = self.lead_sheet()
+            files.update_call_sheet(calls[2], "callback", "Call back Monday.")
+            table = self.table(did)
+            table["rows"] = [["Brand new lead", "+447000000000", ""], *table["rows"]]  # a row inserted above: every stored row number is now one too low
+            db.update("documents", did, body=json.dumps(table))
+            files.flush_sheet_updates()
+            rows = self.table(did)["rows"]
+            self.assertEqual(rows[3][0], "Lead 2")
+            self.assertEqual(rows[3][2], "callback")  # on Lead 2's row, found by phone
+            self.assertEqual(rows[2][2], "")  # the row that now sits at the stored position was left alone
+
+    async def test_a_large_batch_is_written_without_waiting_for_the_timer(self):
+        with db.use(self.ws):
+            did, _, calls = self.lead_sheet()
+            with mock.patch.object(files, "SHEET_FLUSH_AT", 3), mock.patch.object(files, "SHEET_FLUSH_SECONDS", 60):
+                for call in calls[:3]:
+                    files.update_call_sheet(call, "interested", "x")
+            self.assertEqual([r[2] for r in self.table(did)["rows"][:3]], ["interested"] * 3)
+
+    async def test_sheet_results_use_the_status_column_name_the_admin_asked_for(self):
+        with db.use(self.ws):
+            did, _, calls = self.lead_sheet()
+            db.update("calls", calls[0], report_status_column="Call outcome")
+            files.update_call_sheet(calls[0], "interested", "Wants details.")
+            files.flush_sheet_updates()
+            table = self.table(did)
+            self.assertIn("Call outcome", table["columns"])
+            self.assertEqual(table["rows"][0][table["columns"].index("Call outcome")], "interested")
+
+
+class TextTheRightPersonTests(CallReportBase):
+    """Regression: Ethan kept typing Omer's number a digit short, then told the admin the (correct) number had 9 digits and asked for another."""
+
+    def called_from_chat(self, name="Omer Mustafa", phone="+447447781753"):
+        aid, mid = self.make_chat()
+        call = self.make_call(mid, aid)
+        contact = db.q1("SELECT contact_id FROM calls WHERE id=?", (call,))["contact_id"]
+        db.update("contacts", contact, name=name, phone=phone)
+        return {**agents.get(aid), "_meeting_id": mid}, contact
+
+    async def test_a_number_a_digit_short_goes_to_the_person_this_chat_just_phoned(self):
+        from app import messaging
+        with db.use(self.ws), mock.patch.object(messaging, "_dispatch", new_callable=mock.AsyncMock, return_value=True):
+            agent, contact = self.called_from_chat()
+            result, _ = await messaging.run_tool(agent, "send_sms", {"to": "+44744781753", "body": "Course details https://example.com"})
+            self.assertEqual(result["state"], "sent")
+            self.assertEqual(db.q1("SELECT to_addr,contact_id FROM outbox")["to_addr"], "+447447781753")
+            self.assertIn("used the saved number for Omer Mustafa: +447447781753", result["message"])
+            self.assertIn("Do not count digits", result["note_for_you"])
+
+    async def test_no_number_at_all_means_the_one_person_just_phoned_and_two_people_means_asking_which(self):
+        from app import messaging
+        with db.use(self.ws), mock.patch.object(messaging, "_dispatch", new_callable=mock.AsyncMock, return_value=True):
+            agent, _ = self.called_from_chat()
+            sent, _ = await messaging.run_tool(agent, "send_sms", {"body": "Details"})
+            self.assertEqual(sent["state"], "sent")
+            other = db.run("INSERT INTO contacts(name,phone,language,status,created_at) VALUES(?,?,?,?,?)", ("Sam Jones", "+447700900222", "English", "new", db.now()))
+            db.run("INSERT INTO calls(contact_id,status,mode,direction,report_meeting_id,created_at) VALUES(?,?,?,?,?,?)", (other, "completed", "pstn", "out", agent["_meeting_id"], db.now() + 1))
+            asked, _ = await messaging.run_tool(agent, "send_sms", {"body": "Details"})
+            self.assertEqual(asked["state"], "failed")
+            self.assertIn("Say which one to text", asked["message"])
+
+    async def test_a_wrong_number_with_no_call_in_this_chat_is_refused_and_names_the_number_it_was_given(self):
+        from app import messaging
+        with db.use(self.ws), mock.patch.object(messaging, "_dispatch", new_callable=mock.AsyncMock) as dispatch:
+            result, _ = await messaging.run_tool({"id": 1}, "send_sms", {"to": "+44744781753", "body": "Details"})
+            dispatch.assert_not_awaited()
+            self.assertIn("The number typed into this tool was +44744781753", result["message"])
+            self.assertIn("never claim a number is invalid unless this tool said so", result["note_for_you"])
+
+    async def test_a_reply_cannot_count_digits_or_call_a_number_invalid_without_having_tried_to_text(self):
+        invented = "The phone number +447447781753 appears invalid for SMS as it has only 9 digits after +44. Please provide an alternative number."
+        self.assertIn("haven’t tried to send a text", agents.verified_twilio_reply(invented, []))
+        self.assertEqual(agents.verified_twilio_reply(invented, [{"name": "send_sms"}]), invented)  # after a real attempt the tool's own report may be quoted
+        harmless = "The email address looks invalid, please check it."
+        self.assertEqual(agents.verified_twilio_reply(harmless, []), harmless)
+
+
+class InstructionsAndAfterTextTests(CallReportBase):
+    def sell_call(self, extra=None, **campaign):
+        aid, mid = self.make_chat()
+        call = self.make_call(mid, aid, objective="Sell the business course", reason="")
+        db.update("calls", call, reason="")
+        row = db.q1("SELECT * FROM calls WHERE id=?", (call,))
+        if extra is not None:
+            db.update("contacts", row["contact_id"], extra=json.dumps(extra))
+        if campaign:
+            db.update("campaigns", row["campaign_id"], **campaign)
+        return aid, call
+
+    async def test_every_call_reads_the_admins_instruction_files_but_never_loads_a_lead_sheet(self):
+        with db.use(self.ws):
+            aid, call = self.sell_call()
+            folder = db.run("INSERT INTO folders(owner,parent_id,name,purpose,created_at) VALUES(?,?,?,?,?)", (aid, None, "From admins", "from_admin", db.now()))
+            db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (aid, "Weekly note", "doc", "Always offer the evening classes first.", folder, db.now(), db.now()))
+            db.run("INSERT INTO documents(agent_id,title,kind,body,created_at,updated_at) VALUES(0,'Call script','doc','Open with the early-bird bursary. Never promise a start date.',?,?)", (db.now(), db.now()))
+            db.run("INSERT INTO documents(agent_id,title,kind,body,created_at,updated_at) VALUES(0,'Instructions leads','sheet',?,?,?)", (json.dumps({"columns": ["a"], "rows": [["SECRET SHEET ROW"] * 50]}), db.now(), db.now()))
+            db.run("INSERT INTO documents(agent_id,title,kind,body,created_at,updated_at) VALUES(0,'Lunch menu','doc','Soup on Tuesdays.',?,?)", (db.now(), db.now()))
+            row, contact, camp = callengine.call_context(call)
+            prompt = callengine.system_prompt(row, contact, camp, realtime=True, external=True)
+            self.assertIn("INSTRUCTION FILES FROM THE ADMIN", prompt)
+            self.assertIn("Never promise a start date", prompt)
+            self.assertIn("Always offer the evening classes first", prompt)
+            self.assertNotIn("SECRET SHEET ROW", prompt)
+            self.assertNotIn("Soup on Tuesdays", prompt)
+            db.run("UPDATE documents SET body='Open with the new autumn offer.' WHERE title='Call script'")  # edited between two calls: the next call reads the new text
+            self.assertIn("new autumn offer", callengine.system_prompt(row, contact, camp, realtime=True, external=True))
+
+    async def test_a_per_lead_instruction_column_is_called_out_in_the_brief(self):
+        with db.use(self.ws):
+            _, call = self.sell_call(extra={"Instructions": "Speak Urdu first, then English", "Course interest": "Business", "__source_row": 4})
+            row, contact, camp = callengine.call_context(call)
+            prompt = callengine.system_prompt(row, contact, camp, realtime=True, external=True)
+            self.assertIn("WHAT THE LEAD SHEET SAYS ABOUT THIS PERSON (follow it): Instructions: Speak Urdu first, then English", prompt)
+            self.assertNotIn("__source_row: 4", prompt.split("WHAT THE LEAD SHEET SAYS")[1].split("\n")[0])
+
+    async def test_a_campaign_texts_each_interested_person_after_the_call_once(self):
+        from app import messaging
+        with db.use(self.ws):
+            aid, call = self.sell_call(after_sms="Hi {name}, thanks for your time. Course details: {link} - {company}", after_sms_when="interested")
+            voices.set_setting("main_link", "https://example.com/apply")
+            db.update("contacts", db.q1("SELECT contact_id FROM calls WHERE id=?", (call,))["contact_id"], name="Omer Mustafa", phone="+447447781753")
+            db.update("calls", call, transcript=json.dumps([{"role": "agent", "text": "Hi", "t": 1}, {"role": "customer", "text": "Yes please", "t": 3}]))
+            analysis = {"summary": "Wants the business course.", "outcome": "interested", "sentiment": "positive", "key_points": []}
+            send = mock.AsyncMock(return_value={"state": "sent", "message": "Sent."})
+            with mock.patch.object(llm, "complete_json", new_callable=mock.AsyncMock, return_value=analysis), mock.patch.object(messaging, "send", send):
+                await callengine.finalize(call, "completed")
+                for task in list(callengine._FOLLOW_UPS):
+                    await task
+            send.assert_awaited_once()
+            self.assertEqual(send.await_args.args[1:3], ("sms", "+447447781753"))
+            self.assertIn("Hi Omer, thanks for your time. Course details: https://example.com/apply", send.await_args.args[3])
+            self.assertEqual(db.q1("SELECT kind,status FROM call_actions WHERE call_id=?", (call,)), {"kind": "after_sms", "status": "done"})
+
+    async def test_the_after_call_text_respects_who_it_is_for(self):
+        contact = {"name": "Omer", "phone": "+447447781753", "do_not_call": 0}
+        camp = {"after_sms": "Details", "after_sms_when": "interested"}
+        self.assertTrue(callengine.should_send_after_sms(camp, contact, "interested", True))
+        self.assertFalse(callengine.should_send_after_sms(camp, contact, "not_interested", True))   # they said no
+        self.assertFalse(callengine.should_send_after_sms(camp, contact, "interested", False))      # nobody spoke
+        self.assertFalse(callengine.should_send_after_sms(camp, {**contact, "do_not_call": 1}, "interested", True))
+        self.assertFalse(callengine.should_send_after_sms({**camp, "after_sms_when": "never"}, contact, "interested", True))
+        self.assertTrue(callengine.should_send_after_sms({**camp, "after_sms_when": "answered"}, contact, "callback_requested", True))
+        self.assertFalse(callengine.should_send_after_sms({**camp, "after_sms_when": "answered"}, contact, "do_not_call", True))
+        self.assertFalse(callengine.should_send_after_sms({"after_sms": "", "after_sms_when": "answered"}, contact, "interested", True))
+
+    async def test_no_second_text_when_the_caller_already_sent_the_details_during_the_call(self):
+        from app import agent_tools, messaging
+        with db.use(self.ws):
+            aid, call = self.sell_call(after_sms="Details {link}", after_sms_when="answered")
+            row = db.q1("SELECT * FROM calls WHERE id=?", (call,))
+            agent_tools._act(row, "information_sent", {"channel": "sms", "state": "sent"}, status="done")
+            db.update("calls", call, transcript=json.dumps([{"role": "customer", "text": "Yes", "t": 1}]))
+            send = mock.AsyncMock(return_value={"state": "sent", "message": "Sent."})
+            with mock.patch.object(llm, "complete_json", new_callable=mock.AsyncMock, return_value={"summary": "x", "outcome": "interested"}), mock.patch.object(messaging, "send", send):
+                await callengine.finalize(call, "completed")
+                for task in list(callengine._FOLLOW_UPS):
+                    await task
+            send.assert_not_awaited()
+
+    async def test_a_campaign_can_be_created_with_an_after_call_text(self):
+        st, r = await self.owner.post("/api/campaigns", {"name": "Texts", "objective": "Sell", "after_sms": "  Hi {name}  ", "after_sms_when": "answered"})
+        self.assertEqual(st, 200, r)
+        self.assertEqual((r["after_sms"], r["after_sms_when"]), ("Hi {name}", "answered"))
+        st, _ = await self.owner.post("/api/campaigns", {"name": "Bad", "objective": "Sell", "after_sms_when": "always"})
+        self.assertEqual(st, 400)
+
+
+class SharedCompanyDetailsTests(CallReportBase):
+    """Regression: a sub-workspace started with its own name as 'the company' and no website knowledge, so its callers introduced themselves wrongly."""
+
+    async def make_child(self, browser=None, name="Sales team"):
+        st, data = await (browser or self.owner).post("/api/workspaces", {"name": name, "visibility": "private"})
+        self.assertEqual(st, 200, data)
+        return data["id"]
+
+    async def test_every_workspace_of_the_company_uses_the_company_name_website_and_about(self):
+        st, _ = await self.owner.put("/api/company", {"name": "Acme Training", "about": "We run accredited business courses.", "website": "https://acme.example", "timezone": "Europe/London"})
+        self.assertEqual(st, 200)
+        child = await self.make_child()
+        with db.use(child):
+            self.assertEqual(llm.company_name(), "Acme Training")  # not "Sales team"
+            self.assertEqual(llm.company_about(), "We run accredited business courses.")
+            self.assertEqual(voices.get_setting("company_website"), "https://acme.example")
+            self.assertEqual(voices.get_setting("timezone"), "Europe/London")
+            self.assertIn("Acme Training", callengine.after_sms_text({"after_sms": "From {company}"}, {"name": "Omer"}))
+            self.assertEqual(db.q1("SELECT value FROM settings WHERE key='company_name'")["value"], "Sales team")  # the workspace's own row is not what is used
+
+    async def test_a_change_made_in_a_sub_workspace_changes_the_company_for_everyone(self):
+        child = await self.make_child()
+        await self.owner.post(f"/api/workspaces/{child}/switch")
+        st, r = await self.owner.put("/api/company", {"name": "Acme Learning"})
+        self.assertEqual(st, 200, r)
+        self.assertTrue(r["shared"])
+        self.assertTrue(r["can_edit"])
+        await self.owner.post(f"/api/workspaces/{self.ws}/switch")
+        _, home = await self.owner.get("/api/company")
+        self.assertEqual((home["name"], home["shared"]), ("Acme Learning", False))
+        with db.use(self.ws):
+            self.assertEqual(voices.get_setting("company_name"), "Acme Learning")
+
+    async def test_only_a_company_admin_can_change_the_shared_details_from_a_sub_workspace(self):
+        member, _ = await self.join()
+        child = await self.make_child(member, "Member space")
+        await member.post(f"/api/workspaces/{child}/switch")
+        _, view = await member.get("/api/company")
+        self.assertEqual((view["shared"], view["can_edit"]), (True, False))
+        st, r = await member.put("/api/company", {"name": "Hijacked"})
+        self.assertEqual(st, 403, r)
+        st, _ = await member.post("/api/company/learn", {"url": "https://acme.example"})
+        self.assertEqual(st, 403)
+        with db.use(self.ws):
+            self.assertNotEqual(voices.get_setting("company_name"), "Hijacked")
+
+    async def test_callers_in_a_sub_workspace_search_the_company_website_knowledge(self):
+        with db.use(self.ws):
+            kb = db.run("INSERT INTO knowledge_bases(name,created_at) VALUES(?,?)", ("Website: Acme", db.now()))
+            await knowledge.ingest(kb, "Course fees", "The advanced robotics course costs £425 and includes lab access.", source="https://acme.example/fees")
+            voices.set_setting("company_website_kb_id", str(kb))
+            voices.set_setting("company_website", "https://acme.example")
+        child = await self.make_child()
+        with db.use(child):
+            hits = await knowledge.lookup_company("advanced robotics course fee")
+            self.assertTrue(any("£425" in h and "https://acme.example/fees" in h for h in hits), hits)
+
+
+class ManyLeadsTests(CallReportBase):
+    """A campaign over tens of thousands of rows must not make the server rescan every waiting call: live calls share its one event loop."""
+
+    def campaign_with(self, n, **fields):
+        camp = db.run("INSERT INTO campaigns(name,objective,filters,status,max_attempts,concurrency,created_at) VALUES('Big','Sell','{}','active',1,100,?)", (db.now(),))
+        if fields:
+            db.update("campaigns", camp, **fields)
+        db.many("INSERT INTO contacts(name,phone,language,created_at) VALUES(?,?,'English',?)", ((f"Lead {i}", f"+4477{i:08d}", db.now()) for i in range(n)))
+        first = db.q1("SELECT MAX(id) m FROM contacts")["m"] - n + 1
+        db.many("INSERT INTO calls(contact_id,campaign_id,status,mode,not_before,created_at) VALUES(?,?,'queued','pstn',0,?)", ((first + i, camp, db.now()) for i in range(n)))
+        return camp
+
+    async def test_the_next_call_is_picked_by_campaign_window_and_age(self):
+        with db.use(self.ws):
+            closed = self.campaign_with(3, call_window=json.dumps({"start": "00:00", "end": "00:01", "days": []}))
+            older = self.campaign_with(3)
+            self.assertEqual(callengine.next_due(False)["campaign_id"], older)  # a campaign that is outside its calling hours is passed over
+            first = db.q1("SELECT MIN(id) id FROM calls WHERE campaign_id=?", (older,))["id"]
+            self.assertEqual(callengine.next_due(False)["id"], first)
+            self.assertEqual(callengine.next_due(False, skip=(first,))["id"], first + 1)  # a call being dialled right now is skipped
+            db.update("campaigns", older, status="stopped")
+            self.assertIsNone(callengine.next_due(False))  # stopped, and the other is closed
+            db.update("campaigns", closed, call_window=None)
+            self.assertEqual(callengine.next_due(False)["campaign_id"], closed)
+            db.update("campaigns", closed, autopilot=1)
+            self.assertIsNone(callengine.next_due(False))  # AI test customers only
+            self.assertEqual(callengine.next_due(False, autopilot=True)["campaign_id"], closed)
+            db.update("campaigns", closed, status="scheduled")
+            self.assertIsNone(callengine.next_due(False, autopilot=True))
+
+    async def test_waiting_calls_do_not_slow_the_scheduler_down(self):
+        import time
+        from app import twilio_call
+        with db.use(self.ws):
+            camp = self.campaign_with(20000, call_window=json.dumps({"start": "00:00", "end": "00:01", "days": []}))
+            t = time.perf_counter()
+            self.assertIsNone(callengine.next_due(False))
+            closed_ms = (time.perf_counter() - t) * 1000
+            db.update("campaigns", camp, call_window=None)
+            voices.set_setting("max_concurrent_calls", "100")
+
+            class Session:
+                def __init__(self, *a, **k):
+                    pass
+
+                async def place(self):
+                    pass
+            t = time.perf_counter()
+            with mock.patch.object(twilio_call, "voice_config", return_value={}), mock.patch.object(twilio_call, "Session", Session), mock.patch.dict(wa_call.SESSIONS):
+                await callengine._dial_twilio_due()
+            start_100_ms = (time.perf_counter() - t) * 1000
+            self.assertEqual(db.q1("SELECT COUNT(*) n FROM calls WHERE campaign_id=? AND status='ringing'", (camp,))["n"], 100)
+            # it used to re-read every waiting call: 160 ms outside calling hours and over a second to start 100 calls at this size
+            self.assertLess(closed_ms, 40)
+            self.assertLess(start_100_ms, 500)
+
+    async def test_a_big_campaign_roll_up_is_counted_in_the_database(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            camp = self.campaign_with(2000)
+            db.update("campaigns", camp, report_meeting_id=mid, agent_id=aid)
+            talk = json.dumps([{"role": "agent", "text": "Hi", "t": 1}, {"role": "customer", "text": "Yes", "t": 2}])
+            db.run("UPDATE calls SET status='completed', outcome='interested', summary='Wants details.', transcript=?, report=? WHERE campaign_id=? AND id%2=0",
+                   (talk, json.dumps({"objective_answer": "Business diploma"}), camp))
+            db.run("UPDATE calls SET status='no_answer', outcome='no_answer' WHERE campaign_id=? AND status='queued'", (camp,))
+            callengine.announce_campaign(camp)
+            text = self.chat_text(mid)[0]
+            self.assertIn("2000 leads, 1000 reached, 1000 not reached (1000 no answer, 0 failed or declined)", text)
+            self.assertIn("Outcomes: interested 1000", text)
+            self.assertIn("…and 985 more.", text)

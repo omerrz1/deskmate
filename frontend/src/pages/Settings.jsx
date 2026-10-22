@@ -147,7 +147,7 @@ export default function Settings({ embedded = false }) {
 
       <Panel title="Workspace call capacity">
         <label>Maximum simultaneous calls<select value={settings?.max_concurrent_calls || 10} onChange={async (e) => { try { await api.put('/settings', { max_concurrent_calls: +e.target.value }); reloadS(); setMsg('Workspace call capacity saved.') } catch (x) { setMsg(x.message) } }}>{[1, 2, 3, 5, 10, 15, 20, 30, 50, 75, 100].map((n) => <option key={n} value={n}>{n} at a time</option>)}</select>
-          <span className="faint">Applies across campaigns and direct calls. Twilio also enforces separate account concurrency and calls-per-second limits, which this setting cannot raise.</span>
+          <span className="faint">Applies across campaigns and direct calls. Twilio also enforces separate account concurrency and calls-per-second limits, which this setting cannot raise. Your ElevenLabs plan limits how many conversations can run at once too: keep this at or below that limit, or the extra calls fall back to the OpenAI voice.</span>
         </label>
       </Panel>
 

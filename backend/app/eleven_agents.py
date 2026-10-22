@@ -22,10 +22,11 @@ DEFAULT_TTS = os.getenv("ELEVENLABS_AGENT_TTS", "eleven_v4_turbo")
 
 db.run("CREATE TABLE IF NOT EXISTS el_agents(code TEXT PRIMARY KEY, agent_id TEXT, voice_id TEXT, model TEXT, created_at REAL)")
 db.run("CREATE TABLE IF NOT EXISTS el_tools(name TEXT PRIMARY KEY, tool_id TEXT)")
-try:
-    db.run("ALTER TABLE el_agents ADD COLUMN overrides_ok INTEGER DEFAULT 0")
-except Exception:
-    pass
+for _stmt in ("ALTER TABLE el_agents ADD COLUMN overrides_ok INTEGER DEFAULT 0", "ALTER TABLE el_tools ADD COLUMN sig TEXT"):
+    try:
+        db.run(_stmt)
+    except Exception:
+        pass
 
 
 def _h():
@@ -82,23 +83,36 @@ async def _tool_id(h):
     return tid
 
 
+TOOL_TIMEOUTS = {"ask_admin": 120, "send_information": 20, "search_web": 12}  # seconds a tool may take before the agent gives up on it
+
+
 async def _extra_tool_ids(h):
-    """Client tools for everything the agent can do besides lookup_info (they call our /phone/{id}/tool endpoint from the browser)."""
+    """Client tools for everything the agent can do besides lookup_info (they call our /phone/{id}/tool endpoint from the browser).
+    A tool whose definition changed since it was registered is updated in ElevenLabs too, or the agent would keep using the old one."""
+    import hashlib
+    import json
     from . import agent_tools as T
     ids = []
     for name, (desc, props, req) in T.SPECS.items():
-        row = db.q1("SELECT tool_id FROM el_tools WHERE name=?", (name,))
-        if row:
-            ids.append(row["tool_id"]); continue
-        cfg = {"tool_config": {"type": "client", "name": name, "expects_response": True, "response_timeout_secs": 120 if name == "ask_admin" else 10, "description": desc,
-                               "parameters": {"type": "object", "required": req, "properties": {k: {"type": v.get("type", "string"), "description": v.get("description", k)} for k, v in props.items()}} if props else None}}
+        cfg = {"tool_config": {"type": "client", "name": name, "expects_response": True, "response_timeout_secs": TOOL_TIMEOUTS.get(name, 10), "description": desc,
+                               "parameters": {"type": "object", "required": req, "properties": {k: {"type": v.get("type", "string"), "description": v.get("description", k), **({"enum": v["enum"]} if v.get("enum") else {})} for k, v in props.items()}} if props else None}}
         if not props:
             cfg["tool_config"].pop("parameters")
+        sig = hashlib.sha1(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:16]
+        row = db.q1("SELECT tool_id,sig FROM el_tools WHERE name=?", (name,))
+        if row:
+            if row.get("sig") != sig:
+                r = await h.patch(f"{BASE}/convai/tools/{row['tool_id']}", json=cfg, timeout=20)
+                if r.status_code == 200:
+                    db.run("UPDATE el_tools SET sig=? WHERE name=?", (sig, name))
+                else:
+                    db.log("voice", f"Could not update the '{name}' tool in ElevenLabs yet ({r.status_code}); the agent keeps the previous version")
+            ids.append(row["tool_id"]); continue
         r = await h.post(f"{BASE}/convai/tools", json=cfg, timeout=20)
         if r.status_code != 200:
             raise RuntimeError(f"tool {name}: {r.text[:200]}")
         tid = r.json()["id"]
-        db.run("INSERT OR REPLACE INTO el_tools(name,tool_id) VALUES(?,?)", (name, tid))
+        db.run("INSERT OR REPLACE INTO el_tools(name,tool_id,sig) VALUES(?,?,?)", (name, tid, sig))
         ids.append(tid)
     return ids
 

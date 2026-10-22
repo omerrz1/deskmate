@@ -587,10 +587,19 @@ def central_put(c: CentralIn):
 
 
 # ---------- company: what each deployment is set up for ----------
+def _company_admin(request):
+    """Company details are shared by every workspace of the company, so inside a sub-workspace only a company admin may change them."""
+    s = getattr(request.state, "session", None) or {}
+    return db.current() == db.company() or s.get("company_role", s.get("role")) in ("owner", "admin")
+
+
 @router.get("/company")
-def company_get():
+def company_get(request: Request):
     import zoneinfo
-    return {"name": voices.get_setting("company_name", ""), "about": voices.get_setting("company_about", ""), "website": voices.get_setting("company_website", ""),
+    from . import directory
+    home = db.company()
+    return {"shared": home != db.current(), "can_edit": _company_admin(request), "company_workspace": (directory.get(home) or {}).get("name") or "",
+            "name": voices.get_setting("company_name", ""), "about": voices.get_setting("company_about", ""), "website": voices.get_setting("company_website", ""),
             "timezone": voices.get_setting("timezone", ""), "server_timezone": str(llm.company_tz()),
             "timezones": sorted(z for z in zoneinfo.available_timezones() if "/" in z and not z.startswith(("Etc/", "posix", "right", "SystemV")))[:700],
             "agents": db.q1("SELECT COUNT(*) n FROM agents WHERE archived=0")["n"], "knowledge_bases": db.q1("SELECT COUNT(*) n FROM knowledge_bases")["n"],
@@ -613,7 +622,9 @@ class CompanyIn(BaseModel):
 
 
 @router.put("/company")
-def company_put(c: CompanyIn):
+def company_put(c: CompanyIn, request: Request):
+    if not _company_admin(request):
+        raise HTTPException(403, "Company details are shared by every workspace, so only a company admin can change them.")
     if c.timezone:
         try:
             import zoneinfo
@@ -626,7 +637,7 @@ def company_put(c: CompanyIn):
         if val is not None:
             voices.set_setting(key, val.strip()[:2000])
     files.sync_company_doc()
-    return company_get()
+    return company_get(request)
 
 
 class LearnIn(BaseModel):
@@ -634,20 +645,23 @@ class LearnIn(BaseModel):
 
 
 @router.post("/company/learn")
-async def company_learn(l: LearnIn):
-    """Read the company's website into a knowledge base the callers can use."""
+async def company_learn(l: LearnIn, request: Request):
+    """Read the company's website into a knowledge base the callers can use. It is kept in the company's own workspace, so every workspace shares it."""
     import asyncio
     from . import webdemo
+    if not _company_admin(request):
+        raise HTTPException(403, "The company website is shared by every workspace, so only a company admin can change it.")
     try:
         saved_kb = str(voices.get_setting("company_website_kb_id", "") or "")
-        r = await asyncio.wait_for(webdemo.learn(l.url.strip()[:500], kb_id=int(saved_kb) if saved_kb.isdigit() else None), 600)
+        with db.use(db.company()):
+            r = await asyncio.wait_for(webdemo.learn(l.url.strip()[:500], kb_id=int(saved_kb) if saved_kb.isdigit() else None), 600)
+            name = voices.get_setting("company_name", "") or r["company"]
+            db.update("knowledge_bases", r["kb_id"], name=name)
     except webdemo.Blocked as e:
         raise HTTPException(400, str(e))
     except asyncio.TimeoutError:
         raise HTTPException(504, "That website took too long to read.")
     voices.set_setting("company_website", l.url.strip()[:500])
-    name = voices.get_setting("company_name", "") or r["company"]
-    db.update("knowledge_bases", r["kb_id"], name=name)
     voices.set_setting("company_website_kb_id", str(r["kb_id"]))
     if not voices.get_setting("company_about", ""):
         about = (r.get("info") or {}).get("what_they_do") or ""

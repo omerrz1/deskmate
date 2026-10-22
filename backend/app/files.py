@@ -1,7 +1,9 @@
 """Each employee has their own computer with folders and files, and there is a shared drive (owner 0).
 Documents are text; spreadsheets are tables. Agents work with folder PATHS like 'Reports/October'."""
+import asyncio
 import json
 import re
+import threading
 
 from . import db
 
@@ -229,67 +231,150 @@ def resolve_document(agent, doc_id=None, title=None, kind=None):
     return None, f"No accessible file named '{title}' was found. Use list_documents to search."
 
 
+SHEET_FLUSH_SECONDS = 2.0   # results are collected for this long, then written into the sheet in one go
+SHEET_FLUSH_AT = 300        # ...or as soon as this many are waiting for one sheet
+_sheet_waiting = {}         # (workspace, sheet id) -> {call id: (outcome, summary)}
+_sheet_timers = {}
+_sheet_lock = threading.RLock()
+
+
 def update_call_sheet(call_id, outcome, summary=""):
-    call = db.q1("SELECT * FROM calls WHERE id=?", (call_id,))
+    """Record a call's result against its lead row in the spreadsheet the lead came from.
+
+    Results are collected and written together every couple of seconds. Writing the whole sheet back after every single call re-saved
+    megabytes per call (a 50,000-row sheet is about 5 MB), which at campaign scale means gigabytes of writes and a stall on every call.
+    -> True when the result is, or will be, written."""
+    call = db.q1("SELECT id,report_sheet_id,report_agent_id FROM calls WHERE id=?", (call_id,))
     if not call or not call.get("report_sheet_id"):
         return False
     from . import team
     agent = db.q1("SELECT * FROM agents WHERE id=?", (call.get("report_agent_id"),)) if call.get("report_agent_id") else None
-    doc = db.q1("SELECT * FROM documents WHERE id=? AND kind='sheet'", (call["report_sheet_id"],))
+    doc = db.q1("SELECT id,agent_id,folder_id,kind FROM documents WHERE id=? AND kind='sheet'", (call["report_sheet_id"],))
     if not doc or not team.can_access_doc(agent, doc):
         return False
+    key = (db.current(), doc["id"])
+    with _sheet_lock:
+        _sheet_waiting.setdefault(key, {})[call_id] = (outcome, summary)
+        waiting = len(_sheet_waiting[key])
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None or waiting >= SHEET_FLUSH_AT:  # nothing to wait on (a script, a test), or a big batch is ready
+        return flush_sheet_updates(key) > 0
+    with _sheet_lock:
+        if key not in _sheet_timers:
+            _sheet_timers[key] = loop.call_later(SHEET_FLUSH_SECONDS, lambda: flush_sheet_updates(key))
+    return True
+
+
+def flush_sheet_updates(only=None):
+    """Write every waiting call result into its sheet now. -> how many rows were updated. Called by the timer, before sheets are read, and at shutdown."""
+    with _sheet_lock:
+        keys = [only] if only else list(_sheet_waiting)
+        batches = {k: _sheet_waiting.pop(k) for k in keys if k in _sheet_waiting}
+        for k in keys:
+            timer = _sheet_timers.pop(k, None)
+            if timer:
+                timer.cancel()
+    done = 0
+    for (workspace, doc_id), updates in batches.items():
+        try:
+            with db.use(workspace):
+                done += _apply_sheet_updates(doc_id, updates)
+        except Exception as e:
+            try:
+                with db.use(workspace):
+                    db.log("error", f"Could not write call results into sheet {doc_id}: {type(e).__name__}: {str(e)[:100]}")
+            except Exception:
+                pass
+    return done
+
+
+def _digits_tail(value, n=9):
+    return re.sub(r"\D", "", str(value or ""))[-n:]
+
+
+def _apply_sheet_updates(doc_id, updates):
+    """One read and one write for a whole batch of call results."""
+    doc = db.q1("SELECT * FROM documents WHERE id=? AND kind='sheet'", (doc_id,))
+    if not doc:
+        return 0
     table = _sheet(doc)
     rows, cols = table["rows"], table["columns"]
     if not rows or not cols:
-        return False
-    configured_row = call.get("report_row")
-    if not configured_row:
-        source = db.q1("SELECT c.extra,d.source_doc_id FROM contacts c JOIN datasets d ON d.id=c.dataset_id WHERE c.id=?", (call["contact_id"],))
-        if source and source["source_doc_id"] == doc["id"]:
-            configured_row = db.jload(source["extra"], {}).get("__source_row")
-    row_index = int(configured_row) - 1 if configured_row else -1
-    if row_index < 0 or row_index >= len(rows):
-        contact = db.q1("SELECT name,phone FROM contacts WHERE id=?", (call["contact_id"],)) or {}
-        target_phone = re.sub(r"\D", "", contact.get("phone") or "")
-        target_name = (contact.get("name") or "").strip().casefold()
-        matches = []
-        for i, row in enumerate(rows):
-            values = {str(cols[j]).casefold(): str(row[j] if j < len(row) else "") for j in range(len(cols))}
-            name = next((v for k, v in values.items() if "name" in k), "").strip().casefold()
-            phone = next((v for k, v in values.items() if any(x in k for x in ("phone", "number", "mobile"))), "")
-            phone = re.sub(r"\D", "", phone)
-            if target_phone and phone and (phone.endswith(target_phone[-9:]) or target_phone.endswith(phone[-9:])) or (target_name and name == target_name):
-                matches.append(i)
-        if len(matches) != 1:
-            return False
-        row_index = matches[0]
-    status_col = str(call.get("report_status_column") or "status").casefold()
-    col_index = next((i for i, c in enumerate(cols) if str(c).strip().casefold() == status_col), None)
-    if col_index is None:
-        cols.append(str(call.get("report_status_column") or "status"))
-        col_index = len(cols) - 1
-    while len(rows[row_index]) <= col_index:
-        rows[row_index].append("")
-    rows[row_index][col_index] = str(outcome or "unresolved")[:120]
-    summary_col = next((i for i, c in enumerate(cols) if str(c).strip().casefold() in ("call report", "call summary", "report", "summary")), None)
-    if summary_col is None:
-        cols.append("Call summary")
-        summary_col = len(cols) - 1
-    if summary_col is not None:
-        while len(rows[row_index]) <= summary_col:
-            rows[row_index].append("")
-        rows[row_index][summary_col] = str(summary or "")[:500]
-    answer = str((db.jload(call.get("report"), {}) or {}).get("objective_answer") or "").strip()
-    if answer:  # what the person actually said to the call's task, e.g. their favourite meal, next to the status
-        answer_col = next((i for i, c in enumerate(cols) if str(c).strip().casefold() in ("call answer", "answer")), None)
-        if answer_col is None:
-            cols.append("Call answer")
-            answer_col = len(cols) - 1
-        while len(rows[row_index]) <= answer_col:
-            rows[row_index].append("")
-        rows[row_index][answer_col] = answer[:500]
-    db.update("documents", doc["id"], body=json.dumps(table, ensure_ascii=False), updated_at=db.now())
-    return True
+        return 0
+    names = [str(c).strip().casefold() for c in cols]
+    phone_col = next((i for i, n in enumerate(names) if any(x in n for x in ("phone", "number", "mobile"))), None)
+    name_col = next((i for i, n in enumerate(names) if "name" in n), None)
+    cell = lambda row, i: str(row[i]) if i is not None and i < len(row) else ""  # noqa: E731
+    index = {}  # built once, only if a result has to be matched by phone or name
+
+    def lookup():
+        if not index:
+            index["phone"], index["name"] = {}, {}
+            for i, row in enumerate(rows):
+                tail = _digits_tail(cell(row, phone_col))
+                if tail:
+                    index["phone"].setdefault(tail, []).append(i)
+                nm = cell(row, name_col).strip().casefold()
+                if nm:
+                    index["name"].setdefault(nm, []).append(i)
+        return index
+
+    changed = 0
+    for call_id, (outcome, summary) in updates.items():
+        call = db.q1("SELECT * FROM calls WHERE id=?", (call_id,))
+        if not call:
+            continue
+        contact = db.q1("SELECT c.name,c.phone,c.extra,d.source_doc_id FROM contacts c LEFT JOIN datasets d ON d.id=c.dataset_id WHERE c.id=?", (call["contact_id"],)) or {}
+        want = _digits_tail(contact.get("phone"))
+        configured = call.get("report_row") or (db.jload(contact.get("extra"), {}).get("__source_row") if contact.get("source_doc_id") == doc["id"] else None)
+        row_index = int(configured) - 1 if configured else -1
+        if 0 <= row_index < len(rows) and want and phone_col is not None:
+            on_sheet = _digits_tail(cell(rows[row_index], phone_col))
+            if on_sheet and on_sheet != want:
+                row_index = -1  # the sheet was edited since the lead was imported and this row is somebody else now: find the lead instead
+        if not 0 <= row_index < len(rows):
+            hits = set()
+            if want:
+                hits.update(lookup()["phone"].get(want, []))
+            nm = (contact.get("name") or "").strip().casefold()
+            if nm:
+                hits.update(lookup()["name"].get(nm, []))
+            if len(hits) != 1:
+                continue
+            row_index = hits.pop()
+        status_name = str(call.get("report_status_column") or "status")
+        col_index = next((i for i, c in enumerate(cols) if str(c).strip().casefold() == status_name.casefold()), None)
+        if col_index is None:
+            cols.append(status_name)
+            names.append(status_name.casefold())
+            col_index = len(cols) - 1
+        summary_col = next((i for i, n in enumerate(names) if n in ("call report", "call summary", "report", "summary")), None)
+        if summary_col is None:
+            cols.append("Call summary")
+            names.append("call summary")
+            summary_col = len(cols) - 1
+        answer = str((db.jload(call.get("report"), {}) or {}).get("objective_answer") or "").strip()  # what they said to the call's task, next to the status
+        answer_col = None
+        if answer:
+            answer_col = next((i for i, n in enumerate(names) if n in ("call answer", "answer")), None)
+            if answer_col is None:
+                cols.append("Call answer")
+                names.append("call answer")
+                answer_col = len(cols) - 1
+        row = rows[row_index]
+        while len(row) < len(cols):
+            row.append("")
+        row[col_index] = str(outcome or "unresolved")[:120]
+        row[summary_col] = str(summary or "")[:500]
+        if answer_col is not None:
+            row[answer_col] = answer[:500]
+        changed += 1
+    if changed:
+        db.update("documents", doc["id"], body=json.dumps(table, ensure_ascii=False), updated_at=db.now())
+    return changed
 
 
 def _where(d):
@@ -297,6 +382,7 @@ def _where(d):
 
 
 async def run_tool(agent, name, a):
+    flush_sheet_updates()  # an employee reading or editing a sheet must see the call results that are still waiting to be written
     try:
         return await _run_tool(agent, name, a)
     except ValueError as e:

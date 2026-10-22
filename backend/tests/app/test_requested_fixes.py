@@ -45,6 +45,7 @@ class RequestedFixTests(Company):
             call = db.q1('SELECT * FROM calls WHERE campaign_id=? ORDER BY id DESC LIMIT 1', (campaign,))
             self.assertEqual(call['report_sheet_id'], did)
             self.assertTrue(files.update_call_sheet(call['id'], 'interested', 'Requested details.'))
+            files.flush_sheet_updates()
             table = json.loads(db.q1('SELECT body FROM documents WHERE id=?', (did,))['body'])
             self.assertEqual(table['rows'][-1][-2:], ['interested', 'Requested details.'])
             self.assertEqual(table['rows'][0], rows[0])

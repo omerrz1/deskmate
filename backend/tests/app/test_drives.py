@@ -52,6 +52,7 @@ class EmployeeComputerTests(DriveBase):
             call_id = db.run("INSERT INTO calls(contact_id,status,report_sheet_id,report_agent_id,created_at) VALUES(?,?,?,?,?)",
                              (contact_id, "in_progress", did, aid, db.now()))
             self.assertTrue(files.update_call_sheet(call_id, "callback_requested", "Asked for a call next week."))
+            files.flush_sheet_updates()
             sheet = json.loads(db.q1("SELECT body FROM documents WHERE id=?", (did,))["body"])
             self.assertEqual(sheet["rows"][0], ["zubair", "+447723827344", "callback_requested", "Asked for a call next week."])
 

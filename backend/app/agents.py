@@ -139,6 +139,10 @@ def verified_twilio_reply(text, tools):
         return "Twilio has not confirmed that the recipient’s phone is ringing yet."
     if not names.intersection({"call_contact", "call_on_whatsapp"}) and re.search(r"\b(?:call (?:was|has been) (?:placed|started|queued)|calling (?:them|the customer) now)\b", text or "", re.I):
         return "I haven’t run the call tool in this turn, so I can’t say a call was placed or is ringing. No new call was started."
+    about_a_number = re.search(r"\+\d{6,}|\b0\d{9,10}\b|\b(?:phone|mobile)?\s*numbers?\b", text or "", re.I)
+    if about_a_number and not names.intersection({"send_sms", "send_whatsapp"}) and re.search(r"\b(?:only|just|has|have|had|with)\s+\d{1,2}\s+digits?\b|\b(?:appears?|seems?|looks?)\s+(?:to be\s+)?invalid\b|\binvalid\s+(?:phone\s+)?number\b", text or "", re.I):
+        return ("I haven’t tried to send a text in this reply, so I can’t say a number is invalid or count its digits. "
+                "Tell me who to text and I’ll send it now, using their saved number.")
     if names.intersection({"call_contact", "get_call", "list_calls"}):
         return text
     unsupported = re.search(

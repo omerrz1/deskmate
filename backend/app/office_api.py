@@ -273,6 +273,7 @@ def _folder_row(request, fid):
 
 
 def _doc_row(request, did):
+    files.flush_sheet_updates()  # show call results that are still waiting to be written into a sheet
     r = db.q1("SELECT * FROM documents WHERE id=?", (did,))
     if not r or not access.can_use_doc(request.state.session, r):
         raise HTTPException(404)

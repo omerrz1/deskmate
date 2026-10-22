@@ -1,6 +1,7 @@
 """Tools the calling agent can use during a live call. Every use is recorded in call_actions so staff see what the agent did."""
 import asyncio
 import json
+import re
 import time
 import datetime as dt
 
@@ -20,8 +21,12 @@ SPECS = {
                        {"email": _S, "preferred_language": _S, "note": _S}, []),
     "log_interest": ("Record how interested the customer is and in which product or service.",
                      {"level": {**_S, "enum": ["hot", "warm", "cold"]}, "item": _S, "note": _S}, ["level"]),
-    "send_information": ("Ask the team to send the customer information (brochure, fees, how to apply) by email, WhatsApp or SMS. Tell them it will come shortly; never claim it has already arrived.",
-                         {"channel": {**_S, "enum": ["email", "whatsapp", "sms"]}, "what": _S}, ["channel", "what"]),
+    "send_information": ("Send the customer the details they asked for YOURSELF, right now, while you are on the call: by text to the phone you are calling (default), WhatsApp, or email. "
+                         "Write the message yourself in `message`: one or two short lines naming the options and including the website link you got from lookup_info. "
+                         "Never say 'the team will send it' or 'someone will send it'. Afterwards tell them it has just been sent and ask them to look at their phone.",
+                         {"channel": {**_S, "enum": ["sms", "whatsapp", "email"], "description": "sms unless they asked for another way"},
+                          "what": {**_S, "description": "what is being sent, e.g. 'business course options'"},
+                          "message": {**_S, "description": "the exact text to send, under 300 characters, with the website link"}}, ["message"]),
     "ask_admin": ("The customer asked something you cannot answer from your facts or lookups, or it needs a decision only a human can make. Use it INSTEAD of guessing: it asks the admin right now while the customer waits on hold. "
                   "First say a short natural hold line like 'Good question, let me check that for you, one sec'. When the answer comes back, give it to the customer in your own words.",
                   {"question": {"type": "string", "description": "the customer's question, clearly"}, "context": {"type": "string", "description": "one line of context (who they are, what they want)"}}, ["question"]),
@@ -172,6 +177,61 @@ def _run(call_id, name, a):
     return "Unknown tool."
 
 
+async def _compose_text(call_id, what):
+    """Only when the caller sent no message of its own: write one from what the company's files and website say."""
+    from . import knowledge, llm
+    hits = await asyncio.wait_for(knowledge.lookup_company(what, call_id=call_id), 6)
+    return (await asyncio.wait_for(llm.complete_text(
+        f"Write one text message of at most 300 characters, no emojis, from {llm.company_name()} giving the person what they asked about, using ONLY these facts. "
+        "Include one website link taken from a 'source:' line if there is one.", f"They asked for: {what}\nFACTS:\n" + "\n---\n".join(hits)[:5000]), 7)).strip()
+
+
+async def _send_information(call_id, args):
+    """The caller sends the details itself during the call. The recipient is always the person on this call (their number, or the email on file), never one the model picked."""
+    from . import messaging, office
+    call = db.q1("SELECT * FROM calls WHERE id=?", (call_id,))
+    contact = (db.q1("SELECT * FROM contacts WHERE id=?", (call["contact_id"],)) if call else None) or {}
+    if not call:
+        return "Unknown call."
+    ch = args.get("channel") if args.get("channel") in ("sms", "whatsapp", "email") else "sms"
+    what = str(args.get("what") or "the details").strip()[:200]
+    if db.q1("SELECT COUNT(*) n FROM call_actions WHERE call_id=? AND kind='information_sent'", (call_id,))["n"] >= 3:
+        return "You have already sent three messages on this call, which is enough. Tell them that is everything for now."
+    text = re.sub(r"[\x00-\x1f]+", " ", str(args.get("message") or "")).strip()[:600]
+    if not text:
+        try:
+            text = re.sub(r"[\x00-\x1f]+", " ", await _compose_text(call_id, what)).strip()[:600]
+        except Exception:
+            text = ""
+    if not text:
+        return "Write the message yourself in `message` (one or two short lines with the website link) and call send_information again."
+    if ch == "email":
+        if not contact.get("email"):
+            return "There is no email on file. Ask for their email address, save it with update_contact, then call send_information again. Offering to text it as well is quicker."
+        agent_id = (db.q1("SELECT agent_id FROM campaigns WHERE id=?", (call["campaign_id"],)) or {}).get("agent_id") or call.get("report_agent_id")
+        try:
+            _eid, state = office.queue_email(agent_id, contact["email"], f"{what[:60]}", text)
+        except Exception:
+            state = "failed"
+        done = state in ("queued", "pending_approval")
+        _act(call, "information_sent" if done else "send_information", {"channel": "email", "what": what, "text": text[:300], "state": state}, status="done" if state == "queued" else "pending")
+        if state == "queued":
+            return "The email is on its way to them now. Tell them to look in their inbox in a minute. Do not read the email aloud."
+        if state == "pending_approval":
+            return "The email is queued and goes out shortly. Tell them it will arrive in a moment."
+        return "I couldn't send the email just now. Say you will make sure it reaches them shortly, and give the key points on the phone."
+    result = await messaging.send(None, ch, contact.get("phone"), text, contact_id=contact.get("id"), call_id=call_id)
+    state = result.get("state")
+    _act(call, "information_sent" if state in ("sent", "waiting_for_approval") else "send_information",
+         {"channel": ch, "what": what, "text": text[:300], "state": state}, status="done" if state == "sent" else "pending")
+    if state == "sent":
+        return "Sent. The message is on its way to their phone now. Tell them it has just been sent and ask them to check their messages. Do not read the message or link aloud."
+    if state == "waiting_for_approval":
+        return "The message is queued and goes out shortly. Tell them it will arrive in a moment."
+    return ("I couldn't send the message just now (for the team: " + str(result.get("message", ""))[:160] + "). Say you will make sure it reaches them shortly, "
+            "and offer to tell them the key points on the phone right now.")
+
+
 async def _search_web(call_id, query):
     """A live lookup while the customer waits: quick (the voice tool times out after ten seconds), snippets only, and clearly marked as untrusted."""
     if not query:
@@ -198,6 +258,8 @@ async def arun(call_id, name, args):
         return await live_help.ask(call_id, args.get("question", ""), args.get("context", ""))
     if name == "search_web":
         return await _search_web(call_id, str(args.get("query") or "").strip()[:200])
+    if name == "send_information":
+        return await _send_information(call_id, args)
     if name == "send_link":
         from . import messaging, voices
         call = db.q1("SELECT * FROM calls WHERE id=?", (call_id,))

@@ -12,7 +12,7 @@ const MODES = [
 ]
 
 // The panel most people want: which voice and which name the caller uses, with a list to choose from.
-function CallerVoice({ profiles, reload, setMsg }) {
+function CallerVoice({ profiles, reload, setMsg, settings, reloadS }) {
   const list = profiles || []
   const [pickId, setPickId] = useState(null)
   const [open, setOpen] = useState(false)
@@ -33,6 +33,14 @@ function CallerVoice({ profiles, reload, setMsg }) {
           onBlur={async (e) => { const v = e.target.value.trim(); if (v !== (prof.agent_name || '') && await save({ agent_name: v })) setMsg('Caller name saved. It applies from the next call.') }} /></label>
         <div className="f" style={{ flex: 2 }}>Voice<div style={{ padding: '8px 0' }}><CurrentVoice voiceId={prof.voice_id} /></div></div>
       </div>
+      <label>Laughs, sighs and soft jokes
+        <select value={settings?.call_expression || 'natural'} onChange={async (e) => { try { await api.put('/settings', { call_expression: e.target.value }); reloadS(); setMsg('Saved. It applies from the next call.') } catch (x) { setMsg(x.message) } }}>
+          <option value="subtle">Subtle: now and then, a few times in a call</option>
+          <option value="natural">Natural (recommended): every few turns, light jokes</option>
+          <option value="lively">Lively: laughs and reacts in most turns</option>
+        </select>
+        <span className="faint">The little laughs, breaths and playful asides that make the voice sound like a person. English calls.</span>
+      </label>
       <div className="actions"><button className="btn" onClick={() => setOpen(!open)}>{open ? 'Close the list' : 'Choose a different voice'}</button></div>
       {open && <VoiceBrowser language={prof.language} currentId={prof.voice_id} onPick={async (v) => {
         if (await save({ voice_id: v.voice_id, agent_name: prof.agent_name || v.name.split(/[ \-–—]/)[0] })) { setOpen(false); setMsg(`Calls now use ${v.name}. It applies from the next call.`) }
@@ -121,7 +129,7 @@ export default function Settings({ embedded = false }) {
         </div>
       </Panel>
 
-      <CallerVoice profiles={profiles} reload={reload} setMsg={setMsg} />
+      <CallerVoice profiles={profiles} reload={reload} setMsg={setMsg} settings={settings} reloadS={reloadS} />
 
       <Panel title="Standing instructions for every call">
         <p className="muted small">Rules every call reads again before it starts, whoever is calling and whatever the campaign: how to speak, what never to say, when to stop. Changes apply from the next call. Campaign and one-off instructions are added to these.</p>

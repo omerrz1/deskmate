@@ -14,7 +14,7 @@ import time
 
 import httpx
 
-from . import chats, db, integrations, llm, voices
+from . import chats, db, eleven_agents, integrations, llm, voices
 
 try:  # the rest of the app works without it; only WhatsApp calling needs it
     import av
@@ -779,7 +779,7 @@ class ElevenEngine:
         elif t == "user_transcript":
             s.say("customer", (ev.get("user_transcription_event") or {}).get("user_transcript", ""))
         elif t == "agent_response":
-            s.say("agent", re.sub(r"\s*\[[a-z ]{3,24}\]\s*", " ", (ev.get("agent_response_event") or {}).get("agent_response", "")).strip())  # the voice acts out [chuckles]; the transcript doesn't show it
+            s.say("agent", eleven_agents.strip_tags((ev.get("agent_response_event") or {}).get("agent_response", "")))  # the voice acts out [chuckles]; the transcript doesn't show it
         elif t == "interruption":
             s.out.clear()
         elif t == "ping":

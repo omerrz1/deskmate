@@ -213,7 +213,7 @@ async def fetch_conversation(conversation_id, wait=25):
         tr = []
         for m in conv.get("transcript", []):
             if m.get("message"):
-                tr.append({"role": "agent" if m["role"] == "agent" else "customer", "text": re.sub(r"\s*\[[a-z ]{3,24}\]\s*", " ", m["message"]).strip(),
+                tr.append({"role": "agent" if m["role"] == "agent" else "customer", "text": strip_tags(m["message"]),
                            "t": float(m.get("time_in_call_secs") or 0), "audio": []})
         return tr, None  # calls are not recorded: only the text is kept
 
@@ -272,12 +272,34 @@ def tuning_for_call(profile):
     return {k: v for k, v in (profile.get("tuning") or {}).items() if k in ("speed", "stability")}
 
 
+# A reaction the voice acts out, written in square brackets: [laughs], [whispers], [sighs, softly]... Never shown in a transcript.
+TAG = re.compile(r"\s*\[[A-Za-z][A-Za-z ,'\-]{2,40}\]\s*")
+
+
+def strip_tags(text):
+    return TAG.sub(" ", text or "").strip()
+
+
+EXPRESSION_LEVELS = {
+    "subtle": "Use one only now and then: a few times in a whole call.",
+    "natural": ("Use one every few turns, wherever it truly fits: after something funny (their joke, or a small one of yours), when you relax or think, "
+                "when you share good news. A light joke or a soft laugh at your own joke is welcome now and then; never forced, never at their expense."),
+    "lively": "Use one in most turns: laugh easily, joke lightly, react out loud to what they say.",
+}
+
+
 def tags_guide(profile):
-    """The call prompt already sets the short, natural style; this adds the one thing only the ElevenLabs voice can do: act out a few tags."""
+    """What only the ElevenLabs voice can do: act out laughs, sighs, breaths and soft asides, which is what makes a call sound alive. How often is a setting."""
     if llm.lang_code(profile.get("language")) != "en":
         return ""
-    return ("\nEXPRESSION: the voice acts out a few square-bracket tags. Use [chuckles] or [laughs softly] when something is genuinely light, [sighs] for a small human moment, "
-            "[slow] when you give a number or a detail. Only now and then, never in your first or last line, and never read a tag aloud.")
+    from . import voices
+    level = voices.get_setting("call_expression", "natural")
+    return ("\nREACTIONS: your voice acts out reactions written in square brackets just before the words they colour, and they are what makes you sound like a person, so use them. "
+            "Laughter and amusement: [laughs], [chuckles], [laughs softly], [giggles]. Breath and small human moments: [sighs], [exhales]. "
+            "A playful aside, or a joke said just between the two of you: [whispers] for a few words only, warm and light, never low or creepy, then straight back to your normal voice. "
+            "Good news: [excited]. Slower for a detail: [slow]. " + EXPRESSION_LEVELS.get(level, EXPRESSION_LEVELS["natural"]) + " "
+            "Rules: a tag colours only the next few words, so keep it short; never whisper a whole sentence or anything important; one tag at a time, no stacking; "
+            "none in your very first hello, and none while you say a number, price, address or link; never laugh at something sad or serious or when they are upset; never read a tag aloud.")
 
 
 async def warm_agents():

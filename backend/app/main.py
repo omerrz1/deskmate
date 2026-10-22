@@ -1641,6 +1641,7 @@ def settings_get():
             "english_only": voices.english_only(),
             "main_link": voices.get_setting("main_link", ""),
             "call_instructions": voices.get_setting("call_instructions", ""),
+            "call_expression": voices.get_setting("call_expression", "natural"),
             "transcript_retention_days": int(voices.get_setting("transcript_retention_days", "0") or 0)}
 
 
@@ -1652,6 +1653,7 @@ class SettingsIn(BaseModel):
     english_only: Optional[bool] = None
     main_link: Optional[str] = None
     call_instructions: Optional[str] = None
+    call_expression: Optional[str] = None
     max_concurrent_calls: Optional[int] = None
 
 
@@ -1670,6 +1672,10 @@ def settings_put(s: SettingsIn, request: Request):
         if link and not re.match(r"^https?://[^\s]{4,300}$", link):
             raise HTTPException(400, "Enter a full link starting with https://")
         voices.set_setting("main_link", link)
+    if s.call_expression is not None:
+        if s.call_expression not in ("subtle", "natural", "lively"):
+            raise HTTPException(400, "call_expression must be subtle, natural or lively")
+        voices.set_setting("call_expression", s.call_expression)
     if s.call_instructions is not None:
         voices.set_setting("call_instructions", s.call_instructions.strip()[:4000])
     if s.english_only is not None:

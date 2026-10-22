@@ -1266,3 +1266,54 @@ class SmarterWhereItMattersTests(unittest.TestCase):
         self.assertEqual(runtime.employees().model.model_name(mock.Mock(kind="admin_chat")), llm.EMPLOYEE_MODEL)
         self.assertEqual(runtime.employees().model.model_name(mock.Mock(kind="work")), llm.CHEAP_MODEL)
         self.assertEqual(admin_agent.COPILOT.model.model_name(mock.Mock(kind="copilot")), llm.EMPLOYEE_MODEL)
+
+
+class RealisticReactionsTests(unittest.IsolatedAsyncioTestCase):
+    """The laughs, sighs and soft asides are what make the voice sound alive: encouraged, adjustable, and never shown in a transcript."""
+
+    def guide(self, level=None):
+        with mock.patch.object(voices, "get_setting", side_effect=lambda k, d=None: level or d):
+            return eleven_agents.tags_guide({"language": "English"})
+
+    def test_the_brief_asks_for_laughs_sighs_breaths_and_soft_asides_without_creepy_whispering(self):
+        text = self.guide()
+        for needle in ("[laughs]", "[chuckles]", "[giggles]", "[sighs]", "[exhales]", "[whispers]", "[excited]", "never low or creepy", "few words only",
+                       "A light joke or a soft laugh at your own joke is welcome", "never read a tag aloud"):
+            self.assertIn(needle, text)
+        self.assertIn("none in your very first hello, and none while you say a number, price, address or link", text)
+        self.assertNotIn("only now and then, never in your first or last line", text)  # the old, much shyer wording
+
+    def test_how_often_it_reacts_is_a_setting(self):
+        self.assertIn("a few times in a whole call", self.guide("subtle"))
+        self.assertIn("every few turns", self.guide("natural"))
+        self.assertIn("most turns", self.guide("lively"))
+        self.assertIn("every few turns", self.guide("something-else"))  # unknown values fall back to the default
+        self.assertEqual(eleven_agents.tags_guide({"language": "Arabic"}), "")  # tags are only written into English calls
+
+    def test_reactions_never_appear_in_a_transcript(self):
+        self.assertEqual(eleven_agents.strip_tags("Oh [laughs softly] that's brilliant! [whispers, playfully] between us, I love biryani too."),
+                         "Oh that's brilliant! between us, I love biryani too.")
+        self.assertEqual(eleven_agents.strip_tags("Hi [sighs]."), "Hi .")
+        self.assertEqual(eleven_agents.strip_tags("Pay [10] pounds [x]"), "Pay [10] pounds [x]")  # square brackets that are not reactions stay
+
+    async def test_the_live_call_transcript_is_clean_while_the_voice_still_gets_the_tags(self):
+        said = []
+        engine = wa_call.ElevenEngine(mock.Mock(say=lambda who, text: said.append((who, text))), "wss://x", "prompt", "Hi", "en", "A" * 20, {})
+        await engine._event({"type": "agent_response", "agent_response_event": {"agent_response": "Ha, [chuckles] salmon burger, lovely! [whispers] my favourite too."}})
+        self.assertEqual(said, [("agent", "Ha, salmon burger, lovely! my favourite too.")])
+
+
+class ExpressionSettingTests(CallReportBase):
+    async def test_the_expressiveness_setting_is_saved_and_checked(self):
+        st, r = await self.owner.put("/api/settings", {"call_expression": "lively"})
+        self.assertEqual((st, r["call_expression"]), (200, "lively"))
+        st, _ = await self.owner.put("/api/settings", {"call_expression": "wild"})
+        self.assertEqual(st, 400)
+        with db.use(self.ws):
+            self.assertIn("most turns", eleven_agents.tags_guide({"language": "English"}))
+
+    async def test_the_call_style_welcomes_light_humour(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            row, contact, camp = callengine.call_context(self.make_call(mid, aid))
+            self.assertIn("a light joke or an easy laugh when the moment allows", callengine.system_prompt(row, contact, camp, realtime=True, external=True))

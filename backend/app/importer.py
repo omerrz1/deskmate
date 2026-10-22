@@ -100,13 +100,15 @@ def import_rows(dataset_name, filename, header, body, mapping, source_doc_id=Non
                    (dataset_name, filename, json.dumps(header), 0, db.now(), source_doc_id))
     mapped_cols = set(mapping.values())
     rows, skipped = [], 0
-    for r in body:
+    for source_row, r in enumerate(body, 1):
         g = lambda f: r.get(mapping[f], "") if f in mapping else ""
         name, phone = g("name"), norm_phone(g("phone"))
         if not name and not phone:
             skipped += 1
             continue
         extra = {k: v for k, v in r.items() if k not in mapped_cols and v != ""}
+        if source_doc_id:
+            extra["__source_row"] = source_row
         sheet_lang = norm_lang(g("language")) if g("language") else ""
         lang, src = voices.choose_language(phone, sheet_lang)
         info = countries.lookup(phone)

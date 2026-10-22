@@ -30,6 +30,7 @@ export default function TeamChat() {
   const abort = useRef(null)
   const lock = useRef(false)
   const bottom = useRef(null)
+  const uploadLock = useRef(false)
   const picker = useRef(null)
   const composer = useRef(null)
   useEffect(() => { if (composer.current) { composer.current.style.height = 'auto'; composer.current.style.height = `${Math.min(240, Math.max(112, composer.current.scrollHeight))}px` } }, [text, room?.id])
@@ -61,7 +62,7 @@ export default function TeamChat() {
   async function send(e) {
     e.preventDefault()
     const message = text.trim()
-    if (!message || !room || lock.current) return
+    if (!message || !room || lock.current || uploadLock.current) return
     lock.current = true; setBusy(true); setText(''); setError(''); abort.current = new AbortController()
     setRoom((r) => ({ ...r, messages: [...r.messages, { id: `u-${Date.now()}`, role: 'admin', text: message }] }))
     try {
@@ -78,7 +79,8 @@ export default function TeamChat() {
     finally { lock.current = false; setBusy(false); setPartial(null) }
   }
   async function upload(list) {
-    if (!list?.length || !room || uploading) return
+    if (!list?.length || !room || uploadLock.current || room.status === 'ended') return
+    uploadLock.current = true
     setUploading(true); setError('')
     try {
       for (const file of Array.from(list)) {
@@ -88,7 +90,7 @@ export default function TeamChat() {
       }
       await refreshRoom()
     } catch (e) { setError(e.message) }
-    finally { setUploading(false); if (picker.current) picker.current.value = '' }
+    finally { uploadLock.current = false; setUploading(false); if (picker.current) picker.current.value = '' }
   }
   async function download(docId) {
     try {
@@ -115,7 +117,7 @@ export default function TeamChat() {
         </div>
         <button className="tc-create-link" onClick={() => { setSelected([]); setParams({}) }}>＋ <span>Start a new chat</span></button>
       </aside>
-      <section className="team-chat-room">
+      <section className="team-chat-room" onDragOver={e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault() }} onDrop={e => { if (e.dataTransfer.files.length) { e.preventDefault(); upload(e.dataTransfer.files) } }}>
         {!room && error && <div className="tc-error" role="alert">{error}</div>}
         {!id ? <div className="tc-new-room"><span className="tc-eyebrow">NEW CONVERSATION</span><h2>Who would you like to chat with?</h2><p>Pick one or more teammates. You can share files in the conversation.</p>
           <div className="tc-agent-picker">{(agents || []).map((a) => <label key={a.id} className={selected.includes(a.id) ? 'picked' : ''}><input type="checkbox" checked={selected.includes(a.id)} disabled={!selected.includes(a.id) && selected.length >= 6} onChange={(e) => setSelected((s) => e.target.checked ? [...s, a.id] : s.filter((i) => i !== a.id))} /><Avatar agent={a} size={36} /><span><b>{a.name}</b><small>{a.role}</small></span><i>{selected.includes(a.id) ? '✓' : ''}</i></label>)}</div>
@@ -129,7 +131,7 @@ export default function TeamChat() {
               {m.role !== 'admin' && <Avatar agent={room.agents.find((a) => a.id === m.agent_id)} size={28}/>}
               <div className="tc-bubble-wrap"><div className="tc-meta"><b>{m.role === 'admin' ? 'You' : who(m.agent_id)}</b><time>{stamp(m.created_at) || (i === room.messages.length - 1 ? 'Now' : '')}</time></div>
                 {m.text && <div className="tc-bubble">{m.text}</div>}
-                {m.attachments?.length > 0 && <div className="tc-files">{m.attachments.map((f) => <button className="tc-file" key={f.doc_id} onClick={() => download(f.doc_id)}><span className="tc-file-icon">↧</span><span className="tc-file-info"><b>{f.title}</b><small>{(f.kind || 'file').toUpperCase()} · {f.size ? `${Math.max(1, Math.round(f.size / 1024))} KB` : 'Shared file'}</small></span><span className="tc-file-download">↓</span></button>)}</div>}
+                {m.attachments?.length > 0 && <div className="tc-files">{m.attachments.map((f) => <button className="tc-file" key={f.doc_id} onClick={() => download(f.doc_id)}><span className="tc-file-icon">↧</span><span className="tc-file-info"><b>{f.title}</b><small>{(f.kind || 'file').toUpperCase()} · {f.size ? `${Math.max(1, Math.round(f.size / 1024))} KB` : 'Shared file'}{f.saved_in ? ` · Saved in ${f.saved_in}` : ''}</small></span><span className="tc-file-download">↓</span></button>)}</div>}
               </div>
             </article>)}
             {partial && <article className="tc-message"><Avatar agent={room.agents.find((a) => a.id === partial.agent_id)} size={28}/><div className="tc-bubble-wrap"><div className="tc-meta"><b>{who(partial.agent_id)}</b></div><div className="tc-bubble">{partial.text || <span className="tc-typing"><i/><i/><i/> {partial.status}…</span>}</div></div></article>}
@@ -137,7 +139,7 @@ export default function TeamChat() {
           </div>
           {error && <div className="tc-error" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss">×</button></div>}
           <form className="tc-compose" onSubmit={send}><div className="tc-compose-box"><textarea ref={composer} aria-label="Message your teammates" placeholder={room.status === 'ended' ? 'This chat has ended' : 'Write a message…'} value={text} onChange={(e) => setText(e.target.value)} rows={4} maxLength={4000} disabled={room.status === 'ended'} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form.requestSubmit() } }}/>
-            <div className="tc-compose-actions"><input ref={picker} type="file" multiple accept=".pdf,.txt,.md,.json,.csv,.xlsx,.xls" hidden onChange={(e) => upload(e.target.files)}/><button type="button" className="tc-attach" onClick={() => picker.current?.click()} disabled={uploading || room.status === 'ended'} title="Attach a file">{uploading ? '…' : '＋'} <span>{uploading ? 'Uploading' : 'Attach'}</span></button><span className="tc-hint">{text.length > 3500 ? `${text.length}/4000 · ` : ''}Enter to send · Shift + Enter for a new line</span><button className="tc-send" disabled={busy || !text.trim() || room.status === 'ended'} aria-label="Send message">↑</button></div>
+            <div className="tc-compose-actions"><input ref={picker} type="file" multiple accept=".pdf,.docx,.txt,.md,.json,.csv,.xlsx,.xls" hidden onChange={(e) => upload(e.target.files)}/><button type="button" className="tc-attach" onClick={() => picker.current?.click()} disabled={uploading || room.status === 'ended'} title="Attach a file">{uploading ? '…' : '＋'} <span>{uploading ? 'Saving files…' : 'Attach'}</span></button><span className="tc-hint">{text.length > 3500 ? `${text.length}/4000 · ` : ''}Drop files here · Saved on teammates’ computers</span><button className="tc-send" disabled={busy || uploading || !text.trim() || room.status === 'ended'} aria-label="Send message">↑</button></div>
           </div></form>
         </>}
       </section>

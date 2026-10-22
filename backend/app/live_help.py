@@ -48,8 +48,6 @@ async def ask(call_id, question, context=""):
     while time.time() < deadline:
         row = db.q1("SELECT * FROM live_questions WHERE id=?", (qid,))
         if row["status"] == "answered":
-            if row["remember"]:
-                discuss.remember_answer(row["question"], row["answer"], agent_id, (db.q1("SELECT kb_id FROM campaigns WHERE id=?", (call.get("campaign_id"),)) or {}).get("kb_id") if call.get("campaign_id") else None)
             return f"The admin says: {row['answer']}\nGive this to the customer now in your own words, short and natural. Thank them for waiting."
         if row["status"] == "declined":
             break

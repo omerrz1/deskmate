@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { api, apiFetch, usePoll } from '../../api'
+import { api, usePoll } from '../../api'
 import { useConfirm } from '../../Feedback'
+import VoiceTest from '../../VoiceTest'
 
-const VOICES = ['marin', 'cedar', 'coral', 'sage', 'ballad', 'verse', 'ash', 'alloy', 'echo', 'shimmer', 'nova', 'onyx', 'fable']
+const VOICES = ['marin', 'cedar', 'coral', 'sage', 'ballad', 'verse', 'ash', 'alloy', 'echo', 'shimmer']
 const COLORS = ['#fe5011', '#221d1b', '#8fb3c6', '#c45423', '#12806f', '#7c4a8b', '#d4a373', '#4f6d5a']
 
 export default function AgentSettings({ a, reload }) {
@@ -24,11 +25,6 @@ export default function AgentSettings({ a, reload }) {
   const guard = async (name, fn) => { setMsg(''); setBusy(name); try { await fn() } catch (e) { setMsg(e.message) } setBusy('') }
 
   const save = () => guard('save', async () => { await api.patch(`/agents/${a.id}`, f); setMsg('Saved.'); reload() })
-  const preview = () => guard('voice', async () => {
-    const r = await apiFetch(`/api/agents/${a.id}/speak`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: `Hi, I'm ${f.name}. This is how I sound in meetings.` }) })
-    if (!r.ok) throw new Error('Could not play the voice')
-    new Audio(URL.createObjectURL(await r.blob())).play()
-  })
   const saveMail = () => guard('mail', async () => {
     const r = await api.put(`/agents/${a.id}/mail`, mail); setMail({ ...mail, password: '' }); setTest(r.test); reload()
     setMsg(r.test?.ok ? 'Email is working.' : 'Saved. See the test result below.')
@@ -74,8 +70,10 @@ export default function AgentSettings({ a, reload }) {
             <div className="f">Colour<div className="swatches">{COLORS.map((c) => <button key={c} className={`swatch ${f.color === c ? 'on' : ''}`} style={{ background: c }} onClick={() => setF({ ...f, color: c })} aria-label={c} />)}</div></div>
           </div>
         </details>
-        <div className="actions"><button className="btn solid" disabled={!!busy} onClick={save}>Save</button><button className="btn" onClick={preview}>Hear their voice</button></div>
+        <div className="actions"><button className="btn solid" disabled={!!busy} onClick={save}>Save</button></div>
       </section>
+
+      <VoiceTest voice={f.openai_voice} />
 
       <Sec title="Manager">
         <label className="check"><input type="checkbox" checked={!!a.is_manager} onChange={(e) => setManager(e.target.checked)} /> {a.name} is a manager (runs the others and can do what you can)</label>

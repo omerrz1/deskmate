@@ -188,3 +188,9 @@
 .ox-shot { position: relative; background: #f4f3f1; line-height: 0; } .ox-shot img { width: 100%; height: auto; display: block; animation: fade .25s both; }
 .ox-ring { position: absolute; width: 38px; height: 38px; margin: -19px 0 0 -19px; border-radius: 50%; border: 3px solid #e5383b; background: rgba(229,56,59,.16); animation: oxRing 1.4s ease-out 2; pointer-events: none; }
 @keyframes oxRing { from { transform: scale(.4); opacity: 1; } to { transform: scale(1.5); opacity: 0; } }
+
+/* Keep the embedded desktop and its controls inside the available viewport. */
+.ox { min-width: 0; max-width: 100%; height: clamp(320px, calc(100dvh - 236px), 900px); }
+.ox-dock { overflow-x: auto; overflow-y: hidden; }
+.ox-wbody, .ox-fill { min-width: 0; max-width: 100%; }
+.ox-menu .app { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

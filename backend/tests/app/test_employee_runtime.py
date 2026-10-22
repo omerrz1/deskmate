@@ -56,7 +56,7 @@ class Base(unittest.IsolatedAsyncioTestCase):
         team.set_manager(cls.mia, True)
         db.update("agents", cls.ben, caps_off=json.dumps(["files"]))
         cls.meeting = agents.start_meeting([cls.ava, cls.ben], "Weekly")
-        agents.log_line(cls.meeting, "admin", None, "Please prepare the quarterly summary for Friday.")
+        agents.log_line(cls.meeting, "admin", None, "Please prepare the quarterly summary after the meeting.")
         cls.urgent = agents.start_meeting([cls.ava, cls.mia], "Urgent")
         agents.log_line(cls.urgent, "admin", None, "Write the summary document right now please")
 
@@ -181,7 +181,7 @@ class RuleTests(Base):
         r, _ = await agents.run_agent_tool({**self.agent(self.ava), "is_manager": 0}, "approve_message", {"id": 1})
         self.assertIn("error", r)
 
-    async def test_in_a_meeting_heavy_work_goes_on_the_to_do_list_unless_the_admin_says_now(self):
+    async def test_explicit_after_meeting_instruction_defers_work_until_now(self):
         before = len(activity(self.ava))
         events, client = await self.play(self.ava, [use("create_document", '{"title": "Q", "body": "b"}'), say("ok")], "group", meeting_id=self.meeting)
         self.assertFalse(tool_results(events)[0]["ok"])

@@ -7,6 +7,7 @@ import time
 from . import capabilities, db, files, office, voices
 
 for stmt in (
+    "CREATE TABLE IF NOT EXISTS project_briefs(source_doc_id INTEGER PRIMARY KEY, project_id INTEGER, brief_doc_id INTEGER, original_title TEXT, created_at REAL)",
     "CREATE TABLE IF NOT EXISTS projects(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, goal TEXT DEFAULT '', status TEXT DEFAULT 'active', created_by INTEGER DEFAULT 0, created_at REAL)",
     "CREATE TABLE IF NOT EXISTS project_members(project_id INTEGER, agent_id INTEGER, role TEXT DEFAULT 'member', joined_at REAL, PRIMARY KEY(project_id, agent_id))",
     "CREATE TABLE IF NOT EXISTS project_updates(id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER, agent_id INTEGER, text TEXT, ts REAL)",
@@ -55,6 +56,9 @@ def _ancestors(fid):
 def can_access_doc(agent, doc):
     if agent is None:
         return can_use_owner(None, doc["agent_id"])
+    # Company employees may read other employee drives; write ownership stays separate.
+    if files.owner_kind(doc["agent_id"]) == "agent":
+        return True
     if can_use_owner(agent, doc["agent_id"]):
         return True
     aid = agent["id"]
@@ -138,7 +142,9 @@ MANAGER_TOOLS = [
 ]
 ALL = TOOLS + MANAGER_TOOLS
 NAMES = {t["name"] for t in ALL}
-SETTING_KEYS = {"voice_engine": ("openai", "elevenlabs"), "english_only": ("true", "false"), "email_policy": ("approve", "auto"), "main_link": None, "calls_enabled": ("true", "false"),
+SETTING_KEYS = {
+    "max_concurrent_calls": "int:1:100",
+    "voice_engine": ("openai", "elevenlabs"), "english_only": ("true", "false"), "email_policy": ("approve", "auto"), "main_link": None, "calls_enabled": ("true", "false"),
                 "messaging_policy": ("approve", "auto"), "transcript_retention_days": "int:0:3650", "live_question_timeout": "int:20:240", "discuss_email": ("true", "false"), "admin_phone": None}
 _BOOL_SETTINGS = {"english_only", "calls_enabled", "discuss_email"}
 

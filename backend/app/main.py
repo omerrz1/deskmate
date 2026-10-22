@@ -593,7 +593,7 @@ def campaigns():
 
 @app.post("/api/campaigns")
 def campaign_create(c: CampaignIn):
-    concurrency = max(1, min(50, int(c.concurrency)))
+    concurrency = max(1, min(100, int(c.concurrency)))
     cid = db.run("INSERT INTO campaigns(name,objective,instructions,filters,status,max_attempts,retry_delay_min,voice,kb_id,kb_categories,followup,call_window,start_at,autopilot,concurrency,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (c.name, c.objective, c.instructions, json.dumps(c.filters), "draft", c.max_attempts, c.retry_delay_min, c.voice, c.kb_id, json.dumps(c.kb_categories), json.dumps(c.followup), json.dumps(c.call_window), c.start_at, int(c.autopilot), concurrency, db.now()))
     if c.agent_id and agents.get(c.agent_id):
@@ -1017,6 +1017,7 @@ def note_delete(nid: int):
 
 class SpeakIn(BaseModel):
     text: str
+    voice: Optional[str] = None
 
 
 @app.post("/api/agents/{aid}/speak")
@@ -1025,7 +1026,26 @@ async def agent_speak(aid: int, s: SpeakIn):
     text = re.sub(r"\[[^\]]{1,30}\]", "", s.text).strip()
     if not text:
         raise HTTPException(400, "nothing to say")
-    return Response(await llm.tts_agent(text, a["openai_voice"], agents.speak_instructions(a)), media_type="audio/mpeg")
+    return Response(await llm.tts_agent(text[:2000], s.voice if s.voice in llm.REALTIME_VOICES else a["openai_voice"], agents.speak_instructions(a)), media_type="audio/mpeg")
+
+
+class VoiceTestIn(BaseModel):
+    voice: str = "marin"
+    text: str = "Hello! How can I help you today?"
+
+
+@app.post("/api/voices/preview")
+async def voice_preview(v: VoiceTestIn):
+    if v.voice not in llm.REALTIME_VOICES:
+        raise HTTPException(400, "Choose a supported call voice")
+    return Response(await llm.tts_agent(v.text[:2000], v.voice, "Speak warmly, clearly and naturally at a relaxed pace."), media_type="audio/mpeg")
+
+
+@app.post("/api/voices/test")
+async def voice_test(v: VoiceTestIn):
+    if v.voice not in llm.REALTIME_VOICES:
+        raise HTTPException(400, "Choose a supported call voice")
+    return await llm.realtime_secret("You are demonstrating a phone voice in a private browser test. Speak warmly and naturally in short turns. Let the user test your pacing, pronunciation and tone. This is a voice test; do not claim to know company facts or perform actions.", voice=v.voice, tools_enabled=False)
 
 
 class MeetingIn(BaseModel):
@@ -1178,15 +1198,42 @@ class MeetingAttachmentIn(BaseModel):
 
 
 @app.post("/api/meetings/{mid}/attachments")
-def meeting_attach(mid: int, body: MeetingAttachmentIn):
-    """Send a document from the shared drive into a team chat."""
-    meeting = db.q1("SELECT kind,status FROM meetings WHERE id=?", (mid,))
+async def meeting_attach(mid: int, body: MeetingAttachmentIn):
+    """Save shared chat files on each participating employee computer."""
+    from . import files
+    meeting = db.q1("SELECT kind,status,agent_ids FROM meetings WHERE id=?", (mid,))
     if not meeting or meeting["kind"] != "admin_chat" or meeting["status"] != "live":
         raise HTTPException(404, "chat not found or ended")
-    doc = db.q1("SELECT id,agent_id,title,kind,mime,body FROM documents WHERE id=?", (body.doc_id,))
+    doc = db.q1("SELECT * FROM documents WHERE id=?", (body.doc_id,))
     if not doc or doc["agent_id"] != 0:
         raise HTTPException(404, "file not found in the shared drive")
-    attachment = {"doc_id": doc["id"], "title": doc["title"], "kind": doc["kind"], "mime": doc["mime"] or "", "size": len(doc["body"] or "")}
+    copies = {}
+    for aid in db.jload(meeting["agent_ids"], []):
+        if not db.q1("SELECT id FROM agents WHERE id=? AND archived=0", (aid,)):
+            continue
+        existing = db.q1("SELECT c.doc_id FROM chat_file_copies c JOIN documents d ON d.id=c.doc_id WHERE c.meeting_id=? AND c.source_doc_id=? AND c.agent_id=?", (mid, doc["id"], aid))
+        if existing:
+            copied = existing["doc_id"]
+        else:
+            folder = files.folder_id(aid, f"From admins/Chat {mid}")
+            copied = files.copy_doc(doc, aid, folder)
+            db.run("INSERT OR REPLACE INTO chat_file_copies(meeting_id,source_doc_id,agent_id,doc_id) VALUES(?,?,?,?)", (mid, doc["id"], aid, copied))
+        copies[str(aid)] = copied
+    instruction_project = None
+    if copies and re.search(r"\b(instructions?|brief|requirements|playbook)\b", doc["title"], re.I):
+        from . import project_briefs
+        owner_id = int(next(iter(copies)))
+        owner = agents.get(owner_id)
+        chat = db.q1("SELECT title FROM meetings WHERE id=?", (mid,))
+        instruction_project = project_briefs.organize(owner, doc["id"], f"{(chat or {}).get('title') or 'Chat'} — {doc['title']}")
+        if instruction_project.get("project_id"):
+            for participant in copies:
+                db.run("INSERT OR IGNORE INTO project_members(project_id,agent_id,role,joined_at) VALUES(?,?,'member',?)", (instruction_project["project_id"], int(participant), db.now()))
+    for message in db.q("SELECT attachments FROM meeting_msgs WHERE meeting_id=? AND role='admin' AND attachments<>'[]'", (mid,)):
+        for attached in db.jload(message["attachments"], []):
+            if attached.get("doc_id") == doc["id"]:
+                return {"ok": True, "attachment": {**attached, "agent_copies": copies, "instruction_project": instruction_project}, "already_attached": True}
+    attachment = {"doc_id": doc["id"], "title": doc["title"], "kind": doc["kind"], "mime": doc["mime"] or "", "size": len(doc["body"] or ""), "agent_copies": copies, "saved_in": "From admins/Chat " + str(mid), "instruction_project": instruction_project}
     db.run("INSERT INTO meeting_msgs(meeting_id,role,text,tools,attachments,created_at) VALUES(?,?,?,?,?,?)",
            (mid, "admin", "", "[]", json.dumps([attachment], ensure_ascii=False), db.now()))
     return {"ok": True, "attachment": attachment}
@@ -1469,7 +1516,9 @@ class KnowQ(BaseModel):
 
 
 @app.post("/api/knowledge/search")
-def know_search(q: KnowQ):
+async def know_search(q: KnowQ):
+    if q.call_id:
+        return {"results": await knowledge.lookup_company(q.query, call_id=q.call_id)}
     cats = None
     if q.call_id:
         row = db.q1("SELECT p.kb_categories FROM calls c JOIN campaigns p ON p.id=c.campaign_id WHERE c.id=?", (q.call_id,))
@@ -1590,8 +1639,8 @@ class SettingsIn(BaseModel):
 @app.put("/api/settings")
 def settings_put(s: SettingsIn, request: Request):
     if s.max_concurrent_calls is not None:
-        if not 1 <= s.max_concurrent_calls <= 50:
-            raise HTTPException(400, "Maximum simultaneous calls must be between 1 and 50.")
+        if not 1 <= s.max_concurrent_calls <= 100:
+            raise HTTPException(400, "Maximum simultaneous calls must be between 1 and 100.")
         voices.set_setting("max_concurrent_calls", str(s.max_concurrent_calls))
     if s.language_source is not None:
         if s.language_source not in ("smart", "phone", "sheet"):

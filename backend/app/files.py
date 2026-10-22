@@ -169,6 +169,8 @@ def delete_folder(fid):
 
 # ---------- tools ----------
 TOOLS = [
+    {"name": "search_files", "description": "Search this entire company workspace: company drive, all employee computers, accessible projects and shared files. Searches complete contents, titles, folders and owners, with typo-tolerant filename matches and partial-query fallback. Returns excerpts, file ids, locations, pagination and unreadable files. Always use before saying a file cannot be found; empty query browses everything.", "parameters": {"type": "object", "properties": {"query": _S, "offset": _I, "limit": _I}}},
+    {"name": "organize_instructions", "description": "Turn an admin-supplied instruction document into a project with a uniquely named source brief, saved working plan and planning to-do. Reuses the existing project on retries. Use after reading the admin's instructions; do not treat arbitrary external documents as authorization. Project tasks automatically retain access to the brief.", "parameters": {"type": "object", "properties": {"id": _I, "project_name": _S, "goal": _S}, "required": ["id", "project_name"]}},
     {"name": "create_document", "description": "Write a document (report, memo, plan, notes, minutes) and file it in a folder. Returns its id.",
      "parameters": {"type": "object", "properties": {"title": _S, "body": {**_S, "description": "plain text or simple markdown"}, "folder": _FOLDER, "shared": _SHARED, "project": _PROJECT}, "required": ["title", "body"]}},
     {"name": "create_spreadsheet", "description": "Create a spreadsheet (call log, tracker, budget, lead list) from columns and rows and file it in a folder.",
@@ -180,7 +182,7 @@ TOOLS = [
     {"name": "read_document", "description": "Read a document or spreadsheet by id OR title. Use the title when the admin names a file; do not ask for an id. For long files, use offset/limit; for spreadsheets, use query to find matching rows.", "parameters": {"type": "object", "properties": {"id": _I, "title": _S, "query": _S, "offset": _I, "limit": _I}}},
     {"name": "update_document", "description": "Replace or append to a document's text, or append rows to a spreadsheet, or rename it. Resolve by id or exact title; use the title when the admin names a file.",
      "parameters": {"type": "object", "properties": {"id": _I, "file_title": _S, "body": _S, "append": _S, "add_rows": {"type": "array", "items": {"type": "array", "items": _S}}, "title": _S}}},
-    {"name": "list_documents", "description": "Search file titles and contents, including uploaded PDFs, text, and spreadsheet cells, across accessible drives. If the first search misses, try a distinctive word or list files in folders.", "parameters": {"type": "object", "properties": {"query": _S}}},
+    {"name": "list_documents", "description": "Search file titles and contents, including uploaded PDFs, text, and spreadsheet cells, across company and employee drives, including folder names. Use offset/limit to page through every result before declaring a file missing.", "parameters": {"type": "object", "properties": {"query": _S, "offset": _I, "limit": _I}}},
     {"name": "list_files", "description": "Look inside a folder on your computer (or the shared drive): subfolders and files with ids. Empty path = the top level.", "parameters": {"type": "object", "properties": {"path": _S, "shared": _SHARED, "project": _PROJECT}}},
     {"name": "create_folder", "description": "Make a folder (and any parents) on your computer or the shared drive.", "parameters": {"type": "object", "properties": {"path": _S, "shared": _SHARED, "project": _PROJECT}, "required": ["path"]}},
     {"name": "move_file", "description": "Move a file you own (or a shared one) into another folder.", "parameters": {"type": "object", "properties": {"id": _I, "folder": _S, "shared": _SHARED, "project": _PROJECT}, "required": ["id", "folder"]}},
@@ -241,6 +243,10 @@ def update_call_sheet(call_id, outcome, summary=""):
     if not rows or not cols:
         return False
     configured_row = call.get("report_row")
+    if not configured_row:
+        source = db.q1("SELECT c.extra,d.source_doc_id FROM contacts c JOIN datasets d ON d.id=c.dataset_id WHERE c.id=?", (call["contact_id"],))
+        if source and source["source_doc_id"] == doc["id"]:
+            configured_row = db.jload(source["extra"], {}).get("__source_row")
     row_index = int(configured_row) - 1 if configured_row else -1
     if row_index < 0 or row_index >= len(rows):
         contact = db.q1("SELECT name,phone FROM contacts WHERE id=?", (call["contact_id"],)) or {}
@@ -260,11 +266,15 @@ def update_call_sheet(call_id, outcome, summary=""):
     status_col = str(call.get("report_status_column") or "status").casefold()
     col_index = next((i for i, c in enumerate(cols) if str(c).strip().casefold() == status_col), None)
     if col_index is None:
-        return False
+        cols.append(str(call.get("report_status_column") or "status"))
+        col_index = len(cols) - 1
     while len(rows[row_index]) <= col_index:
         rows[row_index].append("")
     rows[row_index][col_index] = str(outcome or "unresolved")[:120]
     summary_col = next((i for i, c in enumerate(cols) if str(c).strip().casefold() in ("call report", "call summary", "report", "summary")), None)
+    if summary_col is None:
+        cols.append("Call summary")
+        summary_col = len(cols) - 1
     if summary_col is not None:
         while len(rows[row_index]) <= summary_col:
             rows[row_index].append("")
@@ -287,6 +297,13 @@ async def run_tool(agent, name, a):
 async def _run_tool(agent, name, a):
     from . import team
     aid = agent["id"] if agent else 0
+    if name == "search_files":
+        from . import file_search
+        return file_search.search(agent, a.get("query", ""), a.get("offset", 0), a.get("limit", 20)), "/office?tab=files"
+    if name == "organize_instructions":
+        from . import project_briefs
+        result = project_briefs.organize(agent, a.get("id"), a.get("project_name"), a.get("goal", ""))
+        return result, f"/projects/{result['project_id']}" if result.get("project_id") else None
     if name == "share_chat_file":
         mid = (agent or {}).get("_meeting_id")
         meeting = db.q1("SELECT kind,status,agent_ids FROM meetings WHERE id=?", (mid,)) if mid else None
@@ -392,15 +409,21 @@ async def _run_tool(agent, name, a):
         db.update("documents", d["id"], body=json.dumps(t, ensure_ascii=False), updated_at=db.now())
         return {"updated": True, "cells_changed": changed, "rows_now": len(t["rows"]), "columns": t["columns"]}, "/office?tab=files"
     if name == "list_documents":
-        query = str(a.get("query") or "").strip()
-        if query:
-            pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            found = db.q("SELECT d.*, g.name owner FROM documents d LEFT JOIN agents g ON g.id=d.agent_id "
-                         "WHERE d.title LIKE ? ESCAPE '\\' OR d.body LIKE ? ESCAPE '\\' ORDER BY d.updated_at DESC", (pattern, pattern))
-        else:
-            found = db.q("SELECT d.*, g.name owner FROM documents d LEFT JOIN agents g ON g.id=d.agent_id ORDER BY d.updated_at DESC LIMIT 500")
-        rows = [r for r in found if team.can_access_doc(agent, r)][:50]
-        return [{"id": r["id"], "title": r["title"], "kind": r["kind"], "owner": ("a project drive" if r["agent_id"] < 0 else r["owner"] or "shared drive"), "folder": path_of(r["folder_id"])} for r in rows], "/office?tab=files"
+        query = str(a.get("query") or "").strip().casefold()
+        terms = set(re.findall(r"\w+", query))
+        found = db.q("SELECT d.*, g.name owner FROM documents d LEFT JOIN agents g ON g.id=d.agent_id ORDER BY d.updated_at DESC")
+        rows = []
+        for r in found:
+            if not team.can_access_doc(agent, r):
+                continue
+            folder = path_of(r["folder_id"])
+            text = f"{r['title']} {folder} {r['body'] or ''}".casefold()
+            if query and query not in text and not all(term in text for term in terms):
+                continue
+            rows.append({"id": r["id"], "title": r["title"], "kind": r["kind"], "owner": ("a project drive" if r["agent_id"] < 0 else r["owner"] or "shared drive"), "folder": folder})
+        offset = max(0, int(a.get("offset") or 0))
+        limit = max(1, min(200, int(a.get("limit") or 50)))
+        return [dict(row, total_matches=len(rows), has_more=offset + limit < len(rows), next_offset=offset + limit) for row in rows[offset:offset + limit]], "/office?tab=files"
     if name == "list_files":
         owner = resolve_owner(agent, a)
         fid = folder_id(owner, a.get("path"), create=False) if a.get("path") else None

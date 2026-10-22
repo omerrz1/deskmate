@@ -111,7 +111,7 @@ async def _company_website_kb(refresh=False):
     if kb_id and db.q1("SELECT id FROM knowledge_bases WHERE id=?", (kb_id,)) and not refresh:
         return int(kb_id), ""
     try:
-        result = await asyncio.wait_for(webdemo.learn(url, kb_id=int(kb_id) if kb_id else None), timeout=180)
+        result = await asyncio.wait_for(webdemo.learn(url, kb_id=int(kb_id) if kb_id else None), timeout=600)
     except webdemo.Blocked as e:
         return None, str(e)
     except asyncio.TimeoutError:
@@ -184,6 +184,12 @@ async def list_duties(agent, a):
 @tool("complete_duty")
 async def complete_duty(agent, a):
     d0 = db.q1("SELECT * FROM duties WHERE id=?", (a["duty_id"],))
+    if not d0:
+        return {"error": "Task not found."}, None
+    if any(not step.get("done") for step in db.jload(d0.get("checklist"), [])):
+        return {"error": "This task has unfinished checklist steps. Finish and verify them before marking the task complete."}, None
+    if not str(a.get("result") or "").strip():
+        return {"error": "Record the verified result and where the deliverable is saved."}, None
     db.update("duties", a["duty_id"], status="done", result=str(a["result"])[:3000], done_at=db.now())
     if d0 and d0["status"] != "done":
         office.spawn_recurrence(dict(d0))

@@ -53,7 +53,7 @@ class EmployeeComputerTests(DriveBase):
                              (contact_id, "in_progress", did, aid, db.now()))
             self.assertTrue(files.update_call_sheet(call_id, "callback_requested", "Asked for a call next week."))
             sheet = json.loads(db.q1("SELECT body FROM documents WHERE id=?", (did,))["body"])
-            self.assertEqual(sheet["rows"][0], ["zubair", "+447723827344", "callback_requested"])
+            self.assertEqual(sheet["rows"][0], ["zubair", "+447723827344", "callback_requested", "Asked for a call next week."])
 
     async def test_every_employee_computer_has_folders_for_and_from_the_admins_listed_first(self):
         ava = self.agent("Ava")

@@ -640,11 +640,12 @@ async def company_learn(l: LearnIn):
     from . import webdemo
     try:
         saved_kb = str(voices.get_setting("company_website_kb_id", "") or "")
-        r = await asyncio.wait_for(webdemo.learn(l.url.strip()[:500], kb_id=int(saved_kb) if saved_kb.isdigit() else None), 180)
+        r = await asyncio.wait_for(webdemo.learn(l.url.strip()[:500], kb_id=int(saved_kb) if saved_kb.isdigit() else None), 600)
     except webdemo.Blocked as e:
         raise HTTPException(400, str(e))
     except asyncio.TimeoutError:
         raise HTTPException(504, "That website took too long to read.")
+    voices.set_setting("company_website", l.url.strip()[:500])
     name = voices.get_setting("company_name", "") or r["company"]
     db.update("knowledge_bases", r["kb_id"], name=name)
     voices.set_setting("company_website_kb_id", str(r["kb_id"]))
@@ -713,11 +714,19 @@ class LiveAnswer(BaseModel):
 
 @router.post("/live-questions/{qid}/answer")
 def live_answer(qid: int, a: LiveAnswer):
-    q = db.q1("SELECT * FROM live_questions WHERE id=? AND status='open'", (qid,))
+    q = db.q1("SELECT * FROM live_questions WHERE id=? AND status IN ('open','timeout','cancelled')", (qid,))
     if not q:
         raise HTTPException(404, "That question has already been dealt with")
     if not a.answer.strip():
         raise HTTPException(400, "Write the answer")
+    if a.remember:
+        call = db.q1("SELECT campaign_id FROM calls WHERE id=?", (q["call_id"],)) or {}
+        campaign = db.q1("SELECT kb_id FROM campaigns WHERE id=?", (call.get("campaign_id"),)) or {}
+        discuss.remember_answer(q["question"], a.answer.strip()[:1500], q["agent_id"], campaign.get("kb_id"))
+    if q["status"] in ("timeout", "cancelled") and q.get("agent_id"):
+        db.run("INSERT INTO duties(agent_id,title,detail,status,created_by,created_at) VALUES(?,?,?,'todo','admin',?)",
+               (q["agent_id"], "Follow up with the customer after the admin answered",
+                f"Call {q['call_id']}; question: {q['question']}. Admin answer: {a.answer.strip()[:1500]}. Review the call transcript and arrange the promised update using the customer's agreed contact channel.", db.now()))
     db.update("live_questions", qid, status="answered", answer=a.answer.strip()[:1500], remember=int(a.remember), answered_at=db.now())
     return {"ok": True}
 

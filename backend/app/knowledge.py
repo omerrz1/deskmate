@@ -94,14 +94,9 @@ def item_titles(kb_id, categories=None):
 
 
 def _chunks(doc):
-    parts, cur = [], ""
-    for block in re.split(r"\n(?=#{1,4} )", doc["body"]):
-        if len(cur) + len(block) > 1400 and cur:
-            parts.append(cur)
-            cur = ""
-        cur += block + "\n"
-    if cur.strip():
-        parts.append(cur)
+    # Bound every chunk, including pages without headings or paragraph breaks.
+    body = doc["body"] or ""
+    parts = [body[i:i + 1400] for i in range(0, len(body), 1200)]
     source = f" | source: {doc['source']}" if doc.get("source") else ""
     return [f"[{doc['title']}{source}]\n{p.strip()}" for p in parts]
 
@@ -111,7 +106,7 @@ def _tok(s):
 
 
 def search(kb_id, query, k=3, categories=None, category=None):
-    q = _tok(query)
+    q = _tok(query) - _STOP
     if not q or not kb_id:
         return []
     docs = []
@@ -288,3 +283,103 @@ def set_pronunciations(kb_id, rows):
 def pron_guide(kb_id, language):
     rows = [r for r in pronunciations(kb_id) if (r["language"] or "").lower() == (language or "").lower()]
     return "; ".join(f"{r['term']} -> write as \"{r['respelling']}\"" for r in rows)
+
+
+_STOP = {"the", "and", "for", "what", "does", "have", "your", "about", "that", "this", "there", "their", "with", "please", "can", "you", "how", "are"}
+
+
+def _file_candidates(terms):
+    """Index full file text once per workspace; triggers keep edits searchable."""
+    try:
+        exists = db.q1("SELECT name FROM sqlite_master WHERE name='company_files_search'")
+        if not exists:
+            db.run("CREATE VIRTUAL TABLE IF NOT EXISTS company_files_search USING fts5(title, body, content='documents', content_rowid='id')")
+            db.run("CREATE TRIGGER IF NOT EXISTS company_files_insert AFTER INSERT ON documents BEGIN INSERT INTO company_files_search(rowid,title,body) VALUES(new.id,new.title,new.body); END")
+            db.run("CREATE TRIGGER IF NOT EXISTS company_files_delete AFTER DELETE ON documents BEGIN INSERT INTO company_files_search(company_files_search,rowid,title,body) VALUES('delete',old.id,old.title,old.body); END")
+            db.run("CREATE TRIGGER IF NOT EXISTS company_files_update AFTER UPDATE OF title,body ON documents BEGIN INSERT INTO company_files_search(company_files_search,rowid,title,body) VALUES('delete',old.id,old.title,old.body); INSERT INTO company_files_search(rowid,title,body) VALUES(new.id,new.title,new.body); END")
+            db.run("INSERT INTO company_files_search(company_files_search) VALUES('rebuild')")
+        match = " OR ".join(f'"{term}"*' for term in sorted(terms))
+        rows = db.q("SELECT d.* FROM company_files_search JOIN documents d ON d.id=company_files_search.rowid WHERE company_files_search MATCH ? ORDER BY bm25(company_files_search)", (match,))
+        # Older binary uploads may predate extracted body storage.
+        rows.extend(db.q("SELECT * FROM documents WHERE COALESCE(body,'')='' AND COALESCE(file_path,'')<>''"))
+        return rows
+    except Exception:
+        return db.q("SELECT * FROM documents ORDER BY updated_at DESC")
+
+
+def search_workspace(query, agent=None, k=8):
+    """Search complete company/employee file contents, retaining source locations."""
+    from . import team, files
+    terms = _tok(query) - _STOP
+    if not terms:
+        return []
+    scored = []
+    for doc in _file_candidates(terms):
+        if not team.can_access_doc(agent, doc):
+            continue
+        body = doc.get("body") or ""
+        if not body and doc.get("file_path"):
+            try:
+                body = extract_text(doc["title"], (db.data_dir() / "files" / Path(doc["file_path"]).name).read_bytes())
+            except Exception:
+                continue
+        source = f"file {doc['id']}, drive {doc['agent_id']}/{files.path_of(doc.get('folder_id'))}"
+        if not terms.intersection(_tok(doc["title"] + " " + body)):
+            continue
+        for chunk in _chunks({"title": doc["title"], "body": body, "source": source}):
+            score = len(terms & _tok(chunk))
+            if score:
+                scored.append((score, chunk))
+    scored.sort(key=lambda item: -item[0])
+    return [chunk for _, chunk in scored[:k]]
+
+
+async def lookup_company(query, call_id=None, kb_id=None):
+    """One retrieval path for phone transports: internal evidence, then website."""
+    from . import voices, webdemo
+    import asyncio
+    call = db.q1("SELECT * FROM calls WHERE id=?", (call_id,)) if call_id else None
+    camp = db.q1("SELECT * FROM campaigns WHERE id=?", (call.get("campaign_id"),)) if call else None
+    kb_id = (camp or {}).get("kb_id") or kb_id
+    agent_id = (camp or {}).get("agent_id") or (call or {}).get("report_agent_id")
+    agent = db.q1("SELECT * FROM agents WHERE id=?", (agent_id,)) if agent_id else None
+    internal = search_workspace(query, agent, k=6)
+    hits = []
+    # Admin answers must be available regardless of the campaign's attached KB.
+    for kb in db.q("SELECT DISTINCT kb_id FROM kb_docs WHERE source='answered by the admin'"):
+        hits.extend(search(kb["kb_id"], query, k=3))
+    hits.extend(internal)
+    if kb_id:
+        hits.extend(search(kb_id, query, k=4))
+    website_id = voices.get_setting("company_website_kb_id", "")
+    if website_id and str(website_id) != str(kb_id):
+        hits.extend(search(website_id, query, k=6))
+    terms = _tok(query) - _STOP
+    coverage = max((len(terms & _tok(hit)) for hit in hits), default=0)
+    if not hits or coverage < min(2, len(terms)):
+        url = voices.get_setting("company_website", "").strip()
+        if url:
+            # Calls must not wait for a full crawl. Inspect relevant known pages concurrently.
+            sources = db.q("SELECT DISTINCT source FROM kb_docs WHERE kb_id=?", (website_id,)) if website_id else []
+            terms = _tok(query) - _STOP
+            urls = sorted([r["source"] for r in sources if str(r["source"]).startswith("http")],
+                          key=lambda u: -len(terms & _tok(u)))[:5]
+            urls = list(dict.fromkeys([*urls, url]))
+            async def read(u):
+                try:
+                    return await asyncio.wait_for(webdemo.read_one(u), 8)
+                except Exception:
+                    return None
+            pages = await asyncio.gather(*(read(u) for u in urls))
+            if not sources:
+                from urllib.parse import urlparse
+                base = webdemo._base_domain(urlparse(url if "://" in url else "https://" + url).hostname)
+                links = {link for page in pages if page for link in page.get("links", []) if webdemo._in_scope(link, base)}
+                ranked = sorted(links, key=lambda u: -len(terms & _tok(u)))[:5]
+                pages.extend(await asyncio.gather(*(read(u) for u in ranked if u not in urls)))
+            for page in pages:
+                if page:
+                    for chunk in _chunks({**page, "body": page["text"], "source": page["url"]}):
+                        if terms & _tok(chunk):
+                            hits.append(chunk)
+    return list(dict.fromkeys(hits))[:16] or ["No verified answer found after searching company files, saved admin answers and website evidence. Use ask_admin now; do not guess. An admin answer is authoritative for this call."]

@@ -97,6 +97,6 @@ async def run_tool(agent, name, a):
     if name == "list_discussion_items":
         return [{"id": i["id"], "topic": i["topic"], "detail": i["detail"], "from": i["source"]} for i in open_items(aid)], "/"
     if name == "resolve_discussion_item":
-        ok = resolve(a["id"], a.get("answer", ""))
+        ok = resolve(a["id"], a.get("answer", ""), remember=True)
         return ({"resolved": True} if ok else {"error": "No such item."}), "/"
     return {"error": "unknown tool"}, None

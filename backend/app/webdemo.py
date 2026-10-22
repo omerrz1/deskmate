@@ -3,6 +3,7 @@ import asyncio
 import ipaddress
 import re
 import socket
+import time
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse, urldefrag
 
@@ -10,13 +11,13 @@ import httpx
 
 from . import db, knowledge, llm
 
-MAX_PAGES = 250
+MAX_PAGES = 1000
 MAX_BYTES = 1_500_000
-MAX_TOTAL_BYTES = 35_000_000
+MAX_TOTAL_BYTES = 100_000_000
 MAX_SITEMAPS = 20
 MAX_SITEMAP_URLS = 20_000
 FETCH_CONCURRENCY = 8
-READER_PAGE_LIMIT = 30
+READER_PAGE_LIMIT = 200
 PRIORITY = re.compile(r"about|service|product|pric|plan|faq|contact|course|program|team|how|feature|offer|shop|solution|support|apply|admission|fee", re.I)
 SKIP_EXT = re.compile(r"\.(png|jpe?g|gif|svg|webp|ico|zip|mp4|mp3|css|js|json|woff2?)(\?|$)", re.I)
 MULTI_LABEL_SUFFIXES = {"co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "com.br", "co.jp", "co.in", "com.sg", "com.tr", "com.mx"}
@@ -214,7 +215,7 @@ async def _reader(client, url):
     body = t.split("Markdown Content:", 1)[-1]
     body = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", body)
     body = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", body)
-    return {"url": url, "title": title.strip(), "meta": {}, "text": body.strip()[:40000], "links": links}
+    return {"url": url, "title": title.strip(), "meta": {}, "text": body.strip(), "links": links}
 
 
 async def _sitemap_urls(client, start_url, base_domain):
@@ -263,6 +264,7 @@ async def crawl(url, max_pages=MAX_PAGES):
     if not re.match(r"^https?://", url, re.I):
         url = "https://" + url
     pages, seen = [], set()
+    deadline = time.monotonic() + 480
     async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
         try:
             final, html = await _get(client, url)
@@ -283,19 +285,31 @@ async def crawl(url, max_pages=MAX_PAGES):
                 alt = await _reader(client, final)
                 pages = [alt]
                 sitemap = await _sitemap_urls(client, final, base_domain)
-                picked = [x for x in dict.fromkeys([*sitemap, *(urldefrag(urljoin(final, l))[0] for l in alt["links"])])
-                          if _in_scope(x, base_domain) and not SKIP_EXT.search(urlparse(x).path)]
-                picked.sort(key=lambda x: (0 if PRIORITY.search(urlparse(x).path) else 1, len(x)))
+                pending = set(sitemap)
+                pending.update(urldefrag(urljoin(final, l))[0] for l in alt["links"])
+                visited = {final}
                 semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
                 async def read_one(page_url):
                     async with semaphore:
                         try:
-                            await asyncio.get_running_loop().run_in_executor(None, _check_host, urlparse(page_url).hostname)
                             return await _reader(client, page_url)
                         except Exception:
                             return None
-                res = await asyncio.gather(*[read_one(x) for x in picked[:min(max_pages - 1, READER_PAGE_LIMIT)]])
-                pages += [r for r in res if r and len(r["text"]) > 150]
+                while pending and len(pages) < min(max_pages, READER_PAGE_LIMIT) and time.monotonic() < deadline:
+                    picked = sorted((x for x in pending if x not in visited and _in_scope(x, base_domain)
+                                     and not SKIP_EXT.search(urlparse(x).path)),
+                                    key=lambda x: (0 if PRIORITY.search(urlparse(x).path) else 1, len(x)))
+                    batch = picked[:min(FETCH_CONCURRENCY, max_pages - len(pages), READER_PAGE_LIMIT - len(pages))]
+                    if not batch:
+                        break
+                    pending.difference_update(batch)
+                    visited.update(batch)
+                    for page in await asyncio.gather(*(read_one(x) for x in batch)):
+                        if not page:
+                            continue
+                        if page["text"].strip():
+                            pages.append(page)
+                        pending.update(urldefrag(urljoin(page["url"], link))[0] for link in page["links"])
                 return pages
             except Exception:
                 if not html:
@@ -307,7 +321,7 @@ async def crawl(url, max_pages=MAX_PAGES):
         seen.add(urldefrag(final)[0])
         total_bytes = len(html.encode("utf-8", errors="ignore"))
         semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
-        while frontier and len(pages) < max_pages and total_bytes < MAX_TOTAL_BYTES:
+        while frontier and len(pages) < max_pages and total_bytes < MAX_TOTAL_BYTES and time.monotonic() < deadline:
             candidates = [x for x in frontier if x not in seen and _in_scope(x, base_domain) and not SKIP_EXT.search(urlparse(x).path)]
             candidates.sort(key=lambda x: (0 if PRIORITY.search(urlparse(x).path) else 1, len(urlparse(x).path), x))
             batch = candidates[:min(FETCH_CONCURRENCY, max_pages - len(pages))]
@@ -318,7 +332,16 @@ async def crawl(url, max_pages=MAX_PAGES):
             async def get_one(page_url):
                 async with semaphore:
                     try:
-                        return await _get(client, page_url, base_domain)
+                        final_url, content = await _get(client, page_url, base_domain)
+                        if len(_Page_text(content)) < 100:
+                            try:
+                                rendered = await _reader(client, final_url)
+                                from html import escape
+                                content = "<title>" + escape(rendered["title"]) + "</title><pre>" + escape(rendered["text"]) + "</pre>"
+                                content += "".join('<a href="' + escape(link, quote=True) + '">link</a>' for link in rendered["links"])
+                            except Exception:
+                                pass
+                        return final_url, content
                     except Exception:
                         return None
             results = await asyncio.gather(*(get_one(x) for x in batch))
@@ -367,7 +390,7 @@ async def learn(url, pasted="", kb_id=None):
     """Read a site (or pasted text) into a new knowledge base. -> dict(kb_id, company, pages, sections, info). Raises Blocked with a friendly message."""
     if pasted and len(pasted.strip()) > 150:  # the site couldn't be read: use text the admin copied from it
         host0 = urlparse(url if re.match(r"^https?://", url, re.I) else "https://" + url).hostname or "pasted text"
-        pages = [{"url": url if "://" in url else "https://" + url, "title": host0, "meta": {}, "text": pasted.strip()[:60000]}]
+        pages = [{"url": url if "://" in url else "https://" + url, "title": host0, "meta": {}, "text": pasted.strip()}]
     else:
         pages = await crawl(url)
     pages = [p for p in pages if len(p["text"]) > 120] or pages
@@ -404,9 +427,24 @@ async def learn(url, pasted="", kb_id=None):
     total = 0
     for p in pages:
         title = p["title"] or p["url"]
-        total += await knowledge.ingest(kb_id, title[:120], p["text"][:20000], source=p["url"])
+        # Preserve raw page text and avoid a separate model request for every page.
+        for heading, body in knowledge.segment_text(title[:120], p["text"]):
+            knowledge.add_doc(kb_id, heading, body, source=p["url"])
+            total += 1
+    from . import files
+    folder = files.folder_id(0, "Website knowledge/" + host)
+    for page in pages:
+        title = page["url"]
+        body = f"# {page['title'] or title}\nSource: {title}\nRetrieved: {db.now()}\n\n{page['text']}"
+        old = db.q1("SELECT id FROM documents WHERE agent_id=0 AND folder_id=? AND title=?", (folder, title))
+        if old:
+            db.update("documents", old["id"], body=body, updated_at=db.now())
+        else:
+            db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,created_at,updated_at) VALUES(0,?,'doc',?,?,?,?)",
+                   (title, body, folder, db.now(), db.now()))
     return {"kb_id": kb_id, "company": company, "pages": [p["url"] for p in pages], "sections": total, "info": info, "host": host,
-            "page_limit": MAX_PAGES, "coverage_note": (f"Crawled {len(pages)} public pages (limit {MAX_PAGES}). Sites blocked by robots, authentication or anti-bot controls, and content beyond the page limit, may not be included." if len(pages) >= MAX_PAGES else f"Crawled {len(pages)} discovered public pages. Authenticated or blocked content may not be included.")}
+            "page_limit": MAX_PAGES, "coverage_note": f"Saved full extracted text from {len(pages)} public pages to Company drive / Website knowledge / {host}. Crawl limits: {MAX_PAGES} pages, {READER_PAGE_LIMIT} rendered pages, {MAX_TOTAL_BYTES // 1_000_000} MB and 8 minutes. Blocked, undiscovered, authenticated or over-limit pages may be missing; this is not a guarantee of complete site coverage."}
+
 
 
 async def build(url, person_name="Alex", pasted=""):
@@ -416,7 +454,7 @@ async def build(url, person_name="Alex", pasted=""):
     contact_id = db.run("INSERT INTO contacts(name,phone,language,status,tags,notes,extra,created_at) VALUES(?,?,?,?,?,?,?,?)",
                         (person_name or "Alex", "+447700900123", "English", "new", "website-demo", "", "{}", db.now()))
     objective = (f"You are a rep for {company} ({info.get('what_they_do') or host}). This is a demo call: the person has just enquired through your website. "
-                 f"{info.get('call_goal') or ''} Find out what they need, help them, and use lookup_course for every fact about {company}. "
+                 f"{info.get('call_goal') or ''} Find out what they need, help them, and use lookup_info for every fact about {company}. "
                  f"If the site does not say something, say you'll check and have someone follow up; never guess prices or promises.")
     camp_id = db.run("INSERT INTO campaigns(name,objective,filters,status,max_attempts,kb_id,created_at) VALUES(?,?,?,?,?,?,?)",
                      (f"Website demo: {company}", objective, '{"ids": [%d]}' % contact_id, "active", 1, kb_id, db.now()))
@@ -440,8 +478,8 @@ async def read_one(url):
             if len(text) < 300:
                 text = (text + "\n" + p.structured_text()).strip()
             if len(text) >= 300:
-                return {"url": final, "title": p.title.strip(), "text": text}
+                return {"url": final, "title": p.title.strip(), "text": text, "links": [urljoin(final, link) for link in p.links]}
         except Blocked:
             final = url
         alt = await _reader(client, final)
-        return {"url": alt["url"], "title": alt["title"], "text": alt["text"]}
+        return {"url": alt["url"], "title": alt["title"], "text": alt["text"], "links": alt.get("links", [])}

@@ -413,10 +413,12 @@ async def fs_upload(request: Request, owner: str = Form("shared"), folder_id: Op
                 from openpyxl import load_workbook
                 ws = load_workbook(io.BytesIO(data), read_only=True, data_only=True).worksheets[0]
                 rows = [["" if c is None else str(c) for c in r] for r in ws.iter_rows(values_only=True)]
-            rows = [r for r in rows if any(str(c).strip() for c in r)][:5000]
+            rows = [r for r in rows if any(str(c).strip() for c in r)]
+            if len(rows) > 50001:
+                raise HTTPException(413, "Split sheets larger than 50,000 data rows into separate files.")
             kind, body = "sheet", json.dumps({"columns": [str(c)[:80] for c in (rows[0] if rows else [])][:40], "rows": [[str(c)[:500] for c in r[:40]] for r in rows[1:]]}, ensure_ascii=False)
         elif low.endswith((".pdf", ".docx", ".txt", ".md", ".json")):
-            body = knowledge.extract_text(name, data)[:60000]
+            body = knowledge.extract_text(name, data)
         else:
             raise HTTPException(400, "Upload a Word document, PDF, text, markdown, CSV or Excel file")
     except HTTPException:
@@ -444,7 +446,7 @@ def doc_table(did: int, t: Dict[str, Any], request: Request):
     if d["kind"] != "sheet":
         raise HTTPException(404, "not a spreadsheet")
     cols = [str(c)[:80] for c in (t.get("columns") or [])][:40]
-    rows = [[str(c)[:500] for c in r][:40] for r in (t.get("rows") or [])][:5000]
+    rows = [[str(c)[:500] for c in r][:40] for r in (t.get("rows") or [])]
     db.update("documents", did, body=json.dumps({"columns": cols, "rows": rows}, ensure_ascii=False), updated_at=db.now())
     return {"ok": True}
 

@@ -1,3 +1,4 @@
+import VoiceTest from '../VoiceTest'
 import { useRef, useState } from 'react'
 import { api, usePoll } from '../api'
 import { Panel, Badge } from '../ui'
@@ -86,9 +87,11 @@ export default function Settings({ embedded = false }) {
   const [profiles, reload] = usePoll('/voice-profiles', 0)
   const [countries] = usePoll('/countries', 0)
   const [edit, setEdit] = useState(null)
+  const [callVoice, setCallVoice] = useState(null)
   const [msg, setMsg] = useState('')
   const flags = Object.fromEntries((countries || []).map((c) => [c.code, c.flag]))
   const names = Object.fromEntries((countries || []).map((c) => [c.code, c.country]))
+  const selectedVoice = callVoice || settings?.call_voice || 'marin'
 
   return (
     <div className={embedded ? "" : "page"}>
@@ -108,13 +111,21 @@ export default function Settings({ embedded = false }) {
       </Panel>
 
       <Panel title="Default voice for calls">
-        <label>OpenAI Realtime voice<select value={settings?.call_voice || 'marin'} onChange={async (e) => { try { await api.put('/settings', { call_voice: e.target.value }); reloadS(); setMsg('Default call voice saved.') } catch (x) { setMsg(x.message) } }}>{['marin', 'cedar', 'coral', 'sage', 'ballad', 'verse', 'ash', 'alloy', 'echo', 'shimmer'].map((v) => <option key={v} value={v}>{v}</option>)}</select>
+        <label>OpenAI Realtime voice
+          <select value={selectedVoice} onChange={async (e) => {
+            const v = e.target.value
+            setCallVoice(v)
+            try { await api.put('/settings', { call_voice: v }); reloadS(); setMsg('Default call voice saved.') } catch (x) { setMsg(x.message) }
+          }}>
+            {['marin', 'cedar', 'coral', 'sage', 'ballad', 'verse', 'ash', 'alloy', 'echo', 'shimmer'].map((v) => <option key={v} value={v}>{v}</option>)}
+          </select>
           <span className="faint">Used when an employee or campaign has no voice selected. Employee and campaign voice choices take priority. ElevenLabs calls use the matching language voice profile above.</span>
         </label>
+        <VoiceTest voice={selectedVoice} />
       </Panel>
 
       <Panel title="Workspace call capacity">
-        <label>Maximum simultaneous calls<select value={settings?.max_concurrent_calls || 10} onChange={async (e) => { try { await api.put('/settings', { max_concurrent_calls: +e.target.value }); reloadS(); setMsg('Workspace call capacity saved.') } catch (x) { setMsg(x.message) } }}>{[1, 2, 3, 5, 10, 15, 20, 30, 50].map((n) => <option key={n} value={n}>{n} at a time</option>)}</select>
+        <label>Maximum simultaneous calls<select value={settings?.max_concurrent_calls || 10} onChange={async (e) => { try { await api.put('/settings', { max_concurrent_calls: +e.target.value }); reloadS(); setMsg('Workspace call capacity saved.') } catch (x) { setMsg(x.message) } }}>{[1, 2, 3, 5, 10, 15, 20, 30, 50, 75, 100].map((n) => <option key={n} value={n}>{n} at a time</option>)}</select>
           <span className="faint">Applies across campaigns and direct calls. Twilio also enforces separate account concurrency and calls-per-second limits, which this setting cannot raise.</span>
         </label>
       </Panel>

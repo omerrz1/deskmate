@@ -17,7 +17,7 @@ TOOLS = [
         "instructions": {"type": "string", "description": "Extra style/script guidance for the agent"},
         "filters": {"type": "object", "description": "Segment filter: language, status, last_outcome, tags, search, dataset_id"},
         "kb_id": {"type": "integer", "description": "Knowledge base id (persona + facts). Use list_knowledge_bases."},
-        "max_attempts": {"type": "integer"}}, "required": ["name", "objective"]}},
+        "max_attempts": {"type": "integer"}, "concurrency": {"type": "integer", "minimum": 1, "maximum": 100}}, "required": ["name", "objective"]}},
     {"name": "schedule_call", "description": "Schedule a call to one customer at a specific local date/time (ISO-8601, e.g. 2026-10-14T15:00:00). Respects the campaign's calling hours.", "parameters": {"type": "object", "properties": {
         "contact_id": {"type": "integer"}, "when": {"type": "string"}, "campaign_id": {"type": "integer"}, "objective": {"type": "string"}, "kb_id": {"type": "integer"}}, "required": ["contact_id", "when"]}},
     {"name": "list_scheduled_calls", "description": "Upcoming scheduled / automatic follow-up calls.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
@@ -70,6 +70,7 @@ async def run_tool(name, a, agent=None):
         f = a.get("filters") or {}
         cid = db.run("INSERT INTO campaigns(name,objective,instructions,filters,status,max_attempts,kb_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
                      (a["name"], a["objective"], a.get("instructions", ""), json.dumps(f), "draft", a.get("max_attempts") or 3, a.get("kb_id"), db.now()))
+        db.update("campaigns", cid, concurrency=max(1, min(100, int(a.get("concurrency") or 3))))
         n = crm.count_contacts(f)
         db.log("agent", f"Admin copilot created campaign '{a['name']}' ({n} contacts)", campaign_id=cid)
         return {"campaign_id": cid, "matching_contacts": n}, "/campaigns"

@@ -401,7 +401,7 @@ def split_sentences(buf, eager=False):
 from . import agent_tools  # noqa: E402
 
 
-async def realtime_secret(instructions, language=None, voice=None, external=False):
+async def realtime_secret(instructions, language=None, voice=None, external=False, tools_enabled=True):
     """Mint a short-lived key so the browser (later: Twilio bridge) can talk to the Realtime API directly."""
     import httpx
     if not api_key():
@@ -428,6 +428,9 @@ async def realtime_secret(instructions, language=None, voice=None, external=Fals
                   *agent_tools.realtime_defs()],
         "tool_choice": "auto",
     }}
+    if not tools_enabled:
+        body["session"]["tools"] = []
+        body["session"]["tool_choice"] = "none"
     async with httpx.AsyncClient(timeout=20) as h:
         r = await h.post("https://api.openai.com/v1/realtime/client_secrets", headers={"Authorization": f"Bearer {api_key()}"}, json=body)
         if r.status_code != 200:

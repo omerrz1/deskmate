@@ -631,9 +631,8 @@ async def run_tool(sess, name, args):
     """One tool the voice AI asked for. -> text for the model."""
     from . import agent_tools, callengine, knowledge
     if name == "lookup_info":
-        camp = callengine.call_context(sess.call_id)[2] or {}
-        hits = knowledge.search(camp.get("kb_id") or 0, args.get("query", ""), category=args.get("category"))
-        return "\n\n".join(hits) if hits else "NOTHING FOUND. Do not guess. Say you're not sure and a colleague will confirm."
+        hits = await knowledge.lookup_company(args.get("query", ""), call_id=sess.call_id)
+        return "\n\n".join(hits)
     return await agent_tools.arun(sess.call_id, name, args)
 
 
@@ -715,7 +714,7 @@ class OpenAIEngine:
             result = await run_tool(self.sess, name, args)
         except Exception:
             result = "That didn't work. Carry on naturally and say a colleague will follow up."
-        await self._reply(call_id, str(result)[:4000])
+        await self._reply(call_id, str(result)[:24000])
 
     async def _reply(self, call_id, text, respond=True):
         if not self.ws:
@@ -789,7 +788,7 @@ class ElevenEngine:
             result, err = await run_tool(self.sess, name, args if isinstance(args, dict) else {}), False
         except Exception:
             result, err = "That didn't work. Carry on and say a colleague will follow up.", True
-        await self.ws.send(json.dumps({"type": "client_tool_result", "tool_call_id": call_id, "result": str(result)[:4000], "is_error": err}))
+        await self.ws.send(json.dumps({"type": "client_tool_result", "tool_call_id": call_id, "result": str(result)[:24000], "is_error": err}))
 
     def _to16k(self, pcm):
         """24 kHz mono PCM16 to 16 kHz."""

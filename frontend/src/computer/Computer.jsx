@@ -72,13 +72,27 @@ export default function Computer({ a, startFull = false }) {
   const size = () => { const r = desk.current?.getBoundingClientRect(); return { W: r?.width || 1000, H: r?.height || 600 } }
   const geometry = (app, n) => {
     const { W, H } = size()
-    const w = Math.max(420, Math.min(Math.max(app.w, W * 0.5), W - 60)), h = Math.max(280, Math.min(Math.max(app.h, H * 0.62), H - 110))
+    const w = Math.max(1, Math.min(Math.max(app.w, W * 0.5), W - 16)), h = Math.max(1, Math.min(Math.max(app.h, H * 0.62), H - 90))
     return { w, h, x: Math.max(8, Math.min(W - w - 8, 60 + (n % 6) * 40)), y: Math.max(8, Math.min(H - h - 90, 14 + (n % 6) * 30)) }
   }
   useEffect(() => { // when the screen gets bigger or smaller, windows follow
     const t = setTimeout(() => setWins((ws) => ws.map((w, n) => ({ ...w, ...geometry(appOf(w.k), n), max: w.max }))), 80)
     return () => clearTimeout(t)
   }, [full]) // eslint-disable-line
+  useEffect(() => {
+    const el = desk.current
+    if (!el) return undefined
+    const observer = new ResizeObserver(() => {
+      const { W, H } = size()
+      setWins(ws => ws.map(w => {
+        const width = Math.max(1, Math.min(w.w, W - 16))
+        const height = Math.max(1, Math.min(w.h, H - 90))
+        return { ...w, w: width, h: height, x: Math.max(0, Math.min(w.x, W - width)), y: Math.max(0, Math.min(w.y, H - height - 70)) }
+      }))
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, []) // eslint-disable-line
   const toggleFull = () => {
     if (!full) { setFull(true); try { document.documentElement.requestFullscreen?.() } catch { /* ignore */ } }
     else { setFull(false); try { if (document.fullscreenElement) document.exitFullscreen() } catch { /* ignore */ } }
@@ -109,8 +123,8 @@ export default function Computer({ a, startFull = false }) {
     const sx = e.clientX, sy = e.clientY, { W, H } = size()
     const move = (ev) => {
       const dx = ev.clientX - sx, dy = ev.clientY - sy
-      if (mode === 'move') patch(k, { x: Math.max(-w.w + 140, Math.min(W - 80, w.x + dx)), y: Math.max(0, Math.min(H - 60, w.y + dy)) })
-      else patch(k, { w: Math.max(380, Math.min(W - w.x, w.w + dx)), h: Math.max(240, Math.min(H - w.y, w.h + dy)) })
+      if (mode === 'move') patch(k, { x: Math.max(0, Math.min(W - w.w, w.x + dx)), y: Math.max(0, Math.min(H - w.h - 70, w.y + dy)) })
+      else patch(k, { w: Math.min(W - w.x, Math.max(240, w.w + dx)), h: Math.min(H - w.y - 70, Math.max(180, w.h + dy)) })
     }
     const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up)

@@ -9,7 +9,7 @@ GROUPS = [
     ("email", "Email", "Read and send email from their own address.",
      ["check_inbox", "read_email", "send_email", "reply_email", "search_email", "notify_admin"]),
     ("files", "Files and spreadsheets", "Keep documents and spreadsheets in folders on their own computer, and share them with teammates.",
-     ["create_document", "create_spreadsheet", "edit_sheet", "read_document", "update_document", "list_documents", "list_files", "create_folder", "move_file", "delete_file",
+     ["search_files", "organize_instructions", "create_document", "create_spreadsheet", "edit_sheet", "read_document", "update_document", "list_documents", "list_files", "create_folder", "move_file", "delete_file",
       "share_file", "share_folder", "unshare", "list_shared_with_me", "export_document", "copy_file"]),
     ("calendar", "Calendar", "Put events and reminders on the calendar.", ["create_event", "list_events", "cancel_event"]),
     ("web", "Web reading", "Read public web pages and learn from websites, including the linked company site and its subdomains.", ["read_webpage", "learn_from_website", "learn_company_website"]),

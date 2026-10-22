@@ -13,15 +13,15 @@ class MeetingConversationTests(unittest.IsolatedAsyncioTestCase):
     def tell(self, text):
         agents.log_line(self.mid, 'admin', None, text)
 
-    def test_timing_is_required_and_old_permission_does_not_authorize_new_work(self):
+    def test_direct_requests_are_authorized_but_wait_and_deferral_are_respected(self):
         self.tell('Please create a report')
-        self.assertIsNotNone(meeting_gate(self.mid, 'create_document'))
-        self.assertIsNotNone(meeting_gate(self.mid, 'add_todo'))
+        self.assertIsNone(meeting_gate(self.mid, 'create_document'))
+        self.assertIsNone(meeting_gate(self.mid, 'add_todo'))
         self.assertIsNone(meeting_gate(self.mid, 'list_documents'))
         self.tell('Do it now')
         self.assertIsNone(meeting_gate(self.mid, 'create_document'))
         self.tell('Can you also create a spreadsheet?')
-        self.assertIsNotNone(meeting_gate(self.mid, 'create_spreadsheet'))
+        self.assertIsNone(meeting_gate(self.mid, 'create_spreadsheet'))
         self.tell("Don't do it now")
         self.assertIsNotNone(meeting_gate(self.mid, 'create_document'))
         self.tell('After the meeting')

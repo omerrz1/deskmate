@@ -186,7 +186,7 @@ class RouteTests(LiveBase):
     SESSION = {"ws": "main", "id": "test-session", "csrf": "x", "must_change": False}
 
     def signed_in(self):
-        return mock.patch.multiple(auth, session_from_cookie=lambda c: dict(self.SESSION) if c == "signed-in" else None), mock.patch.object(keys, "complete", lambda: True)
+        return mock.patch.multiple(auth, session_from_cookie=lambda c, **kw: dict(self.SESSION) if c == "signed-in" else None), mock.patch.object(keys, "complete", lambda: True)
 
     async def test_the_routes_need_a_signed_in_user(self):
         for path in (f"/api/agents/{self.ava}/browser", f"/api/agents/{self.ava}/browser/live"):

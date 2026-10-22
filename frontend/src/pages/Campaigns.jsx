@@ -87,7 +87,7 @@ function Form({ initial, onDone }) {
         <div className="sect">
           <h5>Automatic follow-up</h5>
           <div className="form-row">
-            <label>Simultaneous calls<select value={f.concurrency} onChange={(e) => setF({ ...f, concurrency: +e.target.value })}>{[1, 2, 3, 5, 8, 10, 15, 20, 30, 50].map((n) => <option key={n} value={n}>{n} at a time</option>)}</select><span className="faint">Capped by workspace settings and Twilio account concurrency. Twilio’s calls-per-second limit is separate.</span></label>
+            <label>Simultaneous calls<select value={f.concurrency} onChange={(e) => setF({ ...f, concurrency: +e.target.value })}>{[1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100].map((n) => <option key={n} value={n}>{n} at a time</option>)}</select><span className="faint">Capped by workspace settings and Twilio account concurrency. Twilio’s calls-per-second limit is separate.</span></label>
             <label>Retry unanswered, up to<input type="number" min="1" max="10" value={f.max_attempts} onChange={(e) => setF({ ...f, max_attempts: +e.target.value })} /></label>
             <label>Wait before retry (minutes)<input type="number" min="0" value={f.retry_delay_min} onChange={(e) => setF({ ...f, retry_delay_min: +e.target.value })} /></label>
             <label>Follow up interested people after (days)<input type="number" min="1" value={fu.nudge_days} onChange={(e) => setFu({ ...fu, nudge_days: +e.target.value })} /></label>
@@ -100,7 +100,7 @@ function Form({ initial, onDone }) {
             <label>Status<select value={filters.status || ''} onChange={(e) => sf('status', e.target.value)}><option value="">any</option>{(segs?.status || []).map((o) => <option key={o.v} value={o.v}>{label(o.v)} ({o.n})</option>)}</select></label>
             <label>Last result<select value={filters.last_outcome || ''} onChange={(e) => sf('last_outcome', e.target.value)}><option value="">any</option>{(segs?.last_outcome || []).map((o) => <option key={o.v} value={o.v}>{label(o.v)} ({o.n})</option>)}</select></label>
             <label>Search<input value={filters.search || ''} onChange={(e) => sf('search', e.target.value)} /></label>
-            <label>Voice<select value={f.voice} onChange={(e) => setF({ ...f, voice: e.target.value })}><option value="">default</option>{['marin', 'cedar', 'coral', 'sage', 'ballad', 'verse', 'ash', 'alloy', 'echo', 'fable', 'nova', 'onyx', 'shimmer'].map((v) => <option key={v}>{v}</option>)}</select></label>
+            <label>Voice<select value={f.voice} onChange={(e) => setF({ ...f, voice: e.target.value })}><option value="">default</option>{['marin', 'cedar', 'coral', 'sage', 'ballad', 'verse', 'ash', 'alloy', 'echo', 'shimmer'].map((v) => <option key={v}>{v}</option>)}</select></label>
           </div>
         </details>
         <div className="aud"><b>{aud ? aud.count : '…'}</b> customers in this segment{aud?.sample?.length ? <span dir="auto"> · {aud.sample.map((s) => s.name).join(', ')}…</span> : null}</div>

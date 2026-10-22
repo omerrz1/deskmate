@@ -269,8 +269,20 @@ _CALL_BRIEF_SYSTEM = (
     "task (what the caller must ask or tell the person ON THE PHONE, one or two short imperative sentences in simple words, e.g. 'Ask what their favourite meal is.'; "
     "never include what happens after the call: reporting back, posting here, searching, sending messages, looking things up); "
     "style (how the caller should speak, e.g. 'very fast, few words, simple, natural, fun'; '' if the manager did not say); "
-    "after_call (everything the employee must do AFTER the call once the answer is known, e.g. 'Post the meal here and search for its ingredients.'; '' if nothing). "
+    "after_call (everything the employee must do AFTER the call once the answer is known, e.g. 'Post the meal here and search for its ingredients.'; '' if nothing; "
+    "NEVER include updating a spreadsheet, status column or cell: the system fills those in itself, safely, from the sheet name below); "
+    "sheet (the exact title of the spreadsheet whose lead row should receive the call result, if the manager named one; else ''); "
+    "status_column (the header of the column to put the outcome in, if named; else ''). "
     "Use the manager's own words and meaning. Never invent a task or a name.")
+
+
+_SHEET_CHORE = re.compile(r"\b(?:update|updat\w+|set|write|fill|mark|put|record|log|add)\b.*\b(?:status|column|sheet|spreadsheet|excel|cell|row)\b|\b(?:status|column|sheet|spreadsheet|excel|cell|row)\b.*\b(?:update|updat\w+|set|written|filled|marked)\b", re.I)
+
+
+def _without_sheet_chores(text):
+    """Filling in the lead's row is done by the system, found by phone number. Left to the employee it was done by row number, and the numbers were wrong."""
+    kept = [x for x in re.split(r"(?<=[.;])\s+", text or "") if x.strip() and not _SHEET_CHORE.search(x)]
+    return " ".join(kept).strip()
 
 
 async def refine_call_args(args, text):
@@ -291,6 +303,15 @@ async def refine_call_args(args, text):
         out["style"] = style
     if after:
         out["after_call"] = after
+    sheet, status_column = clean(res.get("sheet"), 160), clean(res.get("status_column"), 80)
+    if sheet:
+        out["report_sheet"] = sheet  # the system writes the result onto that lead's row itself, found by phone number
+        if status_column:
+            out["report_status_column"] = status_column
+    if "after_call" in out:
+        out["after_call"] = _without_sheet_chores(out["after_call"])
+        if not out["after_call"]:
+            del out["after_call"]
     name = clean(res.get("person_name"), 40)
     if name and not out.get("name") and re.fullmatch(r"[^\W\d_][\w'’ -]*", name):
         out["name"] = name
@@ -320,7 +341,8 @@ async def follow_up_after_call(mid, agent_id, after_call):
         return
     hist = _chat_history(mid, ag) + [{"role": "user", "content": (
         "[Automatic note, not typed by the admin: the call you placed has finished and its result is in the chat above. When the admin asked you to call, they also said what to do afterwards: "
-        f"\"{after_call}\". Do that now with your tools, using the answer from the call, and post the result in one short message. Do not place another call.]")}]
+        f"\"{after_call}\". Do that now with your tools, using the answer from the call, and post the result in one short message. Do not place another call. "
+        "The call's status, summary and answer are written into the lead sheet automatically, onto the right person's row: do not edit that sheet's cells for this call yourself.]")}]
     final, used = "", []
     try:
         async for ev in run_loop(ag, hist, m["kind"], m["agents"], meeting_id=mid):

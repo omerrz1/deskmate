@@ -495,8 +495,9 @@ class Session:
 
 async def _finish(sess, outcome, note):
     """Write the call up like any other call, and tell the chat how it went."""
-    from . import callengine
+    from . import callengine, link_guard
     cid = sess.call_id
+    link_guard.forget(cid)
     try:
         if not sess.answered:
             status = {"no_answer": "no_answer", "remote_ended": "no_answer", "declined": "declined"}.get(outcome, "failed")
@@ -634,6 +635,8 @@ async def run_tool(sess, name, args):
     from . import agent_tools, callengine, knowledge
     if name == "lookup_info":
         hits = await knowledge.lookup_company(args.get("query", ""), call_id=sess.call_id)
+        from . import link_guard
+        link_guard.remember(sess.call_id, *hits)  # the source pages shown here are the only company pages the caller may link to
         return "\n\n".join(hits)
     return await agent_tools.arun(sess.call_id, name, args)
 

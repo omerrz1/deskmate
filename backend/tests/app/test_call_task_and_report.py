@@ -519,6 +519,7 @@ class SendDetailsTests(CallReportBase):
         from app import agent_tools, messaging
         with db.use(self.ws):
             _, call, contact = self.new_call()
+            voices.set_setting("main_link", "https://example.com/business")
             send = mock.AsyncMock(return_value={"state": "sent", "message": "Sent."})
             with mock.patch.object(messaging, "send", send):
                 result = await agent_tools.arun(call, "send_information", {
@@ -534,7 +535,7 @@ class SendDetailsTests(CallReportBase):
         with db.use(self.ws):
             _, call, _ = self.new_call()
             with mock.patch.object(messaging, "send", mock.AsyncMock(return_value={"state": "failed", "message": "Sender check: only a Verified Caller ID."})):
-                result = await agent_tools.arun(call, "send_information", {"message": "Details https://example.com"})
+                result = await agent_tools.arun(call, "send_information", {"message": "Details of the business courses"})
             self.assertIn("couldn't send the message just now", result)
             self.assertIn("make sure it reaches them shortly", result)
             self.assertEqual(db.q1("SELECT kind,status FROM call_actions WHERE call_id=?", (call,)), {"kind": "send_information", "status": "pending"})
@@ -565,6 +566,7 @@ class SendDetailsTests(CallReportBase):
         from app import agent_tools, messaging
         with db.use(self.ws):
             _, call, _ = self.new_call()
+            voices.set_setting("main_link", "https://example.com/b")
             send = mock.AsyncMock(return_value={"state": "sent", "message": "Sent."})
             with mock.patch.object(messaging, "send", send), mock.patch.object(agent_tools, "_compose_text", new_callable=mock.AsyncMock, return_value="Business courses: https://example.com/b"):
                 await agent_tools.arun(call, "send_information", {"what": "business courses"})
@@ -944,3 +946,276 @@ class ManyLeadsTests(CallReportBase):
             self.assertIn("2000 leads, 1000 reached, 1000 not reached (1000 no answer, 0 failed or declined)", text)
             self.assertIn("Outcomes: interested 1000", text)
             self.assertIn("…and 985 more.", text)
+
+
+class NoInventedLinksTests(CallReportBase):
+    """Regression: the agent texted customers made-up web addresses that led to error pages."""
+
+    SITE = "https://aacollege.com"
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        from app import link_guard
+        link_guard._soft404.clear()
+        link_guard._seen.clear()
+        self.guard = link_guard
+
+    def pages(self, real=(), everything=False):
+        """Stand-in for the internet: only these paths exist (or, for a single-page app, every path 'exists')."""
+        async def status(url):
+            return 200 if everything or any(url.rstrip("/").endswith(p) for p in real) else 404
+        return mock.patch.object(self.guard, "_status", side_effect=status)
+
+    def setup_company(self, call=None, *pages):
+        voices.set_setting("company_website", self.SITE)
+        voices.set_setting("main_link", "")
+        if call is not None and pages:
+            self.guard.remember(call, *pages)
+
+    async def test_a_made_up_page_is_replaced_by_a_page_the_caller_was_really_shown(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            self.setup_company(call, "[Business courses | source: https://aacollege.com/courses/business-management]\nLevel 5 Diploma in Business Management")
+            with self.pages():
+                text, notes = await self.guard.fix("Business courses: https://aacollege.com/business-courses-diploma-2024 - call us!", call_id=call, hint="business courses")
+            self.assertEqual(text, "Business courses: https://aacollege.com/courses/business-management - call us!")
+            self.assertIn("could not be verified", notes[0])
+
+    async def test_links_that_are_real_are_left_alone(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            voices.set_setting("main_link", "https://aacollege.com/apply")
+            self.setup_company(call, "[Fees | source: https://aacollege.com/fees]")
+            voices.set_setting("main_link", "https://aacollege.com/apply")
+            kb = db.run("INSERT INTO knowledge_bases(name,created_at) VALUES('Website',?)", (db.now(),))
+            knowledge.add_doc(kb, "Open days", "Join our open day.", source="https://aacollege.com/open-days")
+            with self.pages(real=("/prospectus",)):
+                for good in ("https://aacollege.com/fees", "www.aacollege.com/apply/", "https://aacollege.com/open-days", "https://aacollege.com/prospectus"):
+                    text, notes = await self.guard.fix(f"See {good} for more.", call_id=call)
+                    self.assertEqual((text, notes), (f"See {good} for more.", []), good)  # shown on the call, set by the admin, crawled, or really loads
+
+    async def test_a_site_that_answers_every_address_is_not_trusted_just_because_a_page_loads(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            voices.set_setting("main_link", "https://aacollege.com/apply")
+            self.setup_company(call)
+            voices.set_setting("main_link", "https://aacollege.com/apply")
+            with self.pages(everything=True):  # a single-page app: even /made-up-page "loads"
+                text, notes = await self.guard.fix("Details: https://aacollege.com/made-up-page", call_id=call)
+            self.assertEqual(text, "Details: https://aacollege.com/apply")
+
+    async def test_without_any_real_link_the_made_up_one_is_removed(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            voices.set_setting("company_website", "")
+            voices.set_setting("main_link", "")
+            with self.pages():
+                text, notes = await self.guard.fix("Course info: https://invented.example.com/x. Thanks!", call_id=call)
+            self.assertNotIn("invented", text)
+            self.assertEqual(text, "Course info. Thanks!")
+            self.assertIn("Removed a link", notes[0])
+            self.assertEqual(await self.guard.fix("No links in this one.", call_id=call), ("No links in this one.", []))
+
+    async def test_a_link_the_admin_typed_in_the_chat_may_be_sent(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            self.setup_company()
+            agents.log_line(mid, "admin", None, "Send him https://partner.example.org/special-offer please")
+            with self.pages():
+                text, _ = await self.guard.fix("Offer: https://partner.example.org/special-offer", meeting_id=mid)
+                other, notes = await self.guard.fix("Offer: https://partner.example.org/something-else", meeting_id=mid)
+            self.assertEqual(text, "Offer: https://partner.example.org/special-offer")
+            self.assertNotIn("something-else", other)
+
+    async def test_the_caller_cannot_text_an_invented_link_during_a_call(self):
+        from app import agent_tools, messaging
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            self.setup_company(call, "[Business | source: https://aacollege.com/courses/business-management]")
+            send = mock.AsyncMock(return_value={"state": "sent", "message": "Sent."})
+            with mock.patch.object(messaging, "send", send), self.pages():
+                result = await agent_tools.arun(call, "send_information", {"what": "business courses", "message": "Business courses https://aacollege.com/the-business-page-i-guessed"})
+            sent = send.await_args.args[3]
+            self.assertIn("https://aacollege.com/courses/business-management", sent)
+            self.assertNotIn("guessed", sent)
+            self.assertIn("never tell the customer", result)
+            self.assertEqual(db.q1("SELECT kind FROM call_actions WHERE call_id=? AND kind='link_fixed'", (call,))["kind"], "link_fixed")
+
+    async def test_a_text_written_in_a_chat_is_checked_too(self):
+        from app import messaging
+        with db.use(self.ws), mock.patch.object(messaging, "_dispatch", new_callable=mock.AsyncMock, return_value=True), self.pages():
+            aid, mid = self.make_chat()
+            voices.set_setting("company_website", self.SITE)
+            voices.set_setting("main_link", "")
+            agent = {**agents.get(aid), "_meeting_id": mid}
+            result, _ = await messaging.run_tool(agent, "send_sms", {"to": "+447447781753", "body": "Apply here https://aacollege.com/apply-now-form-123"})
+            self.assertEqual(db.q1("SELECT body FROM outbox ORDER BY id DESC LIMIT 1")["body"], "Apply here https://aacollege.com")
+            self.assertTrue(result["links_changed"])
+
+    async def test_pages_the_search_or_lookup_returned_are_remembered_and_forgotten_after_the_call(self):
+        with db.use(self.ws):
+            self.guard.remember(7, "[Fees | source: https://aacollege.com/fees]", "https://example.org/found-by-search")
+            self.assertEqual(sorted(self.guard._seen[(self.ws, 7)]), ["aacollege.com/fees", "example.org/found-by-search"])
+            self.guard.forget(7)
+            self.assertNotIn((self.ws, 7), self.guard._seen)
+
+    def test_addresses_are_found_without_catching_emails_numbers_or_trailing_full_stops(self):
+        found = [u for _s, _e, u in self.guard.find("See https://aacollege.com/fees. Email info@aacollege.com or call +44 7447 781753; www.aacollege.com/apply, aacollege.co.uk/open-days!")]
+        self.assertEqual(found, ["https://aacollege.com/fees", "www.aacollege.com/apply", "aacollege.co.uk/open-days"])
+        self.assertEqual(self.guard.normalise("https://www.AACollege.com/Fees/?utm_source=x#top"), "aacollege.com/fees")
+
+
+class RightPersonRightCellTests(CallReportBase):
+    """Regression: results and edits landed on other students' rows, and rows past the end were invented."""
+
+    def sheet(self, rows, columns=("Name", "Phone", "Status"), title="Students"):
+        return db.run("INSERT INTO documents(agent_id,title,kind,body,created_at,updated_at) VALUES(0,?,'sheet',?,?,?)",
+                      (title, json.dumps({"columns": list(columns), "rows": [list(r) for r in rows]}), db.now(), db.now()))
+
+    def table(self, did):
+        return json.loads(db.q1("SELECT body FROM documents WHERE id=?", (did,))["body"])
+
+    def students(self, n=30):
+        return [[f"Student {i}", f"+4477009{i:05d}", ""] for i in range(n)]
+
+    async def edit(self, did, cells):
+        res, _ = await files.run_tool(None, "edit_sheet", {"id": did, "set_cells": cells})
+        return res
+
+    async def test_on_a_long_sheet_a_bare_row_number_is_refused_and_nothing_changes(self):
+        with db.use(self.ws):
+            did = self.sheet(self.students())
+            res = await self.edit(did, [{"row": 12, "column": "Status", "value": "interested"}])
+            self.assertFalse(res["updated"])
+            self.assertIn("row numbers are often off by one", res["skipped"][0]["reason"])
+            self.assertEqual({r[2] for r in self.table(did)["rows"]}, {""})
+
+    async def test_a_row_is_found_by_who_it_is_even_when_the_row_number_given_is_wrong(self):
+        with db.use(self.ws):
+            did = self.sheet(self.students())
+            res = await self.edit(did, [{"row": 5, "where": {"column": "Phone", "value": "07700 900 12"}, "column": "Status", "value": "x"},  # not a real match
+                                        {"row": 5, "where": {"column": "Phone", "value": "+44 7700 900012"}, "column": "Status", "value": "interested"}])
+            rows = self.table(did)["rows"]
+            self.assertEqual(rows[12][2], "interested")  # Student 12, whatever number was said
+            self.assertEqual(rows[4][2], "")
+            self.assertEqual(res["changes"][0]["lead"], "Student 12 / +447700900012")
+            self.assertEqual(res["cells_changed"], 1)
+            self.assertEqual(len(res["skipped"]), 1)
+
+    async def test_two_people_with_the_same_name_are_never_guessed_between(self):
+        with db.use(self.ws):
+            rows = self.students()
+            rows[7][0] = rows[20][0] = "Sam Jones"
+            did = self.sheet(rows)
+            res = await self.edit(did, [{"where": {"column": "Name", "value": "sam jones"}, "column": "Status", "value": "interested"}])
+            self.assertIn("2 rows match", res["skipped"][0]["reason"])
+            self.assertEqual({r[2] for r in self.table(did)["rows"]}, {""})
+
+    async def test_a_row_past_the_end_is_not_invented_and_a_missing_column_is_reported(self):
+        with db.use(self.ws):
+            did = self.sheet(self.students(5))
+            res = await self.edit(did, [{"row": 40, "column": "Status", "value": "x"}, {"row": 2, "column": "Outcome", "value": "y"}])
+            self.assertEqual(len(self.table(did)["rows"]), 5)  # no blank rows appended
+            self.assertIn("There is no row 40", res["skipped"][0]["reason"])
+            self.assertIn("There is no column 'Outcome'", res["skipped"][1]["reason"])
+            self.assertEqual(res["cells_changed"], 0)
+
+    async def test_a_result_goes_on_the_persons_own_row_not_on_the_stored_row_number(self):
+        with db.use(self.ws):
+            did = self.sheet(self.students())
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, report_sheet_id=did, report_row=4, status="completed")  # a model said "row 4"
+            contact = db.q1("SELECT contact_id FROM calls WHERE id=?", (call,))["contact_id"]
+            db.update("contacts", contact, name="Student 12", phone="07700 900012")
+            files.update_call_sheet(call, "interested", "Wants details.")
+            files.flush_sheet_updates()
+            rows = self.table(did)["rows"]
+            self.assertEqual(rows[12][2], "interested")
+            self.assertEqual(rows[3][2], "")
+            self.assertEqual([r[2] for i, r in enumerate(rows) if i != 12 and r[2]], [])
+
+    async def test_a_lead_who_is_not_on_the_sheet_changes_nothing_and_the_activity_log_says_so(self):
+        with db.use(self.ws):
+            did = self.sheet(self.students())
+            before = db.q1("SELECT body FROM documents WHERE id=?", (did,))["body"]
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, report_sheet_id=did, report_row=3, status="completed")
+            contact = db.q1("SELECT contact_id FROM calls WHERE id=?", (call,))["contact_id"]
+            db.update("contacts", contact, name="Nobody Here", phone="+447111222333")
+            files.update_call_sheet(call, "interested", "x")
+            files.flush_sheet_updates()
+            self.assertEqual(db.q1("SELECT body FROM documents WHERE id=?", (did,))["body"], before)
+            self.assertIn("no single row in it belongs to that person", db.q1("SELECT message FROM activity ORDER BY id DESC LIMIT 1")["message"])
+
+    async def test_duplicate_rows_are_resolved_by_the_import_row_and_otherwise_left_alone(self):
+        with db.use(self.ws):
+            rows = self.students(6)
+            rows[4] = list(rows[1])  # the same person listed twice
+            did = self.sheet(rows)
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, report_sheet_id=did, status="completed")
+            contact = db.q1("SELECT contact_id FROM calls WHERE id=?", (call,))["contact_id"]
+            db.update("contacts", contact, name="Student 1", phone=rows[1][1])
+            files.update_call_sheet(call, "interested", "x")
+            files.flush_sheet_updates()
+            self.assertEqual({r[2] for r in self.table(did)["rows"]}, {""})  # two candidates and nothing says which: not guessed
+            db.update("calls", call, report_row=5)  # the import knew it was the second listing
+            files.update_call_sheet(call, "interested", "x")
+            files.flush_sheet_updates()
+            self.assertEqual([i for i, r in enumerate(self.table(did)["rows"]) if r[2]], [4])
+
+    async def test_the_sheets_own_summary_answer_and_report_columns_are_never_overwritten(self):
+        with db.use(self.ws):
+            did = self.sheet([["Omer", "+447447781753", "", "Prefers evenings", "Interested in ATHE", "Applicant's own report"]],
+                             columns=("Name", "Phone", "Status", "Summary", "Answer", "Report"))
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, report_sheet_id=did, status="completed", report=json.dumps({"objective_answer": "Salmon burger"}))
+            contact = db.q1("SELECT contact_id FROM calls WHERE id=?", (call,))["contact_id"]
+            db.update("contacts", contact, name="Omer", phone="+447447781753")
+            files.update_call_sheet(call, "interested", "Wants the business course.")
+            files.flush_sheet_updates()
+            table = self.table(did)
+            row = dict(zip(table["columns"], table["rows"][0]))
+            self.assertEqual((row["Summary"], row["Answer"], row["Report"]), ("Prefers evenings", "Interested in ATHE", "Applicant's own report"))
+            self.assertEqual((row["Status"], row["Call summary"], row["Call answer"]), ("interested", "Wants the business course.", "Salmon burger"))
+
+    async def test_a_sheet_with_no_phone_numbers_is_matched_on_the_exact_full_name_only(self):
+        with db.use(self.ws):
+            did = self.sheet([["Omer Mustafa", ""], ["Omer Khan", ""], ["Omer", ""]], columns=("Name", "Status"))
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, report_sheet_id=did, status="completed")
+            contact = db.q1("SELECT contact_id FROM calls WHERE id=?", (call,))["contact_id"]
+            db.update("contacts", contact, name="Omer Mustafa", phone="+447447781753")
+            files.update_call_sheet(call, "interested", "x")
+            files.flush_sheet_updates()
+            self.assertEqual([r[1] for r in self.table(did)["rows"]], ["interested", "", ""])
+
+
+class SheetChoresStayWithTheSystemTests(CallReportBase):
+    async def test_updating_the_sheet_is_not_handed_to_the_employee_but_named_for_the_system(self):
+        sentence = "Ask him his favourite meal, then search its ingredients and update the status column of the leads sheet with the outcome."
+        split = {"person_name": "Omer", "task": "Ask what his favourite meal is.", "style": "", "sheet": "leads", "status_column": "Status",
+                 "after_call": "Search its ingredients. Update the status column of the leads sheet with the outcome."}
+        with mock.patch.object(llm, "complete_json", new_callable=mock.AsyncMock, return_value=split):
+            args = await agents.refine_call_args({"phone": "+447447781753", "objective": "x"}, sentence)
+        self.assertEqual((args["report_sheet"], args["report_status_column"]), ("leads", "Status"))
+        self.assertEqual(args["after_call"], "Search its ingredients.")
+        self.assertEqual(agents._without_sheet_chores("Update the status column."), "")
+        self.assertEqual(agents._without_sheet_chores("Post the meal here. Set the row for Omer to done."), "Post the meal here.")
+
+    async def test_the_follow_up_tells_the_employee_not_to_edit_the_sheet_for_this_call(self):
+        seen = {}
+
+        async def fake_loop(ag, hist, kind, others=None, **kw):
+            seen["note"] = hist[-1]["content"]
+            yield {"type": "done", "text": "Done.", "tools": []}
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            with mock.patch.object(agents, "run_loop", fake_loop):
+                await agents.follow_up_after_call(mid, aid, "Search the ingredients.")
+        self.assertIn("do not edit that sheet's cells for this call yourself", seen["note"])

@@ -177,9 +177,9 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"title": _S, "body": {**_S, "description": "plain text or simple markdown"}, "folder": _FOLDER, "shared": _SHARED, "project": _PROJECT}, "required": ["title", "body"]}},
     {"name": "create_spreadsheet", "description": "Create a spreadsheet (call log, tracker, budget, lead list) from columns and rows and file it in a folder.",
      "parameters": {"type": "object", "properties": {"title": _S, "columns": {"type": "array", "items": _S}, "rows": {"type": "array", "items": {"type": "array", "items": _S}}, "folder": _FOLDER, "shared": _SHARED, "project": _PROJECT}, "required": ["title", "columns", "rows"]}},
-    {"name": "edit_sheet", "description": "Update a spreadsheet by its id OR by its exact title (for example title='leads'). If the admin names a sheet you just created, use that title; do not ask them for an id. Rows are numbered from 1 among data rows (the headers are separate).",
+    {"name": "edit_sheet", "description": "Update a spreadsheet by its id OR by its exact title (for example title='leads'). If the admin names a sheet you just created, use that title; do not ask them for an id. To change a cell, identify its row by who it belongs to (where={column, value}), not by a row number; changes to people on long sheets are refused without it. Read the returned `changes` and `skipped` before telling anyone it is done.",
      "parameters": {"type": "object", "properties": {"id": _I, "title": _S, "add_rows": {"type": "array", "items": {"type": "array", "items": _S}},
-                                                    "set_cells": {"type": "array", "items": {"type": "object", "properties": {"row": _I, "column": _S, "value": _S}}},
+                                                    "set_cells": {"type": "array", "items": {"type": "object", "properties": {"where": {"type": "object", "description": "WHICH ROW, by who it is: {'column': 'phone', 'value': '+447…'} or {'column': 'name', 'value': 'Omer Mustafa'}. Always use this on a sheet with more than 10 rows: row numbers are often wrong, and a wrong one changes someone else's row.", "properties": {"column": _S, "value": _S}}, "row": {**_I, "description": "data row number from 1; only for sheets of 10 rows or fewer"}, "column": {**_S, "description": "header of the column to change"}, "value": _S}}},
                                                     "add_columns": {"type": "array", "items": _S}, "delete_rows": {"type": "array", "items": _I}}}},
     {"name": "read_document", "description": "Read a document or spreadsheet by id OR title. Use the title when the admin names a file; do not ask for an id. For long files, use offset/limit; for spreadsheets, use query to find matching rows.", "parameters": {"type": "object", "properties": {"id": _I, "title": _S, "query": _S, "offset": _I, "limit": _I}}},
     {"name": "update_document", "description": "Replace or append to a document's text, or append rows to a spreadsheet, or rename it. Resolve by id or exact title; use the title when the admin names a file.",
@@ -231,6 +231,7 @@ def resolve_document(agent, doc_id=None, title=None, kind=None):
     return None, f"No accessible file named '{title}' was found. Use list_documents to search."
 
 
+SMALL_SHEET = 10             # up to this many data rows a row number alone is accepted by edit_sheet
 SHEET_FLUSH_SECONDS = 2.0   # results are collected for this long, then written into the sheet in one go
 SHEET_FLUSH_AT = 300        # ...or as soon as this many are waiting for one sheet
 _sheet_waiting = {}         # (workspace, sheet id) -> {call id: (outcome, summary)}
@@ -291,12 +292,83 @@ def flush_sheet_updates(only=None):
     return done
 
 
+def _cell_digits(value):
+    return re.sub(r"\D", "", str(value or ""))
+
+
 def _digits_tail(value, n=9):
-    return re.sub(r"\D", "", str(value or ""))[-n:]
+    return _cell_digits(value)[-n:]
+
+
+def _norm(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+class SheetIndex:
+    """Finds the row of a person by who they are, never by a row number. Built lazily, so a handful of lookups on a 50,000-row sheet cost one pass."""
+
+    def __init__(self, table):
+        self.rows, self.cols = table["rows"], table["columns"]
+        self._phone = self._any = None
+        self._col = {}
+
+    def has_phones(self):
+        return any(len(_cell_digits(c)) >= 9 for row in self.rows[:50] for c in row)
+
+    def phone(self, tail):
+        if self._phone is None:
+            self._phone = {}
+            for i, row in enumerate(self.rows):
+                for t in {d[-9:] for d in (_cell_digits(c) for c in row) if len(d) >= 9}:
+                    self._phone.setdefault(t, []).append(i)
+        return self._phone.get(tail, [])
+
+    def text(self, ci, want):
+        if ci not in self._col:
+            self._col[ci] = {}
+            for i, row in enumerate(self.rows):
+                if ci < len(row) and str(row[ci]).strip():
+                    self._col[ci].setdefault(_norm(row[ci]), []).append(i)
+        return self._col[ci].get(want, [])
+
+    def anywhere(self, want):
+        if self._any is None:
+            self._any = {}
+            for i, row in enumerate(self.rows):
+                for n in {_norm(c) for c in row if str(c).strip()}:
+                    self._any.setdefault(n, []).append(i)
+        return self._any.get(want, [])
+
+    def find(self, where):
+        """Rows described by {"column": header or number (optional), "value": text}. A phone number matches on its last 9 digits, anything else on the whole cell."""
+        where = {"value": where} if not isinstance(where, dict) else where
+        value = str(where.get("value", "")).strip()
+        if not value:
+            return []
+        col = where.get("column")
+        ci = None
+        if col not in (None, ""):
+            ci = int(col) - 1 if str(col).isdigit() else next((i for i, h in enumerate(self.cols) if _norm(h) == _norm(col)), None)
+            if ci is None:
+                return []
+        looks_like_phone = len(_cell_digits(value)) >= 9 and not re.search(r"[^\d\s+().-]", value)
+        if looks_like_phone:
+            hits = self.phone(_digits_tail(value))
+            return [i for i in hits if ci is None or _digits_tail(self.rows[i][ci] if ci < len(self.rows[i]) else "") == _digits_tail(value)]
+        return self.text(ci, _norm(value)) if ci is not None else self.anywhere(_norm(value))
+
+
+def _row_is(row, tail, name, by_name):
+    """Does this row belong to this person? By phone number when the sheet has phone numbers, by exact full name only when it has none."""
+    if not by_name:
+        return bool(tail) and any(len(d) >= 9 and d[-9:] == tail for d in (_cell_digits(c) for c in row))
+    return bool(name) and any(_norm(c) == name for c in row)
 
 
 def _apply_sheet_updates(doc_id, updates):
-    """One read and one write for a whole batch of call results."""
+    """One read and one write for a whole batch of call results. A result is written only onto a row that demonstrably belongs to that person
+    (their phone number is in it, or, on a sheet with no phone numbers, their exact full name); when no single row qualifies nothing is written and the
+    Activity log says so. Only our own columns are touched: the status column the admin named, 'Call summary' and 'Call answer'."""
     doc = db.q1("SELECT * FROM documents WHERE id=? AND kind='sheet'", (doc_id,))
     if not doc:
         return 0
@@ -304,54 +376,31 @@ def _apply_sheet_updates(doc_id, updates):
     rows, cols = table["rows"], table["columns"]
     if not rows or not cols:
         return 0
-    names = [str(c).strip().casefold() for c in cols]
-    phone_col = next((i for i, n in enumerate(names) if any(x in n for x in ("phone", "number", "mobile"))), None)
-    name_col = next((i for i, n in enumerate(names) if "name" in n), None)
-    cell = lambda row, i: str(row[i]) if i is not None and i < len(row) else ""  # noqa: E731
-    index = {}  # built once, only if a result has to be matched by phone or name
-
-    def lookup():
-        if not index:
-            index["phone"], index["name"] = {}, {}
-            for i, row in enumerate(rows):
-                tail = _digits_tail(cell(row, phone_col))
-                if tail:
-                    index["phone"].setdefault(tail, []).append(i)
-                nm = cell(row, name_col).strip().casefold()
-                if nm:
-                    index["name"].setdefault(nm, []).append(i)
-        return index
-
-    changed = 0
+    names = [_norm(c) for c in cols]
+    index = SheetIndex(table)
+    by_name = not index.has_phones()
+    changed, skipped = 0, []
     for call_id, (outcome, summary) in updates.items():
         call = db.q1("SELECT * FROM calls WHERE id=?", (call_id,))
         if not call:
             continue
         contact = db.q1("SELECT c.name,c.phone,c.extra,d.source_doc_id FROM contacts c LEFT JOIN datasets d ON d.id=c.dataset_id WHERE c.id=?", (call["contact_id"],)) or {}
-        want = _digits_tail(contact.get("phone"))
+        tail, name = _digits_tail(contact.get("phone")), _norm(contact.get("name"))
         configured = call.get("report_row") or (db.jload(contact.get("extra"), {}).get("__source_row") if contact.get("source_doc_id") == doc["id"] else None)
         row_index = int(configured) - 1 if configured else -1
-        if 0 <= row_index < len(rows) and want and phone_col is not None:
-            on_sheet = _digits_tail(cell(rows[row_index], phone_col))
-            if on_sheet and on_sheet != want:
-                row_index = -1  # the sheet was edited since the lead was imported and this row is somebody else now: find the lead instead
-        if not 0 <= row_index < len(rows):
-            hits = set()
-            if want:
-                hits.update(lookup()["phone"].get(want, []))
-            nm = (contact.get("name") or "").strip().casefold()
-            if nm:
-                hits.update(lookup()["name"].get(nm, []))
+        if not (0 <= row_index < len(rows) and _row_is(rows[row_index], tail, name, by_name)):  # a stored or model-supplied row number is only a hint
+            hits = index.anywhere(name) if by_name else index.phone(tail)
             if len(hits) != 1:
+                skipped.append(contact.get("name") or contact.get("phone") or str(call_id))
                 continue
-            row_index = hits.pop()
-        status_name = str(call.get("report_status_column") or "status")
-        col_index = next((i for i, c in enumerate(cols) if str(c).strip().casefold() == status_name.casefold()), None)
+            row_index = hits[0]
+        status_name = str(call.get("report_status_column") or "status").strip()
+        col_index = next((i for i, n in enumerate(names) if n == _norm(status_name)), None)
         if col_index is None:
             cols.append(status_name)
-            names.append(status_name.casefold())
+            names.append(_norm(status_name))
             col_index = len(cols) - 1
-        summary_col = next((i for i, n in enumerate(names) if n in ("call report", "call summary", "report", "summary")), None)
+        summary_col = next((i for i, n in enumerate(names) if n in ("call summary", "call report")), None)  # never a column the sheet already uses for something else
         if summary_col is None:
             cols.append("Call summary")
             names.append("call summary")
@@ -359,7 +408,7 @@ def _apply_sheet_updates(doc_id, updates):
         answer = str((db.jload(call.get("report"), {}) or {}).get("objective_answer") or "").strip()  # what they said to the call's task, next to the status
         answer_col = None
         if answer:
-            answer_col = next((i for i, n in enumerate(names) if n in ("call answer", "answer")), None)
+            answer_col = next((i for i, n in enumerate(names) if n == "call answer"), None)
             if answer_col is None:
                 cols.append("Call answer")
                 names.append("call answer")
@@ -374,6 +423,9 @@ def _apply_sheet_updates(doc_id, updates):
         changed += 1
     if changed:
         db.update("documents", doc["id"], body=json.dumps(table, ensure_ascii=False), updated_at=db.now())
+    if skipped:
+        db.log("agent", f"{len(skipped)} call result(s) were not written into '{doc['title']}' because no single row in it belongs to that person: "
+               + ", ".join(skipped[:8]) + ("…" if len(skipped) > 8 else "") + ". Nothing was guessed; the results are on the Calls page.")
     return changed
 
 
@@ -484,25 +536,47 @@ async def _run_tool(agent, name, a):
             row = [str(c)[:500] for c in r[:40]]
             row += [""] * (len(t["columns"]) - len(row))
             t["rows"].append(row)
-        changed = 0
+        index, changes, skipped = SheetIndex(t), [], []
         for c in (a.get("set_cells") or [])[:500]:
             try:
-                ri = int(c["row"]) - 1
+                where = c.get("where")
+                ri = None
+                if where:
+                    hits = index.find(where)
+                    if len(hits) != 1:
+                        skipped.append({"cell": c, "reason": ("No row matches " + json.dumps(where, ensure_ascii=False)) if not hits else f"{len(hits)} rows match; use something unique such as the phone number"})
+                        continue
+                    ri = hits[0]
+                elif "row" in c:
+                    ri = int(c["row"]) - 1
+                    if len(t["rows"]) > SMALL_SHEET:
+                        skipped.append({"cell": c, "reason": f"This sheet has {len(t['rows'])} rows, and row numbers are often off by one or more. Say which row by who it is: "
+                                                             "where={'column': 'phone', 'value': '+44…'} (or their name)."})
+                        continue
+                    if not 0 <= ri < len(t["rows"]):
+                        skipped.append({"cell": c, "reason": f"There is no row {ri + 1}; the sheet has {len(t['rows'])} data rows. Use add_rows to add rows."})
+                        continue
+                else:
+                    skipped.append({"cell": c, "reason": "Give `where` (who the row is) or `row`."})
+                    continue
                 col = c["column"]
-                ci = int(col) - 1 if str(col).isdigit() else next(i for i, h in enumerate(t["columns"]) if h.lower() == str(col).lower())
-                while ri >= len(t["rows"]):
-                    t["rows"].append([""] * len(t["columns"]))
-                while ci >= len(t["rows"][ri]):
-                    t["rows"][ri].append("")
-                t["rows"][ri][ci] = str(c.get("value", ""))[:500]
-                changed += 1
-            except (StopIteration, ValueError, KeyError, IndexError, TypeError):
-                continue
+                ci = int(col) - 1 if str(col).isdigit() else next((i for i, h in enumerate(t["columns"]) if _norm(h) == _norm(col)), None)
+                if ci is None or not 0 <= ci < len(t["columns"]):
+                    skipped.append({"cell": c, "reason": f"There is no column '{col}'. The columns are: {', '.join(map(str, t['columns']))}. Use add_columns first to add one."})
+                    continue
+                row = t["rows"][ri]
+                while ci >= len(row):
+                    row.append("")
+                old, row[ci] = row[ci], str(c.get("value", ""))[:500]
+                changes.append({"row": ri + 1, "lead": " / ".join(str(x) for x in row[:2] if str(x).strip())[:60], "column": t["columns"][ci], "was": str(old)[:60], "now": row[ci][:60]})
+            except (ValueError, KeyError, IndexError, TypeError):
+                skipped.append({"cell": c, "reason": "Could not read that cell instruction."})
         for n in sorted({int(x) for x in (a.get("delete_rows") or []) if str(x).isdigit()}, reverse=True):
             if 1 <= n <= len(t["rows"]):
                 del t["rows"][n - 1]
         db.update("documents", d["id"], body=json.dumps(t, ensure_ascii=False), updated_at=db.now())
-        return {"updated": True, "cells_changed": changed, "rows_now": len(t["rows"]), "columns": t["columns"]}, "/office?tab=files"
+        return {"updated": bool(changes), "cells_changed": len(changes), "changes": changes[:40], "skipped": skipped[:20],
+                "check": "Compare each change's `lead` with the person you meant. Do not report a cell as updated if it is in `skipped`.", "rows_now": len(t["rows"]), "columns": t["columns"]}, "/office?tab=files"
     if name == "list_documents":
         query = str(a.get("query") or "").strip().casefold()
         terms = set(re.findall(r"\w+", query))

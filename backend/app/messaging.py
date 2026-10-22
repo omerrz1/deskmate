@@ -202,7 +202,11 @@ async def run_tool(agent, name, a):
                     used_saved = f"The number given was not valid, so I used the saved number for {pick['name']}: {normalise(pick['phone']) or pick['phone']}."
                 elif not typed and len(recent) > 1:
                     return {"state": "failed", "message": "This chat has phoned " + ", ".join(f"{p['name']} ({p['phone']})" for p in recent[:4]) + ". Say which one to text, by name."}, None
-        r = await send(agent, "sms" if name == "send_sms" else "whatsapp", to, a.get("body"), contact_id=contact_id)
+        from . import link_guard
+        body, link_notes = await link_guard.fix(str(a.get("body") or ""), meeting_id=(agent or {}).get("_meeting_id"))  # no addresses made up from memory
+        r = await send(agent, "sms" if name == "send_sms" else "whatsapp", to, body, contact_id=contact_id)
+        if link_notes:
+            r = {**r, "message": (r.get("message", "") + " " + " ".join(link_notes)).strip(), "links_changed": link_notes}
         if used_saved:
             r = {**r, "message": f"{used_saved} {r.get('message', '')}".strip(), "note_for_you": "Tell the admin which saved number was used. Do not count digits or comment on the number's length."}
         if r.get("state") == "failed":

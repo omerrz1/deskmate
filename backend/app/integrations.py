@@ -54,7 +54,7 @@ def twilio_error_hint(code, message="", service="messaging"):
     if service == "messaging" and code in ("21606", "21659", "21660"):
         return ("Twilio can't send texts from the saved number: it is not an SMS-capable number on this Twilio account (voice-only numbers can't text), or its country doesn't match the recipient. "
                 "Open Twilio Console → Phone Numbers → Manage → Active numbers, check the number has the SMS capability and belongs to this account, "
-                "or buy an SMS-capable number and save it under Apps → Twilio → Phone caller ID and SMS number. A UK text may also need a registered UK sender ID or number. "
+                "or set a different sender under Apps → Twilio → SMS sender: an SMS-capable number, a Messaging Service SID (MG…), or a short name such as MyCompany (3 to 11 letters or digits), which UK phones accept without any number. "
                 "https://www.twilio.com/docs/api/errors/" + code)
     if service == "messaging" and code == "21408":
         return "Twilio is blocking texts to this destination country. Enable it in Twilio Console → Messaging → Settings → Geo permissions. https://www.twilio.com/docs/api/errors/21408"
@@ -183,6 +183,12 @@ def _config(inst):
         m = re.search(rx, str(cfg.get(src, "")))
         if m:
             cfg[key] = m.group(1)
+    if inst["kind"] == "twilio":  # texts come from the SMS sender when one is set, otherwise from the caller ID number
+        sender = str(cfg.get("sms_from") or cfg.get("from_number") or "").strip()
+        if re.fullmatch(r"MG[0-9a-fA-F]{32}", sender):
+            cfg["sms_service"] = sender
+        elif sender:
+            cfg["sms_sender"] = sender
     return cfg
 
 
@@ -208,7 +214,7 @@ def validate_config(spec, cfg, partial=False):
         # spaces or punctuation. Store them in canonical E.164 form so a
         # cosmetic formatting issue doesn't reject the entire credential
         # update (including a newly rotated Auth Token).
-        if spec.get("id") == "twilio" and f["key"] in ("from_number", "whatsapp_from"):
+        if spec.get("id") == "twilio" and (f["key"] in ("from_number", "whatsapp_from") or (f["key"] == "sms_from" and re.fullmatch(r"[+\d\s().-]+", v))):
             v = re.sub(r"[\s().-]+", "", v)
         if not v and f.get("default") and not partial:
             v = f["default"]

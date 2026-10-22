@@ -10,9 +10,9 @@ db.run("CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY AUTOINCREMENT, 
 _S = {"type": "string"}
 TOOLS = [
     {"name": "send_sms", "description": "Send a text message now to a customer or contact through the connected provider. Use this when the admin asks you to send a text; do not ask them to confirm again. The workspace may explicitly be set to approval mode. Report sent, waiting, or failed from the tool result accurately.",
-     "parameters": {"type": "object", "properties": {"to": {**_S, "description": "phone number in international format, e.g. +447700900123"}, "body": _S}, "required": ["to", "body"]}},
+     "parameters": {"type": "object", "properties": {"contact": {**_S, "description": "Name (or id) of a saved contact, e.g. someone you just called. Prefer this over typing their number: retyped numbers lose digits."}, "to": {**_S, "description": "phone number in international format, e.g. +447700900123 (only when there is no saved contact)"}, "body": _S}, "required": ["body"]}},
     {"name": "send_whatsapp", "description": "Send a WhatsApp message now through the connected provider (Twilio if connected). Use this when the admin asks you to send a WhatsApp message; do not ask them to confirm again. The workspace may explicitly be set to approval mode. Report sent, waiting, or failed from the tool result accurately.",
-     "parameters": {"type": "object", "properties": {"to": {**_S, "description": "phone number in international format"}, "body": _S}, "required": ["to", "body"]}},
+     "parameters": {"type": "object", "properties": {"contact": {**_S, "description": "Name (or id) of a saved contact. Prefer this over typing their number."}, "to": {**_S, "description": "phone number in international format (only when there is no saved contact)"}, "body": _S}, "required": ["body"]}},
 ]
 NAMES = {t["name"] for t in TOOLS}
 MANAGER_TOOLS = [
@@ -46,6 +46,45 @@ def normalise(num):
     if n.startswith("0") and default_code():
         n = "+" + default_code() + n[1:]
     return n if re.fullmatch(r"\+[1-9]\d{6,14}", n) else ""
+
+
+def _why_invalid(num):
+    """Mistakes the provider would only report as 'invalid' after a round trip. A UK mobile is +44 then exactly 10 digits starting with 7."""
+    if num.startswith("+447") and len(num) != 13:
+        return f"{num} is not a valid UK mobile number: after +44 it needs 10 digits starting with 7, and this has {len(num) - 3}. A digit is probably missing or extra."
+    return ""
+
+
+def _one_edit_apart(a, b):
+    if abs(len(a) - len(b)) > 1 or a == b:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    short, long_ = sorted((a, b), key=len)
+    return any(long_[:i] + long_[i + 1:] == short for i in range(len(long_)))
+
+
+def _near_known(num):
+    """The one person the team has recently dealt with whose number is a single slip away from this one."""
+    rows = db.q("SELECT DISTINCT p.id,p.name,p.phone FROM contacts p JOIN calls c ON c.contact_id=p.id WHERE p.phone<>'' ORDER BY c.id DESC LIMIT 300")
+    hits = {r["id"]: r for r in rows if _one_edit_apart(num, normalise(r["phone"]))}
+    return next(iter(hits.values())) if len(hits) == 1 else None
+
+
+def find_contact(who):
+    """A saved contact from a name or an id. -> (contact, problem)."""
+    who = str(who or "").strip()
+    if not who:
+        return None, ""
+    row = db.q1("SELECT * FROM contacts WHERE id=?", (int(who),)) if who.isdigit() and len(who) < 9 else None
+    if row:
+        return row, ""
+    rows = db.q("SELECT * FROM contacts WHERE lower(name)=lower(?) ORDER BY id DESC LIMIT 5", (who,)) or db.q("SELECT * FROM contacts WHERE lower(name) LIKE lower(?) ORDER BY id DESC LIMIT 5", (who + "%",))
+    if len(rows) == 1:
+        return rows[0], ""
+    if rows:
+        return None, f"More than one saved contact is called '{who}': " + ", ".join(f"{r['name']} ({r['phone']})" for r in rows) + ". Use the number of the right one."
+    return None, f"There is no saved contact called '{who}'. Use their phone number."
 
 
 def provider(channel):
@@ -88,6 +127,11 @@ async def send(agent, channel, to, body, contact_id=None, call_id=None):
     num = normalise(to)
     if not num:
         return {"state": "failed", "message": "That phone number isn't valid. It needs the country code, like +447700900123 (or set the time zone in Settings → Company so local numbers work)."}
+    bad = _why_invalid(num)
+    if bad:
+        near = _near_known(num)
+        return {"state": "failed", "message": bad + (f" Did you mean {near['phone']} ({near['name']})? Send it to that number if so." if near else ""),
+                "note_for_you": "Nothing was sent. Tell the admin exactly this, and retry with the saved contact's name instead of typing the number."}
     body = str(body or "").strip()[:1500]
     if not body:
         return {"state": "failed", "message": "There is no message to send."}
@@ -120,7 +164,15 @@ def pending():
 
 async def run_tool(agent, name, a):
     if name in ("send_sms", "send_whatsapp"):
-        r = await send(agent, "sms" if name == "send_sms" else "whatsapp", a.get("to"), a.get("body"))
+        to, contact_id = a.get("to"), None
+        if a.get("contact"):  # a saved contact's own number beats a number the model typed out
+            person, problem = find_contact(a["contact"])
+            if problem:
+                return {"state": "failed", "message": problem}, None
+            to, contact_id = person["phone"], person["id"]
+        r = await send(agent, "sms" if name == "send_sms" else "whatsapp", to, a.get("body"), contact_id=contact_id)
+        if r.get("state") == "failed":
+            r = {**r, "note_for_you": r.get("note_for_you") or "Tell the admin the exact reason and the fix. The person you are talking to is the admin, so do not offer to notify the admin."}
         return r, None
     if name == "list_pending_messages":
         return [{"id": r["id"], "channel": r["channel"], "to": r["to_addr"], "body": r["body"], "from": r["agent_name"]} for r in pending()], "/inbox"

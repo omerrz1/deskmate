@@ -392,3 +392,72 @@ class SmsErrorTests(CallReportBase):
         self.assertIn("Active numbers", hint)
         self.assertIn("Geo permissions", integrations.twilio_error_hint(21408, "", "messaging"))
         self.assertEqual(integrations.twilio_error_hint(21606, "", "voice"), "")  # a voice call error is explained elsewhere
+
+
+class SmsNumberTests(CallReportBase):
+    def omer(self):
+        contact = db.run("INSERT INTO contacts(name,phone,language,status,created_at) VALUES(?,?,?,?,?)", ("Omer", "+447447781753", "English", "new", db.now()))
+        db.run("INSERT INTO calls(contact_id,status,mode,direction,created_at) VALUES(?,?,?,?,?)", (contact, "completed", "pstn", "out", db.now()))
+        return contact
+
+    async def test_a_number_with_a_dropped_digit_is_caught_before_twilio_and_the_right_one_is_suggested(self):
+        """Regression: the model retyped Omer's number as +44744781753 (a digit short) and Twilio could only say 'invalid'."""
+        from app import messaging
+        with db.use(self.ws), mock.patch.object(messaging, "_dispatch", new_callable=mock.AsyncMock) as dispatch:
+            self.omer()
+            result, _ = await messaging.run_tool(None, "send_sms", {"to": "+44744781753", "body": "Ingredients..."})
+            dispatch.assert_not_awaited()
+            self.assertEqual(result["state"], "failed")
+            self.assertIn("not a valid UK mobile number", result["message"])
+            self.assertIn("Did you mean +447447781753 (Omer)?", result["message"])
+            self.assertEqual(db.q("SELECT id FROM outbox"), [])
+            self.assertIn("retry with the saved contact", result["note_for_you"])
+
+    async def test_a_text_to_a_saved_contact_uses_the_saved_number(self):
+        from app import messaging
+        with db.use(self.ws), mock.patch.object(messaging, "_dispatch", new_callable=mock.AsyncMock, return_value=True) as dispatch:
+            contact = self.omer()
+            result, _ = await messaging.run_tool(None, "send_sms", {"contact": "omer", "to": "+44744781753", "body": "Salmon burger: bun, salmon, lettuce."})
+            self.assertEqual(result["state"], "sent")
+            dispatch.assert_awaited_once()
+            row = db.q1("SELECT to_addr,contact_id FROM outbox")
+            self.assertEqual((row["to_addr"], row["contact_id"]), ("+447447781753", contact))  # the typed-out number lost to the saved one
+
+    async def test_an_unknown_or_ambiguous_contact_name_says_so_and_a_good_number_still_works(self):
+        from app import messaging
+        with db.use(self.ws), mock.patch.object(messaging, "_dispatch", new_callable=mock.AsyncMock, return_value=True):
+            self.omer()
+            unknown, _ = await messaging.run_tool(None, "send_sms", {"contact": "Nobody", "body": "hi"})
+            self.assertIn("no saved contact called 'Nobody'", unknown["message"])
+            db.run("INSERT INTO contacts(name,phone,language,status,created_at) VALUES(?,?,?,?,?)", ("Omer", "+447700900111", "English", "new", db.now()))
+            both, _ = await messaging.run_tool(None, "send_sms", {"contact": "Omer", "body": "hi"})
+            self.assertIn("More than one saved contact", both["message"])
+            ok, _ = await messaging.run_tool(None, "send_sms", {"to": "+447447781753", "body": "hi"})
+            self.assertEqual(ok["state"], "sent")
+
+
+class SmsSenderTests(CallReportBase):
+    def body(self, **config):
+        from app import integrations
+        action = next(t for t in integrations.spec_of("twilio")["tools"] if t["name"] == "send_sms")
+        cfg = integrations._config({"kind": "twilio", "config": json.dumps({"from_number": "+441234567890", **config})})
+        return integrations.render(action["body"], {"cfg": cfg, "args": {"to": "+447447781753", "body": "hi"}})
+
+    async def test_texts_come_from_the_sms_sender_and_otherwise_from_the_caller_id(self):
+        """Regression: a voice-only caller ID number could not text, and there was no way to use any other sender."""
+        self.assertEqual(self.body()["From"], "+441234567890")
+        self.assertEqual(self.body(sms_from="+441111111111")["From"], "+441111111111")
+        self.assertEqual(self.body(sms_from="AACollege")["From"], "AACollege")  # a short name works for UK phones without any SMS number
+        service = self.body(sms_from="MG" + "a" * 32)
+        self.assertEqual(service["MessagingServiceSid"], "MG" + "a" * 32)
+        self.assertNotIn("From", service)  # a Messaging Service replaces the From number
+
+    async def test_the_sms_sender_field_accepts_numbers_services_and_names_only(self):
+        from app import integrations
+        spec = integrations.spec_of("twilio")
+        base = {"account_sid": "AC" + "a" * 32, "auth_token": "secret"}
+        self.assertEqual(integrations.validate_config(spec, {**base, "sms_from": "+44 1111 111111"})["sms_from"], "+441111111111")
+        self.assertEqual(integrations.validate_config(spec, {**base, "sms_from": "AACollege"})["sms_from"], "AACollege")
+        for bad in ("ab", "12345678", "Far Too Long A Name"):
+            with self.assertRaises(integrations.AppError):
+                integrations.validate_config(spec, {**base, "sms_from": bad})

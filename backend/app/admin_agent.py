@@ -31,7 +31,7 @@ TOOLS = [
         "contact_id": {"type": "integer", "description": "Existing customer ID; optional when phone is provided."},
         "phone": {"type": "string", "description": "Phone number to call, international format preferred; local numbers use the workspace calling code."},
         "name": {"type": "string", "description": "Optional contact name; a minimal contact is created if this is a new phone number."},
-        "objective": {"type": "string"}, "report_sheet": {"type": "string", "description": "Title of the spreadsheet to update after the call, if requested by the admin."},
+        "objective": {"type": "string", "description": "The task for the call, in the admin's own words, e.g. 'Ask what their favourite meal is.' Never swap it for a generic check-in. Leave out 'report back': the result is posted in this chat automatically when the call ends."}, "report_sheet": {"type": "string", "description": "Title of the spreadsheet to update after the call, if requested by the admin."},
         "report_row": {"type": "integer", "description": "Optional one-based data row number in report_sheet."},
         "report_status_column": {"type": "string", "description": "Status column name; defaults to status."}}, "required": ["objective"]}},
     {"name": "list_calls", "description": "Recent calls with summaries. Filter by status, outcome or contact.", "parameters": {"type": "object", "properties": {
@@ -110,6 +110,8 @@ async def run_tool(name, a, agent=None):
             queued = callengine.queue_campaign(a["campaign_id"], a.get("limit"), details=True)
         except ValueError as e:
             return {"error": str(e)}, "/settings/calling"
+        if (agent or {}).get("_meeting_id"):  # the finished campaign is reported back into the chat that started it
+            db.update("campaigns", a["campaign_id"], report_meeting_id=agent["_meeting_id"], report_posted=0)
         return {"calls_scheduled": queued["queued"], "invalid_phone_rows": queued["invalid_phone"],
                 "state": "queued_for_twilio" if queued["queued"] else "no_valid_contacts"}, "/campaigns"
     if name == "stop_campaign":
@@ -164,7 +166,10 @@ async def run_tool(name, a, agent=None):
                 db.log("agent", f"Created contact {name} from an immediate call request", contact_id=contact_id)
         result = await callengine.call_now(contact_id, a["objective"], (agent or {}).get("id"),
                                            report_sheet_id=sheet_id, report_row=a.get("report_row"),
-                                           report_status_column=a.get("report_status_column") or "status")
+                                           report_status_column=a.get("report_status_column") or "status",
+                                           meeting_id=(agent or {}).get("_meeting_id"))
+        if isinstance(result, dict) and not result.get("error"):
+            result["report_back"] = "When the call ends, its result is posted in this chat automatically. Tell the admin that; do not claim any outcome before then."
         if sheet_id and isinstance(result, dict) and not result.get("error"):
             result["report_sheet"] = a["report_sheet"]
             result["report_update"] = "The matching lead row will be updated in the status column when the call ends."

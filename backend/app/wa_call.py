@@ -513,6 +513,7 @@ async def _finish(sess, outcome, note):
                 db.update("calls", cid, status=status, outcome=outcome, ended_at=db.now(), summary=summary, report=report)
                 from . import files
                 files.update_call_sheet(cid, status, summary)
+                callengine.announce_call(cid)
             text = note or ("They did not answer." if status == "no_answer" else "They declined the call." if status == "declined" else "The call did not connect.")
             if sess.chat and sess.chat.get("id"):
                 chats.add_message(sess.chat["id"], "out", text, "call", None, "", "sent", None, "Deskmates", call_id=cid)
@@ -655,7 +656,7 @@ class OpenAIEngine:
                 tr["language"] = llm.lang_code(self.language)
             await ws.send(json.dumps({"type": "session.update", "session": {
                 "type": "realtime", "model": model, "instructions": self.instructions, "output_modalities": ["audio"],
-                "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}, "transcription": tr, "turn_detection": {"type": "semantic_vad", "eagerness": "medium"}, "noise_reduction": {"type": "far_field"}},
+                "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}, "transcription": tr, "turn_detection": {"type": "semantic_vad", "eagerness": "low"}, "noise_reduction": {"type": "far_field"}},
                           "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": self.voice, "speed": 1.0}},
                 "max_output_tokens": 600, "tools": _tool_defs(), "tool_choice": "auto"}}))
             greeting = ("The customer just called us. Greet them now with your first turn." if self.sess.direction == "in" else "The customer just picked up the phone. Begin the call now with your first turn.")
@@ -807,22 +808,35 @@ class ElevenEngine:
 
 
 async def make_engine(sess, call, contact, camp):
-    """The same choice as a normal phone call: an ElevenLabs agent when the company uses ElevenLabs voices, otherwise OpenAI Realtime."""
+    """The same choice as a normal phone call: an ElevenLabs agent when the company uses ElevenLabs voices, otherwise OpenAI Realtime.
+
+    ElevenLabs gets a second try before the call falls back, because the robotic backup voice is the worst outcome for a person on
+    the phone. Whichever voice is used, and why, is recorded on the call so the report can say so."""
     from . import callengine, eleven_agents
     ag = sess.agent or {}
     profile = eleven_agents.profile_for(contact)
     if profile and ag.get("eleven_voice"):
         profile = {**profile, "voice_id": ag["eleven_voice"]}
-    if profile and not eleven_agents.is_down():
-        try:
-            prompt = callengine.system_prompt(call, contact, camp, realtime=True, external=True) + eleven_agents.tags_guide(profile)
-            aid = await asyncio.wait_for(eleven_agents.ensure_agent(profile), 12)
-            url = await eleven_agents.signed_url(aid)
-            first = "Hello, thanks for calling, how can I help?" if sess.direction == "in" else eleven_agents.first_line_for(contact)
-            return ElevenEngine(sess, url, prompt, first, llm.lang_code(contact.get("language")) or "en", profile["voice_id"], eleven_agents.tuning_for_call(profile))
-        except Exception as e:
-            eleven_agents.mark_down()
-            db.log("error", f"ElevenLabs was not available for a WhatsApp call, using OpenAI voice: {str(e)[:100]}", call_id=sess.call_id)
+    why = "" if profile else eleven_agents.unavailable_reason(contact)
+    if profile and eleven_agents.is_down():
+        why = "ElevenLabs failed a moment ago and is being skipped for a few seconds"
+    elif profile:
+        for attempt in (1, 2):
+            try:
+                prompt = callengine.system_prompt(call, contact, camp, realtime=True, external=True) + eleven_agents.tags_guide(profile)
+                aid = await asyncio.wait_for(eleven_agents.ensure_agent(profile), 20)
+                url = await eleven_agents.signed_url(aid)
+                first = "Hello, thanks for calling, how can I help?" if sess.direction == "in" else eleven_agents.first_line_for(contact)
+                db.update("calls", sess.call_id, voice_engine="elevenlabs")
+                return ElevenEngine(sess, url, prompt, first, llm.lang_code(contact.get("language")) or "en", profile["voice_id"], eleven_agents.tuning_for_call(profile))
+            except Exception as e:
+                why = f"ElevenLabs failed ({type(e).__name__}: {eleven_agents.auth_scrub(str(e))[:100]})"
+                db.log("error", f"{why} on attempt {attempt} of 2 for call {sess.call_id}", call_id=sess.call_id)
+                if attempt == 1:
+                    await asyncio.sleep(0.5)
+        eleven_agents.mark_down(20)
+    db.update("calls", sess.call_id, voice_engine=f"openai: {why}"[:240])
+    db.log("error", f"Call {sess.call_id} is using the backup OpenAI voice: {why}", call_id=sess.call_id)
     prompt = callengine.system_prompt(call, contact, camp, realtime=True, external=False)
     from . import voices
     configured = (camp or {}).get("voice") or voices.get_setting("call_voice", "marin")

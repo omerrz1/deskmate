@@ -152,6 +152,48 @@ def verified_twilio_reply(text, tools):
 
 
 _CALL_PHONE = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{6,}\d)(?!\w)")
+DEFAULT_CALL_OBJECTIVE = "Ask for any update in a friendly and polite manner."
+
+# An order to ring someone ("call now ...", "please call +44...", "and phone him"), as opposed to talk ABOUT a call
+# ("how did the call go?", "no call received", "the call was not about the meal").
+_CALL_VERB = r"(?:call|phone|ring|dial)"
+_CALL_ORDER = re.compile(
+    r"(?:^|[.!?;:,\n]|\b(?:and|then|now|please|pls|plz|just|also|ok|okay|go ahead and|can you|could you|would you|will you|i want you to|i need you to|you should|let['’]?s))\s*"
+    + _CALL_VERB + r"\b(?!\s+(?:me|us|was|wasn|were|is|isn|has|hasn|had|did|didn|went|got|log|logs|report|reports|record|records|history|status|results?)\b)", re.I)
+_GIVE_A_CALL = re.compile(r"\b(?:give|make)\s+(?:them|him|her|it)?\s*a\s+(?:call|ring)\b", re.I)
+_CALL_RETRY = re.compile(r"\b(?:try (?:calling )?again|retry|call again|another call|ring again)\b", re.I)
+_CALL_CANCEL = re.compile(r"\b(?:don['’]?t|do not|never|stop|cancel)\s+(?:the\s+|any\s+)?(?:call|calling|calls|dial|dialing|phoning)\b|\bnot now\b", re.I)
+# what follows the verb but is not part of the task itself
+_ORDER_FILLER = re.compile(r"^(?:(?:right |straight )?(?:now|away|immediately|asap|again|them|him|her|this number|the number|that number|on|at|to|and|then|please|pls|plz|ok|okay|so|yes|yeah|yep|sure|go ahead|do it|try again|retry|try calling)\b[\s,.:;!-]*)+", re.I)
+# the part of the order that asks for a report is the platform's job after the call, not something to say on the phone
+_REPORT_TAIL = re.compile(r"[\s,;.-]*(?:and\s+|then\s+|&\s*)?(?:please\s+)?(?:report|tell me|let me know|get back to me|update me|send me|write (?:me|up)|give me|come back)\b.*$", re.I | re.S)
+
+
+def _call_objective(text):
+    """What the person phoned must be asked or told, in the admin's own words: 'call now ask them whats their favourite meal
+    and report what they said' -> 'ask them whats their favourite meal'. '' when the message names no task."""
+    t = re.sub(r"\s+", " ", _CALL_PHONE.sub(" ", text or "")).strip()
+    order = _CALL_ORDER.search(t)
+    if order:
+        before, after = t[:order.start()], t[order.end():]
+    else:
+        gave = _GIVE_A_CALL.search(t)
+        before, after = (t[:gave.start()], t[gave.end():]) if gave else ("", t)
+    after = _ORDER_FILLER.sub("", _CALL_RETRY.sub(" ", after).strip()).strip(" ,;:.!-")
+    after = _REPORT_TAIL.sub("", after).strip(" ,;:.!-")
+    # background said before the order ("We are running a food survey. Call 07... and ask them.") belongs to the task, a bare "Ethan," or "please" does not
+    before = _REPORT_TAIL.sub("", before).strip(" ,;:.-")
+    context = before if len(before.split()) >= 4 else ""
+    task = " ".join(x for x in (context.rstrip(".") + "." if context else "", after[:1].upper() + after[1:] if after else "") if x).strip()
+    if len(re.findall(r"[^\W\d_]{2,}", after)) < 2:  # nothing left but "yes" / "them" / a number: there is no task in this message
+        return ""
+    return task[:480]
+
+
+def _last_call_objective(phone):
+    row = db.q1("SELECT c.objective FROM calls c JOIN contacts p ON p.id=c.contact_id WHERE c.direction='out' AND c.objective<>'' "
+                "AND substr(REPLACE(REPLACE(p.phone,'+',''),' ',''),-9)=? ORDER BY c.id DESC LIMIT 1", (re.sub(r"\D", "", phone)[-9:],))
+    return (row or {}).get("objective") or ""
 
 
 def _explicit_call_args(text, previous_messages):
@@ -159,37 +201,40 @@ def _explicit_call_args(text, previous_messages):
 
     This safety rail runs the actual call tool from the API process, where its live
     media session is retained. It prevents a language model from merely claiming
-    that an unexecuted call is ringing.
+    that an unexecuted call is ringing. The objective is the admin's own task: a call
+    must do what was asked (e.g. ask about a favourite meal), never a canned check-in.
     """
     from . import messaging
     current = (text or "").strip()
     prior_agent = next((m.get("text", "") for m in reversed(previous_messages) if m.get("role") == "agent"), "")
-    current_call_intent = bool(re.search(r"\b(?:call|phone|dial)\b", current, re.I)
-                               and not re.search(r"\b(?:no call|call (?:wasn['’]?t|was not)|not call|don['’]?t call)\b", current, re.I))
-    retry_intent = bool(re.search(r"\b(?:try again|retry|call again|another call)\b", current, re.I))
+    current_call_intent = bool(_CALL_ORDER.search(current) or _GIVE_A_CALL.search(current)) and not re.search(r"\bcall (?:me|us)\b", current, re.I)
+    retry_intent = bool(_CALL_RETRY.search(current))
     accepted_retry = bool(re.search(r"\b(?:yes|yeah|yep|please do|go ahead|try again|retry)\b", current, re.I)
                           and re.search(r"\b(?:call|calling|dial)\b", prior_agent, re.I)
                           and re.search(r"\b(?:again|retry|try)\b", prior_agent, re.I))
     if not (current_call_intent or retry_intent or accepted_retry):
         return None
-    if re.search(r"\b(?:don['’]?t|do not|cancel|stop|not now|don['’]?t call)\b", current, re.I):
+    if _CALL_CANCEL.search(current):
         return None
 
-    candidates = [current] + [m.get("text", "") for m in reversed(previous_messages) if m.get("role") == "admin"]
-    for candidate in candidates:
+    admin_history = [m.get("text", "") for m in reversed(previous_messages) if m.get("role") == "admin"]
+    for candidate in [current] + admin_history[:8]:
         for match in reversed(list(_CALL_PHONE.finditer(candidate or ""))):
             phone = messaging.normalise(match.group(0))
             if phone:
-                return {"phone": phone, "objective": "Ask for any update in a friendly and polite manner."}
+                objective = _call_objective(current)
+                if not objective:  # "call again": repeat what the last request was, taken from where the number came from
+                    objective = _call_objective(candidate) or _last_call_objective(phone)
+                return {"phone": phone, "objective": objective or DEFAULT_CALL_OBJECTIVE}
 
     # A retry can refer to a number omitted from the confirmation. Use the last
     # outbound call's contact only when the recent assistant explicitly offered
     # to retry; do not guess a recipient for a generic "yes".
     if accepted_retry:
-        last = db.q1("SELECT p.phone FROM calls c JOIN contacts p ON p.id=c.contact_id WHERE c.direction='out' ORDER BY c.id DESC LIMIT 1")
+        last = db.q1("SELECT p.phone,c.objective FROM calls c JOIN contacts p ON p.id=c.contact_id WHERE c.direction='out' ORDER BY c.id DESC LIMIT 1")
         phone = messaging.normalise((last or {}).get("phone"))
         if phone:
-            return {"phone": phone, "objective": "Ask for any update in a friendly and polite manner."}
+            return {"phone": phone, "objective": (last or {}).get("objective") or DEFAULT_CALL_OBJECTIVE}
     return None
 
 
@@ -412,7 +457,8 @@ async def meeting_message(mid, text):
             if result.get("error"):
                 final = f"I couldn’t place the call: {result['error']}"
             else:
-                final = f"Twilio accepted the call request to {result.get('phone') or forced_call['phone']}. I can’t confirm that the recipient’s phone is ringing yet."
+                final = (f"Calling {result.get('phone') or forced_call['phone']} now. Task: {forced_call['objective']} "
+                         "Twilio has accepted the request but hasn’t confirmed the phone is ringing yet. I’ll post what they say here as soon as the call ends.")
             db.run("INSERT INTO meeting_msgs(meeting_id,role,agent_id,text,tools,created_at) VALUES(?,?,?,?,?,?)",
                    (mid, "agent", ag["id"], final, json.dumps(used), db.now()))
             yield {"type": "agent_done", "agent_id": ag["id"], "name": ag["name"], "text": final, "tools": used}

@@ -52,15 +52,20 @@ def _ensure_english():
 
 def get_setting(key, default=None):
     r = db.q1("SELECT value FROM settings WHERE key=?", (key,))
+    if key == "voice_engine":
+        # "openai" saved before ElevenLabs became the default was the old default, not a decision: only a choice made since then sticks
+        if r and (r["value"] != "openai" or db.q1("SELECT 1 x FROM settings WHERE key='voice_engine_chosen'")):
+            return r["value"]
+        return "elevenlabs"
     if r:
         return r["value"]
-    if key == "voice_engine":
-        return "elevenlabs"
     return default
 
 
 def set_setting(key, value):
     db.run("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, value))
+    if key == "voice_engine":
+        db.run("INSERT OR REPLACE INTO settings(key,value) VALUES('voice_engine_chosen','1')")
 
 
 def profiles():

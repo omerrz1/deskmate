@@ -435,6 +435,7 @@ async def call_status(ws: str, secret: str, cid: int, request: Request):
                               outcome=status, summary=note, report=report)
                     from . import files
                     files.update_call_sheet(cid, status, note)
+                    callengine.announce_call(cid)
     return Response(status_code=204)
 
 

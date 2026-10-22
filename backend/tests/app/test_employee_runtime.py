@@ -43,8 +43,30 @@ class VerifiedTwilioReplyTests(unittest.TestCase):
         with mock.patch("app.messaging.default_code", return_value="44"):
             args = agents._explicit_call_args("yes try again!", history)
             complaint = agents._explicit_call_args("no call received", history)
-        self.assertEqual(args, {"phone": "+447447781753", "objective": "Ask for any update in a friendly and polite manner."})
+        self.assertEqual(args, {"phone": "+447447781753", "objective": "Ask for any update"})  # a retry repeats the original request
         self.assertIsNone(complaint)
+
+    def test_the_call_does_the_task_the_admin_asked_for(self):
+        """Regression: every forced call used to carry the canned 'ask for any update' objective, so a request to ask about a favourite meal was never made."""
+        history = [{"role": "admin", "text": "call +447447781753 now"}]
+        with mock.patch("app.messaging.default_code", return_value="44"):
+            args = agents._explicit_call_args("call now ask them whats their favourite meal and report what they said", history)
+            inline = agents._explicit_call_args("Please call 07447781753 and ask what they ate for dinner, then tell me what they said.", [])
+            context = agents._explicit_call_args("We are running a food survey this week. Call 07447781753 and ask them what they ate for dinner.", [])
+            bare = agents._explicit_call_args("call 07447781753", [])
+        self.assertEqual(args, {"phone": "+447447781753", "objective": "Ask them whats their favourite meal"})
+        self.assertEqual(inline["objective"], "Ask what they ate for dinner")
+        self.assertEqual(context["objective"], "We are running a food survey this week. Ask them what they ate for dinner")
+        self.assertEqual(bare["objective"], agents.DEFAULT_CALL_OBJECTIVE)  # only a message that names no task falls back
+
+    def test_talking_about_a_call_never_places_one(self):
+        """Regression: any message containing 'call' plus a number anywhere in the chat re-dialled the customer."""
+        history = [{"role": "admin", "text": "call +447447781753 now"}, {"role": "agent", "text": "Calling now."}]
+        with mock.patch("app.messaging.default_code", return_value="44"):
+            for message in ("the call was not about the meal", "How did the call go?", "What did they say on the call?",
+                            "no call received", "don't call them again", "call me when it's done", "report on the call please"):
+                self.assertIsNone(agents._explicit_call_args(message, history), message)
+            self.assertIsNotNone(agents._explicit_call_args("call again and ask about their favourite drink", history))
 
 
 class Base(unittest.IsolatedAsyncioTestCase):
@@ -85,7 +107,8 @@ class MeetingCallExecutionTests(Base):
         self.assertEqual(run_tool.await_args.args[2]["phone"], "+447447781753")
         self.assertTrue(any(e.get("type") == "tool_result" and e.get("ok") for e in events))
         saved = db.q1("SELECT text,tools FROM meeting_msgs WHERE meeting_id=? AND role='agent' ORDER BY id DESC LIMIT 1", (mid,))
-        self.assertIn("can’t confirm", saved["text"])
+        self.assertIn("Calling +447447781753 now. Task: Ask for any update", saved["text"])
+        self.assertIn("post what they say here", saved["text"])  # the asker is told the result will come back, not left guessing
         self.assertEqual(json.loads(saved["tools"])[0]["name"], "call_contact")
 
 

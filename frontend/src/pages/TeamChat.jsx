@@ -41,6 +41,20 @@ export default function TeamChat() {
     return () => { alive = false; abort.current?.abort() }
   }, [id])
   useEffect(() => { bottom.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }) }, [room?.messages, partial])
+  // A call a teammate placed reports back into this chat when it ends, minutes after the message that asked for it: pick it up without a reload.
+  const roomId = room?.id
+  useEffect(() => {
+    if (!roomId) return undefined
+    const timer = setInterval(async () => {
+      if (lock.current || uploadLock.current || document.hidden) return
+      try {
+        const fresh = await api.get(`/meetings/${roomId}`)
+        if (lock.current) return
+        setRoom((old) => (old && old.id === fresh.id && fresh.messages.at(-1)?.id !== old.messages.at(-1)?.id ? fresh : old))
+      } catch { /* offline for a moment: the next tick tries again */ }
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [roomId])
   async function create() {
     if (!selected.length || lock.current) return
     lock.current = true; setBusy(true); setError('')

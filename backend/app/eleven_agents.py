@@ -11,6 +11,10 @@ from . import db, llm
 
 BASE = "https://api.elevenlabs.io/v1"
 AGENT_LLM = os.getenv("ELEVENLABS_AGENT_LLM", "gpt-4.1")
+# Lower than 1 keeps the agent on its task; the wording still varies from call to call.
+AGENT_TEMPERATURE = float(os.getenv("ELEVENLABS_AGENT_TEMPERATURE", "0.6"))
+# "patient" waits for the person to finish thinking aloud instead of cutting in on a pause. Override: eager | normal | patient.
+TURN_EAGERNESS = os.getenv("ELEVENLABS_TURN_EAGERNESS", "patient")
 # Turbo keeps natural v4 speech while reducing the per-reply synthesis delay. Choose full v4 when expressiveness matters more than response speed.
 # Override with ELEVENLABS_AGENT_TTS=eleven_v4, or per language with ELEVENLABS_AGENT_TTS_<CODE>.
 TTS_BY_LANG = {}
@@ -44,6 +48,22 @@ def profile_for(contact):
 
 def available_for(contact):
     return profile_for(contact) is not None
+
+
+def unavailable_reason(contact):
+    """Why a call is not using ElevenLabs, in words the admin can act on (shown on the call and in its report)."""
+    from . import voices
+    if not llm.eleven_key():
+        return "no ElevenLabs key is connected"
+    if os.getenv("VOICE_ENGINE", "elevenlabs_agents") != "elevenlabs_agents":
+        return "the VOICE_ENGINE setting on the server turns ElevenLabs agents off"
+    if voices.get_setting("voice_engine", "elevenlabs") != "elevenlabs":
+        return "calls are set to OpenAI in Settings → Calling"
+    if not llm.lang_code(contact.get("language")):
+        return f"there is no voice for the language '{contact.get('language') or 'unknown'}'"
+    if not voices.resolve(contact):
+        return f"no voice profile covers {contact.get('language') or 'this language'}"
+    return "ElevenLabs could not be reached just now"
 
 
 async def _tool_id(h):
@@ -124,7 +144,7 @@ async def ensure_agent(profile):
                                  "built_in_tools": {"end_call": {"name": "end_call", "description": "End the call after you have said goodbye.",
                                                                  "params": {"system_tool_type": "end_call"}}}}},
             "tts": {"voice_id": voice, "model_id": model},
-            "turn": {"turn_timeout": 6}},
+            "turn": {"turn_timeout": 6, "turn_eagerness": TURN_EAGERNESS}},
             "platform_settings": {"overrides": {"conversation_config_override": {
                 "agent": {"prompt": {"prompt": True}, "first_message": True, "language": True}, "tts": {"voice_id": True}}}}}
         r = await h.post(f"{BASE}/convai/agents/create", json=body)
@@ -158,6 +178,8 @@ async def signed_url(agent_id):
 def first_line_for(contact):
     """Opens like a real person ringing someone: just checks who it is. No script, no AI call, instant."""
     first = ((contact.get("name") or "").split() or [""])[0]
+    if not re.search(r"[^\W\d_]{2}", first):  # a lead saved under its phone number has no name to ask for
+        first = ""
     return f"Hi, is this {first}?" if first else "Hi, hello?"
 
 
@@ -203,9 +225,8 @@ async def apply_tuning(profile_id):
         tids = None
         db.log("voice", f"Could not register the agent tools yet ({auth_scrub(str(e))[:120]})")
     body["conversation_config"] = {"tts": {"voice_id": prof["voice_id"], "model_id": model}}
-    body["conversation_config"]["agent"] = {"prompt": {"temperature": 0.9, **({"tool_ids": tids} if tids else {})}}  # higher temperature = fresh wording each call  # the agent itself uses this voice and model too
-    if t.get("turn_eagerness"):
-        body["conversation_config"]["turn"] = {"turn_eagerness": t["turn_eagerness"]}
+    body["conversation_config"]["agent"] = {"prompt": {"temperature": AGENT_TEMPERATURE, **({"tool_ids": tids} if tids else {})}}  # the agent itself uses this voice and model too
+    body["conversation_config"]["turn"] = {"turn_eagerness": t.get("turn_eagerness") or TURN_EAGERNESS}
     try:
         async with httpx.AsyncClient(timeout=90, headers=_h()) as h:
             r = await h.patch(f"{BASE}/convai/agents/{row['agent_id']}", json=body)
@@ -238,10 +259,11 @@ def tuning_for_call(profile):
 
 
 def tags_guide(profile):
-    """Encourage human naturalness, conversational pauses, and gentle expressiveness in ElevenLabs calls."""
+    """The call prompt already sets the short, natural style; this adds the one thing only the ElevenLabs voice can do: act out a few tags."""
     if llm.lang_code(profile.get("language")) != "en":
-        return ("\nNATURAL SPEECH & REALISM: Speak in short, super realistic spoken sentences with authentic breathing pauses (using '...' or '—') and human filler words ('mm-hmm', 'yeah', 'hmm...'). Never speak in long robotic paragraphs.")
-    return ("\nNATURAL SPEECH & REALISM: Speak in short, super realistic spoken turns (one or two short sentences). Use natural human breathing pauses with punctuation ('...', '—') and conversational filler words ('mm-hmm', 'yeah', 'hmm, let's see...', 'got it', 'sure') to sound completely authentic, thoughtful, and alive. When something is light or amusing, you may use [chuckles] or [laughs softly]. Never read bracket directions aloud; act them naturally.")
+        return ""
+    return ("\nEXPRESSION: the voice acts out a few square-bracket tags. Use [chuckles] or [laughs softly] when something is genuinely light, [sighs] for a small human moment, "
+            "[slow] when you give a number or a detail. Only now and then, never in your first or last line, and never read a tag aloud.")
 
 
 async def warm_agents():

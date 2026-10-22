@@ -279,6 +279,15 @@ def update_call_sheet(call_id, outcome, summary=""):
         while len(rows[row_index]) <= summary_col:
             rows[row_index].append("")
         rows[row_index][summary_col] = str(summary or "")[:500]
+    answer = str((db.jload(call.get("report"), {}) or {}).get("objective_answer") or "").strip()
+    if answer:  # what the person actually said to the call's task, e.g. their favourite meal, next to the status
+        answer_col = next((i for i, c in enumerate(cols) if str(c).strip().casefold() in ("call answer", "answer")), None)
+        if answer_col is None:
+            cols.append("Call answer")
+            answer_col = len(cols) - 1
+        while len(rows[row_index]) <= answer_col:
+            rows[row_index].append("")
+        rows[row_index][answer_col] = answer[:500]
     db.update("documents", doc["id"], body=json.dumps(table, ensure_ascii=False), updated_at=db.now())
     return True
 

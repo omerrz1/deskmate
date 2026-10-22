@@ -1,5 +1,6 @@
 import VoiceTest from '../VoiceTest'
-import { useRef, useState } from 'react'
+import VoiceBrowser, { CurrentVoice } from '../VoiceBrowser'
+import { useState } from 'react'
 import { api, usePoll } from '../api'
 import { Panel, Badge } from '../ui'
 
@@ -10,33 +11,33 @@ const MODES = [
   ['sheet', 'Always the spreadsheet', 'Ignore phone codes; use the language column.'],
 ]
 
-function VoiceFinder({ language, onPick }) {
-  const [q, setQ] = useState('')
-  const [res, setRes] = useState(null)
-  const [err, setErr] = useState('')
-  const audio = useRef(null)
-  const search = async () => {
-    setErr('')
-    try { setRes(await api.get(`/voices/search?language=${encodeURIComponent(language)}&q=${encodeURIComponent(q)}&gender=female`)) } catch (e) { setErr(e.message) }
+// The panel most people want: which voice and which name the caller uses, with a list to choose from.
+function CallerVoice({ profiles, reload, setMsg }) {
+  const list = profiles || []
+  const [pickId, setPickId] = useState(null)
+  const [open, setOpen] = useState(false)
+  const prof = list.find((p) => p.id === pickId) || list.find((p) => p.language === 'English' && !p.countries.length) || list[0]
+  if (!prof) return null
+  const save = async (patch) => {
+    try {
+      await api.put(`/voice-profiles/${prof.id}`, { name: prof.name, language: prof.language, countries: prof.countries, voice_id: prof.voice_id, agent_name: prof.agent_name, dialect: prof.dialect, tuning: prof.tuning || {}, ...patch })
+      await reload()
+      return true
+    } catch (e) { setMsg(e.message); return false }
   }
   return (
-    <div className="finder">
-      <audio ref={audio} />
-      <div className="filters" style={{ padding: 0, border: 0 }}>
-        <input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && search()} placeholder={`Search ${language} voices, e.g. saudi, egyptian, warm`} />
-        <button className="btn" onClick={search}>Find voices</button>
+    <Panel title="Caller voice and name" right={list.length > 1 ? <select value={prof.id} onChange={(e) => { setPickId(+e.target.value); setOpen(false) }} aria-label="Which profile">{list.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select> : null}>
+      <p className="muted small">The voice and the first name your callers use for <b>{prof.name}</b> calls. Employees can have their own voice and name on their Settings tab; those win over this.</p>
+      <div className="form-row">
+        <label>Name the caller uses<input key={`${prof.id}-${prof.agent_name}`} defaultValue={prof.agent_name} placeholder="e.g. Sophie" maxLength={40}
+          onBlur={async (e) => { const v = e.target.value.trim(); if (v !== (prof.agent_name || '') && await save({ agent_name: v })) setMsg('Caller name saved. It applies from the next call.') }} /></label>
+        <div className="f" style={{ flex: 2 }}>Voice<div style={{ padding: '8px 0' }}><CurrentVoice voiceId={prof.voice_id} /></div></div>
       </div>
-      {err && <p className="warn">{err}</p>}
-      {res && (res.length ? res.map((v) => (
-        <div key={v.voice_id} className="row-split">
-          <div><b>{v.name}</b><small>{[v.accent, v.age, v.descriptive].filter(Boolean).join(' · ')}</small></div>
-          <span className="actions">
-            {v.preview_url && <button className="link" onClick={() => { audio.current.src = v.preview_url; audio.current.play() }}>▶ Listen</button>}
-            <button className="btn small" onClick={() => onPick(v)}>Use</button>
-          </span>
-        </div>
-      )) : <p className="muted">No voices found.</p>)}
-    </div>
+      <div className="actions"><button className="btn" onClick={() => setOpen(!open)}>{open ? 'Close the list' : 'Choose a different voice'}</button></div>
+      {open && <VoiceBrowser language={prof.language} currentId={prof.voice_id} onPick={async (v) => {
+        if (await save({ voice_id: v.voice_id, agent_name: prof.agent_name || v.name.split(/[ \-–—]/)[0] })) { setOpen(false); setMsg(`Calls now use ${v.name}. It applies from the next call.`) }
+      }} />}
+    </Panel>
   )
 }
 
@@ -75,7 +76,7 @@ function ProfileForm({ initial, countries, onDone }) {
         <label>ElevenLabs voice ID
           <div className="actions"><input value={p.voice_id} onChange={(e) => set('voice_id', e.target.value)} style={{ flex: 1 }} /><button className="btn small" onClick={() => setFind(!find)}>Browse voices</button></div>
         </label>
-        {find && <VoiceFinder language={p.language} onPick={(v) => { set('voice_id', v.voice_id); if (!p.agent_name) set('agent_name', v.name.split(/[ -–—]/)[0]); setFind(false) }} />}
+        {find && <VoiceBrowser language={p.language} currentId={p.voice_id} onPick={(v) => { set('voice_id', v.voice_id); if (!p.agent_name) set('agent_name', v.name.split(/[ \-–—]/)[0]); setFind(false) }} />}
         <div className="actions"><button className="btn solid" disabled={!p.name || !p.voice_id} onClick={save}>Save</button></div>
       </div>
     </Panel>
@@ -118,6 +119,15 @@ export default function Settings({ embedded = false }) {
             </label>
           ))}
         </div>
+      </Panel>
+
+      <CallerVoice profiles={profiles} reload={reload} setMsg={setMsg} />
+
+      <Panel title="Standing instructions for every call">
+        <p className="muted small">Rules every call reads again before it starts, whoever is calling and whatever the campaign: how to speak, what never to say, when to stop. Changes apply from the next call. Campaign and one-off instructions are added to these.</p>
+        <textarea rows="5" style={{ width: '100%' }} key={settings?.call_instructions || 'none'} defaultValue={settings?.call_instructions || ''} maxLength={4000}
+          placeholder="e.g. Keep it under two minutes. Never discuss prices. If they ask to stop, stop. Always confirm their name first."
+          onBlur={async (e) => { if (e.target.value.trim() !== (settings?.call_instructions || '')) { try { await api.put('/settings', { call_instructions: e.target.value }); reloadS(); setMsg('Standing call instructions saved.') } catch (x) { setMsg(x.message) } } }} />
       </Panel>
 
       <Panel title="Backup voice (OpenAI)">

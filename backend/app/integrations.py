@@ -51,6 +51,17 @@ def twilio_error_hint(code, message="", service="messaging"):
                 "and that it can receive calls. https://www.twilio.com/docs/api/errors/" + code)
     if service == "voice" and code == "21215":
         return "Twilio is blocking calls to this destination country. Enable the country in Twilio Console → Voice → Settings → Geo permissions. https://www.twilio.com/docs/api/errors/21215"
+    if service == "messaging" and code in ("21606", "21659", "21660"):
+        return ("Twilio can't send texts from the saved number: it is not an SMS-capable number on this Twilio account (voice-only numbers can't text), or its country doesn't match the recipient. "
+                "Open Twilio Console → Phone Numbers → Manage → Active numbers, check the number has the SMS capability and belongs to this account, "
+                "or buy an SMS-capable number and save it under Apps → Twilio → Phone caller ID and SMS number. A UK text may also need a registered UK sender ID or number. "
+                "https://www.twilio.com/docs/api/errors/" + code)
+    if service == "messaging" and code == "21408":
+        return "Twilio is blocking texts to this destination country. Enable it in Twilio Console → Messaging → Settings → Geo permissions. https://www.twilio.com/docs/api/errors/21408"
+    if service == "messaging" and code == "21610":
+        return "This person replied STOP to an earlier text, so Twilio blocks further texts to them until they reply START."
+    if service == "messaging" and code in ("21211", "21614"):
+        return "Twilio rejected the recipient number. Check it is a valid mobile number in international format (for the UK, +44 followed by the number without its leading 0)."
     return ""
 
 

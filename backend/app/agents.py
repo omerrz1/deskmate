@@ -22,10 +22,11 @@ for stmt in (
     "CREATE TABLE IF NOT EXISTS agent_notes(id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER, note TEXT, created_at REAL)",
 ):
     db.run(stmt)
-try:
-    db.run("ALTER TABLE campaigns ADD COLUMN agent_id INTEGER")
-except Exception:
-    pass
+for _stmt in ("ALTER TABLE campaigns ADD COLUMN agent_id INTEGER", "ALTER TABLE agents ADD COLUMN call_name TEXT DEFAULT ''"):
+    try:
+        db.run(_stmt)
+    except Exception:
+        pass
 
 COLORS = ["#fe5011", "#221d1b", "#8fb3c6", "#c45423", "#12806f", "#7c4a8b", "#d4a373", "#4f6d5a"]
 FEMALE_VOICES = ["marin", "coral", "sage", "shimmer", "nova"]
@@ -166,13 +167,16 @@ _CALL_CANCEL = re.compile(r"\b(?:don['’]?t|do not|never|stop|cancel)\s+(?:the\
 # what follows the verb but is not part of the task itself
 _ORDER_FILLER = re.compile(r"^(?:(?:right |straight )?(?:now|away|immediately|asap|again|them|him|her|this number|the number|that number|on|at|to|and|then|please|pls|plz|ok|okay|so|yes|yeah|yep|sure|go ahead|do it|try again|retry|try calling)\b[\s,.:;!-]*)+", re.I)
 # the part of the order that asks for a report is the platform's job after the call, not something to say on the phone
+_AFTER_TAIL = re.compile(r"[\s,;.-]+(?:and|then|&|after (?:you|that))\s+(?:please\s+)?(?:past|paste|post|put|share|send|go search|search|look up|find the|save|add|write)\b.*$", re.I | re.S)
 _REPORT_TAIL = re.compile(r"[\s,;.-]*(?:and\s+|then\s+|&\s*)?(?:please\s+)?(?:report|tell me|let me know|get back to me|update me|send me|write (?:me|up)|give me|come back)\b.*$", re.I | re.S)
 
 
-def _call_objective(text):
+def _call_objective(text, name=""):
     """What the person phoned must be asked or told, in the admin's own words: 'call now ask them whats their favourite meal
     and report what they said' -> 'ask them whats their favourite meal'. '' when the message names no task."""
-    t = re.sub(r"\s+", " ", _CALL_PHONE.sub(" ", text or "")).strip()
+    t = re.sub(r"\s+", " ", re.sub(r"[(\[]\s*[)\]]", " ", _CALL_PHONE.sub(" ", text or ""))).strip()  # "omer (07447…)" must not leave "omer ( )"
+    if name:
+        t = re.sub(rf"\b{re.escape(name)}\b[\s,:-]*", "", t, count=1, flags=re.I)  # the name goes on the contact, not into the task
     order = _CALL_ORDER.search(t)
     if order:
         before, after = t[:order.start()], t[order.end():]
@@ -180,7 +184,7 @@ def _call_objective(text):
         gave = _GIVE_A_CALL.search(t)
         before, after = (t[:gave.start()], t[gave.end():]) if gave else ("", t)
     after = _ORDER_FILLER.sub("", _CALL_RETRY.sub(" ", after).strip()).strip(" ,;:.!-")
-    after = _REPORT_TAIL.sub("", after).strip(" ,;:.!-")
+    after = _REPORT_TAIL.sub("", _AFTER_TAIL.sub("", after)).strip(" ,;:.!-")
     # background said before the order ("We are running a food survey. Call 07... and ask them.") belongs to the task, a bare "Ethan," or "please" does not
     before = _REPORT_TAIL.sub("", before).strip(" ,;:.-")
     context = before if len(before.split()) >= 4 else ""
@@ -188,6 +192,22 @@ def _call_objective(text):
     if len(re.findall(r"[^\W\d_]{2,}", after)) < 2:  # nothing left but "yes" / "them" / a number: there is no task in this message
         return ""
     return task[:480]
+
+
+_NOT_A_NAME = {"now", "them", "him", "her", "again", "me", "us", "this", "that", "the", "number", "on", "at", "to", "back", "up", "my", "our", "a", "an", "and", "then", "please", "omer's"}
+
+
+def _call_name(text):
+    """Who is being called, when the message says it: 'please call omer (07447…)' -> 'Omer'."""
+    m = re.search(r"\b(?:call|phone|ring|dial)\s+(?:to\s+)?([^\W\d_][\w'’-]{1,24})(?:\s+([^\W\d_][\w'’-]{1,24}))?\s*[(\[,:-]?\s*(?:\+|\d)", text or "", re.I)
+    if not m:
+        return ""
+    words = [w for w in m.groups() if w]
+    if words[0].lower() in _NOT_A_NAME:
+        return ""
+    if len(words) == 2 and words[1].lower() in _NOT_A_NAME:
+        words = words[:1]
+    return " ".join(w[:1].upper() + w[1:] for w in words)
 
 
 def _last_call_objective(phone):
@@ -222,10 +242,11 @@ def _explicit_call_args(text, previous_messages):
         for match in reversed(list(_CALL_PHONE.finditer(candidate or ""))):
             phone = messaging.normalise(match.group(0))
             if phone:
-                objective = _call_objective(current)
+                name = _call_name(current) or _call_name(candidate)
+                objective = _call_objective(current, name)
                 if not objective:  # "call again": repeat what the last request was, taken from where the number came from
-                    objective = _call_objective(candidate) or _last_call_objective(phone)
-                return {"phone": phone, "objective": objective or DEFAULT_CALL_OBJECTIVE}
+                    objective = _call_objective(candidate, name) or _last_call_objective(phone)
+                return {"phone": phone, "objective": objective or DEFAULT_CALL_OBJECTIVE, **({"name": name} if name else {})}
 
     # A retry can refer to a number omitted from the confirmation. Use the last
     # outbound call's contact only when the recent assistant explicitly offered
@@ -236,6 +257,76 @@ def _explicit_call_args(text, previous_messages):
         if phone:
             return {"phone": phone, "objective": (last or {}).get("objective") or DEFAULT_CALL_OBJECTIVE}
     return None
+
+
+_CALL_BRIEF_SYSTEM = (
+    "A manager asked an AI employee to phone someone. Split the manager's message into JSON with these keys: "
+    "person_name (first name of who to call, or ''); "
+    "task (what the caller must ask or tell the person ON THE PHONE, one or two short imperative sentences in simple words, e.g. 'Ask what their favourite meal is.'; "
+    "never include what happens after the call: reporting back, posting here, searching, sending messages, looking things up); "
+    "style (how the caller should speak, e.g. 'very fast, few words, simple, natural, fun'; '' if the manager did not say); "
+    "after_call (everything the employee must do AFTER the call once the answer is known, e.g. 'Post the meal here and search for its ingredients.'; '' if nothing). "
+    "Use the manager's own words and meaning. Never invent a task or a name.")
+
+
+async def refine_call_args(args, text):
+    """The admin's sentence holds three things: what to say on the phone, how to sound, and what to do afterwards. Only the first two belong
+    on the call; a cheap model separates them. Without a model the rule-based objective stands."""
+    try:
+        res = await asyncio.wait_for(llm.complete_json(_CALL_BRIEF_SYSTEM, _CALL_PHONE.sub("[number]", (text or "")[:1500])), 10)
+    except Exception:
+        return args
+    if not isinstance(res, dict):
+        return args
+    clean = lambda v, n: re.sub(r"\s+", " ", v).strip()[:n] if isinstance(v, str) else ""  # noqa: E731
+    out = dict(args)
+    task, style, after = clean(res.get("task"), 300), clean(res.get("style"), 200), clean(res.get("after_call"), 400)
+    if len(re.findall(r"[^\W\d_]{2,}", task)) >= 2:
+        out["objective"] = task
+    if style:
+        out["style"] = style
+    if after:
+        out["after_call"] = after
+    name = clean(res.get("person_name"), 40)
+    if name and not out.get("name") and re.fullmatch(r"[^\W\d_][\w'’ -]*", name):
+        out["name"] = name
+    return out
+
+
+def _chat_history(mid, ag):
+    """The last 30 lines of a chat as this employee sees them."""
+    hist = []
+    for r in db.q("SELECT role,agent_id,text,attachments FROM meeting_msgs WHERE meeting_id=? ORDER BY id DESC LIMIT 30", (mid,))[::-1]:
+        files_note = "\n".join(f"[File shared in chat: {f.get('title', 'file')} (document id {(f.get('agent_copies') or {}).get(str(ag['id']), f.get('doc_id'))}); use read_document to inspect it.]" for f in db.jload(r.get("attachments"), []))
+        if r["role"] == "admin":
+            hist.append({"role": "user", "content": (r["text"] or "") + ("\n" if r["text"] and files_note else "") + files_note or "[The admin shared a file in this chat.]"})
+        elif r["agent_id"] == ag["id"]:
+            hist.append({"role": "assistant", "content": (r["text"] or "") + (("\n" + files_note) if files_note else "")})
+        else:
+            who = (get(r["agent_id"]) or {}).get("name", "A colleague")
+            hist.append({"role": "user", "content": f"[{who} said]: {r['text'] or ''}" + (("\n" + files_note) if files_note else "")})
+    return hist
+
+
+async def follow_up_after_call(mid, agent_id, after_call):
+    """A call this employee placed has finished and its answer is in the chat. The admin also asked for something to happen once the answer was
+    known (look something up, send it on...): do it now, in the same chat."""
+    m, ag = meeting_detail(mid), get(agent_id)
+    if not m or not ag:
+        return
+    hist = _chat_history(mid, ag) + [{"role": "user", "content": (
+        "[Automatic note, not typed by the admin: the call you placed has finished and its result is in the chat above. When the admin asked you to call, they also said what to do afterwards: "
+        f"\"{after_call}\". Do that now with your tools, using the answer from the call, and post the result in one short message. Do not place another call.]")}]
+    final, used = "", []
+    try:
+        async for ev in run_loop(ag, hist, m["kind"], m["agents"], meeting_id=mid):
+            if ev["type"] == "done":
+                final, used = ev["text"], ev.get("tools", [])
+    except Exception as e:
+        final = f"I couldn’t finish the follow-up to the call ({type(e).__name__}). Tell me again what you need from the answer and I’ll do it."
+    if final.strip() and not final.strip().lower().startswith("[pass]"):
+        db.run("INSERT INTO meeting_msgs(meeting_id,role,agent_id,text,tools,created_at) VALUES(?,?,?,?,?,?)",
+               (mid, "agent", agent_id, verified_twilio_reply(final, used), json.dumps(used), db.now()))
 
 
 def in_live_meeting(agent_id):
@@ -428,16 +519,7 @@ async def meeting_message(mid, text):
     ags = m["agents"]
     direct_call_done = False
     for ag in await _responders(text, ags, mid):
-        hist = []
-        for r in db.q("SELECT role,agent_id,text,attachments FROM meeting_msgs WHERE meeting_id=? ORDER BY id DESC LIMIT 30", (mid,))[::-1]:
-            files_note = "\n".join(f"[File shared in chat: {f.get('title', 'file')} (document id {(f.get('agent_copies') or {}).get(str(ag['id']), f.get('doc_id'))}); use read_document to inspect it.]" for f in db.jload(r.get("attachments"), []))
-            if r["role"] == "admin":
-                hist.append({"role": "user", "content": (r["text"] or "") + ("\n" if r["text"] and files_note else "") + files_note or "[The admin shared a file in this chat.]"})
-            elif r["agent_id"] == ag["id"]:
-                hist.append({"role": "assistant", "content": (r["text"] or "") + (("\n" + files_note) if files_note else "")})
-            else:
-                who = (get(r["agent_id"]) or {}).get("name", "A colleague")
-                hist.append({"role": "user", "content": f"[{who} said]: {r['text'] or ''}" + (("\n" + files_note) if files_note else "")})
+        hist = _chat_history(mid, ag)
         yield {"type": "speaker", "agent_id": ag["id"], "name": ag["name"]}
         forced_call = _explicit_call_args(text, m["messages"])
         if forced_call and direct_call_done:
@@ -445,6 +527,7 @@ async def meeting_message(mid, text):
             continue
         if forced_call:
             direct_call_done = True
+            forced_call = await refine_call_args(forced_call, text)
             yield {"type": "tool_start", "name": "call_contact", "args": forced_call, "agent_id": ag["id"]}
             try:
                 result, link = await run_agent_tool({**ag, "live_admin": True, "_meeting_id": mid}, "call_contact", forced_call)
@@ -457,8 +540,9 @@ async def meeting_message(mid, text):
             if result.get("error"):
                 final = f"I couldn’t place the call: {result['error']}"
             else:
-                final = (f"Calling {result.get('phone') or forced_call['phone']} now. Task: {forced_call['objective']} "
-                         "Twilio has accepted the request but hasn’t confirmed the phone is ringing yet. I’ll post what they say here as soon as the call ends.")
+                final = (f"Calling {forced_call.get('name') or result.get('phone') or forced_call['phone']} now. Task: {forced_call['objective']} "
+                         + (f"After the call I’ll {forced_call['after_call'][:1].lower() + forced_call['after_call'][1:]} " if forced_call.get("after_call") else "")
+                         + "Twilio has accepted the request but hasn’t confirmed the phone is ringing yet. I’ll post what they say here as soon as the call ends.")
             db.run("INSERT INTO meeting_msgs(meeting_id,role,agent_id,text,tools,created_at) VALUES(?,?,?,?,?,?)",
                    (mid, "agent", ag["id"], final, json.dumps(used), db.now()))
             yield {"type": "agent_done", "agent_id": ag["id"], "name": ag["name"], "text": final, "tools": used}

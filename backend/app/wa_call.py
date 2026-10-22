@@ -9,6 +9,7 @@ import base64
 import fractions
 import json
 import os
+import re
 import time
 
 import httpx
@@ -775,7 +776,7 @@ class ElevenEngine:
         elif t == "user_transcript":
             s.say("customer", (ev.get("user_transcription_event") or {}).get("user_transcript", ""))
         elif t == "agent_response":
-            s.say("agent", (ev.get("agent_response_event") or {}).get("agent_response", ""))
+            s.say("agent", re.sub(r"\s*\[[a-z ]{3,24}\]\s*", " ", (ev.get("agent_response_event") or {}).get("agent_response", "")).strip())  # the voice acts out [chuckles]; the transcript doesn't show it
         elif t == "interruption":
             s.out.clear()
         elif t == "ping":

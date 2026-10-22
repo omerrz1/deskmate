@@ -1,6 +1,7 @@
 """The admin copilot: streaming OpenAI chat with tools that operate the platform."""
 import asyncio
 import json
+import re
 
 from harness import AFTER_TOOL, TOOL_ERROR, ChatModel, Harness, LoopConfig, RunContext
 
@@ -31,7 +32,9 @@ TOOLS = [
         "contact_id": {"type": "integer", "description": "Existing customer ID; optional when phone is provided."},
         "phone": {"type": "string", "description": "Phone number to call, international format preferred; local numbers use the workspace calling code."},
         "name": {"type": "string", "description": "Optional contact name; a minimal contact is created if this is a new phone number."},
-        "objective": {"type": "string", "description": "The task for the call, in the admin's own words, e.g. 'Ask what their favourite meal is.' Never swap it for a generic check-in. Leave out 'report back': the result is posted in this chat automatically when the call ends."}, "report_sheet": {"type": "string", "description": "Title of the spreadsheet to update after the call, if requested by the admin."},
+        "objective": {"type": "string", "description": "The task for the call, in the admin's own words, e.g. 'Ask what their favourite meal is.' Never swap it for a generic check-in. Leave out 'report back': the result is posted in this chat automatically when the call ends."}, "style": {"type": "string", "description": "How the caller should sound if the admin said (e.g. 'very fast, few words, simple, natural, fun'). Empty if not mentioned."},
+        "after_call": {"type": "string", "description": "Anything the admin wants done AFTER the call once the answer is known (e.g. 'search the ingredients and post them here'). It is done in this chat when the call ends, never said on the phone."},
+        "report_sheet": {"type": "string", "description": "Title of the spreadsheet to update after the call, if requested by the admin."},
         "report_row": {"type": "integer", "description": "Optional one-based data row number in report_sheet."},
         "report_status_column": {"type": "string", "description": "Status column name; defaults to status."}}, "required": ["objective"]}},
     {"name": "list_calls", "description": "Recent calls with summaries. Filter by status, outcome or contact.", "parameters": {"type": "object", "properties": {
@@ -156,9 +159,12 @@ async def run_tool(name, a, agent=None):
                 return {"error": "Provide a valid international number, or set the workspace calling code for local numbers."}, None
             digits = phone[1:]
             tail = digits[-9:]
-            contact = db.q1("SELECT id FROM contacts WHERE substr(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(',''),')',''), -?) = ? LIMIT 1", (len(tail), tail))
+            contact = db.q1("SELECT id,name FROM contacts WHERE substr(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone,'+',''),' ',''),'-',''),'(',''),')',''), -?) = ? LIMIT 1", (len(tail), tail))
             if contact:
                 contact_id = contact["id"]
+                given = str(a.get("name") or "").strip()[:80]
+                if given and (not (contact.get("name") or "").strip() or re.fullmatch(r"[+\d\s().-]{6,}", contact["name"].strip())):
+                    db.update("contacts", contact_id, name=given)
             else:
                 name = (str(a.get("name") or phone).strip() or phone)[:80]
                 contact_id = db.run("INSERT INTO contacts(name,phone,language,status,tags,created_at) VALUES(?,?,?,?,?,?)",
@@ -167,7 +173,8 @@ async def run_tool(name, a, agent=None):
         result = await callengine.call_now(contact_id, a["objective"], (agent or {}).get("id"),
                                            report_sheet_id=sheet_id, report_row=a.get("report_row"),
                                            report_status_column=a.get("report_status_column") or "status",
-                                           meeting_id=(agent or {}).get("_meeting_id"))
+                                           meeting_id=(agent or {}).get("_meeting_id"),
+                                           style=a.get("style") or "", after_call=a.get("after_call") or "")
         if isinstance(result, dict) and not result.get("error"):
             result["report_back"] = "When the call ends, its result is posted in this chat automatically. Tell the admin that; do not claim any outcome before then."
         if sheet_id and isinstance(result, dict) and not result.get("error"):

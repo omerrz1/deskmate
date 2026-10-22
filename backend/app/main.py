@@ -32,6 +32,8 @@ app.include_router(people_api.router)
 app.include_router(chats_api.router)
 app.include_router(chat_hooks.router)
 app.include_router(setup_api.router)
+from . import voice_library
+app.include_router(voice_library.router)
 app.add_middleware(CORSMiddleware, allow_origins=sorted(security.ALLOWED_ORIGINS), allow_credentials=True,
                    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token"])
 
@@ -888,6 +890,8 @@ class AgentPatch(BaseModel):
     persona: Optional[str] = None
     bio: Optional[str] = None
     openai_voice: Optional[str] = None
+    eleven_voice: Optional[str] = None
+    call_name: Optional[str] = None
     autonomy: Optional[str] = None
     color: Optional[str] = None
     email: Optional[str] = None
@@ -909,6 +913,12 @@ def agents_patch(aid: int, p: AgentPatch):
         raise HTTPException(400, "autonomy must be full or ask")
     if "openai_voice" in f and f["openai_voice"] not in llm.VOICES:
         raise HTTPException(400, "unknown voice")
+    if "eleven_voice" in f:
+        f["eleven_voice"] = f["eleven_voice"].strip()
+        if f["eleven_voice"] and not voice_library.VOICE_ID.fullmatch(f["eleven_voice"]):
+            raise HTTPException(400, "That is not a valid ElevenLabs voice ID.")
+    if "call_name" in f:
+        f["call_name"] = re.sub(r"\s+", " ", f["call_name"]).strip()[:40]
     if "email" in f:
         f["email"] = f["email"].strip().lower()
         if not office.EMAIL_RE.match(f["email"]):
@@ -1623,6 +1633,7 @@ def settings_get():
             "max_concurrent_calls": callengine.concurrency_limit(),
             "english_only": voices.english_only(),
             "main_link": voices.get_setting("main_link", ""),
+            "call_instructions": voices.get_setting("call_instructions", ""),
             "transcript_retention_days": int(voices.get_setting("transcript_retention_days", "0") or 0)}
 
 
@@ -1633,6 +1644,7 @@ class SettingsIn(BaseModel):
     call_voice: Optional[str] = None
     english_only: Optional[bool] = None
     main_link: Optional[str] = None
+    call_instructions: Optional[str] = None
     max_concurrent_calls: Optional[int] = None
 
 
@@ -1651,6 +1663,8 @@ def settings_put(s: SettingsIn, request: Request):
         if link and not re.match(r"^https?://[^\s]{4,300}$", link):
             raise HTTPException(400, "Enter a full link starting with https://")
         voices.set_setting("main_link", link)
+    if s.call_instructions is not None:
+        voices.set_setting("call_instructions", s.call_instructions.strip()[:4000])
     if s.english_only is not None:
         voices.set_setting("english_only", "1" if s.english_only else "0")
     if s.voice_engine is not None:

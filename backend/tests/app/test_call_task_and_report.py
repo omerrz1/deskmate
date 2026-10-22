@@ -214,3 +214,181 @@ class VoiceTests(CallReportBase):
                 engine = await wa_call.make_engine(sess, call_row, contact, camp)
             self.assertIsInstance(engine, wa_call.OpenAIEngine)
             self.assertEqual(db.q1("SELECT voice_engine FROM calls WHERE id=?", (call,))["voice_engine"], "openai: no ElevenLabs key is connected")
+
+
+class FakeEleven:
+    """Stands in for httpx.AsyncClient so the voice list can be tested without ElevenLabs."""
+    calls = []
+
+    def __init__(self, *a, **kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    @staticmethod
+    def reply(status, body):
+        return mock.Mock(status_code=status, json=lambda: body, text=json.dumps(body))
+
+    async def get(self, url, headers=None, params=None):
+        FakeEleven.calls.append(("GET", url, params))
+        if url.endswith("/v2/voices"):
+            return self.reply(200, {"voices": [
+                {"voice_id": "A" * 20, "name": "Sophie", "category": "premade", "labels": {"gender": "female", "accent": "british"}, "preview_url": "https://x/sophie.mp3"},
+                {"voice_id": "B" * 20, "name": "Daniel", "category": "premade", "labels": {"gender": "male", "accent": "american"}, "preview_url": "https://x/daniel.mp3"}],
+                "has_more": False})
+        if url.endswith("/v1/shared-voices"):
+            return self.reply(200, {"voices": [{"voice_id": "C" * 20, "public_owner_id": "D" * 20, "name": "Mia", "gender": "female", "accent": "british", "preview_url": "https://x/mia.mp3"}]})
+        if "/v1/voices/" in url:
+            return self.reply(200, {"voice_id": url.rsplit("/", 1)[1], "name": "Sophie", "labels": {"gender": "female"}, "preview_url": "https://x/sophie.mp3"})
+        return self.reply(404, {})
+
+    async def post(self, url, headers=None, json=None):
+        FakeEleven.calls.append(("POST", url, json))
+        return self.reply(200, {"voice_id": url.rsplit("/", 1)[1]})
+
+
+class VoicePickerTests(CallReportBase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        FakeEleven.calls = []
+        for patcher in (mock.patch("app.voice_library.httpx.AsyncClient", FakeEleven), mock.patch.object(llm, "eleven_key", return_value="key")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    async def test_the_account_voices_and_the_public_library_can_both_be_browsed_and_filtered(self):
+        st, mine = await self.owner.get("/api/voices/library", query="source=mine")
+        self.assertEqual((st, [v["name"] for v in mine]), (200, ["Sophie", "Daniel"]))
+        self.assertEqual(mine[0]["gender"], "female")
+        self.assertEqual(mine[0]["preview_url"], "https://x/sophie.mp3")
+        _, men = await self.owner.get("/api/voices/library", query="source=mine&gender=male")
+        self.assertEqual([v["name"] for v in men], ["Daniel"])
+        _, shared = await self.owner.get("/api/voices/library", query="source=library&gender=female&language=English")
+        self.assertEqual((shared[0]["name"], shared[0]["public_owner_id"], shared[0]["source"]), ("Mia", "D" * 20, "library"))
+        self.assertEqual(FakeEleven.calls[-1][2]["gender"], "female")
+
+    async def test_choosing_a_library_voice_adds_it_to_the_account_first(self):
+        st, r = await self.owner.post("/api/voices/add", {"voice_id": "C" * 20, "public_owner_id": "D" * 20, "name": "Mia"})
+        self.assertEqual((st, r["added"]), (200, True))
+        self.assertTrue(FakeEleven.calls[-1][1].endswith(f"/v1/voices/add/{'D' * 20}/{'C' * 20}"))
+        st, _ = await self.owner.post("/api/voices/add", {"voice_id": "../etc", "public_owner_id": "D" * 20})
+        self.assertEqual(st, 400)
+
+    async def test_without_an_elevenlabs_key_the_list_says_so(self):
+        with mock.patch.object(llm, "eleven_key", return_value=""):
+            st, r = await self.owner.get("/api/voices/library", query="source=mine")
+        self.assertEqual(st, 400)
+        self.assertIn("Connect your ElevenLabs key", r["detail"])
+
+    async def test_an_employee_gets_their_own_voice_and_call_name_and_the_call_uses_both(self):
+        with db.use(self.ws):
+            aid = agents.create("Ethan", "male", "Caller", "Friendly.", "", bio="")
+        st, r = await self.owner.patch(f"/api/agents/{aid}", {"eleven_voice": "A" * 20, "call_name": "  Sophie  "})
+        self.assertEqual((st, r["eleven_voice"], r["call_name"]), (200, "A" * 20, "Sophie"))
+        st, _ = await self.owner.patch(f"/api/agents/{aid}", {"eleven_voice": "not a voice id!"})
+        self.assertEqual(st, 400)
+        with db.use(self.ws):
+            call = self.make_call(None, aid)
+            row, contact, camp = callengine.call_context(call)
+            self.assertIn("You are Sophie, a voice assistant", callengine.system_prompt(row, contact, camp, realtime=True, external=True))
+            sess = mock.Mock(call_id=call, agent=agents.get(aid), direction="out")
+            with mock.patch.object(llm, "eleven_key", return_value="key"), \
+                 mock.patch.object(eleven_agents, "ensure_agent", new_callable=mock.AsyncMock, return_value="agent_1"), \
+                 mock.patch.object(eleven_agents, "signed_url", new_callable=mock.AsyncMock, return_value="wss://example.test"):
+                engine = await wa_call.make_engine(sess, row, contact, camp)
+            self.assertEqual(engine.voice_id, "A" * 20)  # the employee's own voice, not the company default
+
+
+class StandingInstructionsAndWebTests(CallReportBase):
+    async def test_standing_instructions_are_read_into_every_call(self):
+        st, r = await self.owner.put("/api/settings", {"call_instructions": "  Never discuss prices. Keep it under two minutes.  "})
+        self.assertEqual((st, r["call_instructions"]), (200, "Never discuss prices. Keep it under two minutes."))
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            row, contact, camp = callengine.call_context(self.make_call(mid, aid))
+            self.assertIn("STANDING RULES FROM THE ADMIN", callengine.system_prompt(row, contact, camp, realtime=True, external=True))
+            self.assertIn("Never discuss prices", callengine.system_prompt(row, contact, camp, realtime=True, external=True))
+        await self.owner.put("/api/settings", {"call_instructions": ""})
+        with db.use(self.ws):
+            self.assertNotIn("STANDING RULES", callengine.system_prompt(row, contact, camp, realtime=True, external=True))
+
+    async def test_the_caller_can_search_the_web_mid_call(self):
+        from app import agent_tools, public_tools
+        self.assertIn("search_web", agent_tools.SPECS)
+        found = [{"title": "Salmon burger", "url": "https://example.com/r", "snippet": "Salmon patty, brioche bun, lettuce, tartare sauce."}]
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            with mock.patch.object(public_tools, "web_search", new_callable=mock.AsyncMock, return_value=found):
+                result = await agent_tools.arun(call, "search_web", {"query": "salmon burger ingredients"})
+            self.assertIn("brioche bun", result)
+            self.assertIn("ignore", result)  # web text is data, never instructions
+            self.assertEqual(db.q1("SELECT kind FROM call_actions WHERE call_id=?", (call,))["kind"], "web_search")
+            with mock.patch.object(public_tools, "web_search", new_callable=mock.AsyncMock, side_effect=TimeoutError):
+                self.assertIn("didn't come back in time", await agent_tools.arun(call, "search_web", {"query": "x"}))
+
+
+class CallBriefTests(CallReportBase):
+    MESSAGE = ("please call omer (07447781753) ask him his favourate meal and past it here along side theingredients go search the ingredients "
+               "after you find out his meal, be very fast dont talk much be simple and natural and fun")
+
+    async def test_the_message_is_split_into_the_phone_task_the_manner_and_the_work_for_afterwards(self):
+        """Regression: the whole sentence went to the phone agent, which then quizzed the person about ingredients."""
+        with mock.patch("app.messaging.default_code", return_value="44"):
+            rules = agents._explicit_call_args(self.MESSAGE, [])
+        self.assertEqual(rules, {"phone": "+447447781753", "objective": "Ask him his favourate meal", "name": "Omer"})
+        split = {"person_name": "Omer", "task": "Ask him what his favourite meal is.", "style": "very fast, few words, simple, natural, fun",
+                 "after_call": "Post the meal here and search for its ingredients."}
+        with mock.patch.object(llm, "complete_json", new_callable=mock.AsyncMock, return_value=split):
+            args = await agents.refine_call_args(rules, self.MESSAGE)
+        self.assertEqual(args["objective"], "Ask him what his favourite meal is.")
+        self.assertEqual(args["style"], "very fast, few words, simple, natural, fun")
+        self.assertEqual(args["after_call"], "Post the meal here and search for its ingredients.")
+        self.assertEqual(args["name"], "Omer")
+        with mock.patch.object(llm, "complete_json", new_callable=mock.AsyncMock, side_effect=RuntimeError("no key")):
+            self.assertEqual(await agents.refine_call_args(rules, self.MESSAGE), rules)  # without a model the rules stand
+
+    async def test_the_phone_agent_gets_the_task_and_manner_but_not_the_afterwards_work(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, objective="Ask him what his favourite meal is.", style="very fast, few words, fun",
+                                  after_call="Post the meal here and search for its ingredients.")
+            row, contact, camp = callengine.call_context(call)
+            prompt = callengine.system_prompt(row, contact, camp, realtime=True, external=True)
+            self.assertIn("HOW THE ADMIN WANTS YOU TO SOUND: very fast, few words, fun", prompt)
+            self.assertNotIn("search for its ingredients", prompt)
+
+    async def test_the_employee_does_the_afterwards_work_in_the_chat_once_the_answer_is_in(self):
+        transcript = [{"role": "agent", "text": "Hi", "t": 1}, {"role": "customer", "text": "Salmon burger", "t": 3}]
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, status="completed", transcript=json.dumps(transcript), duration=20,
+                                  after_call="Post the meal here and search for its ingredients.")
+            with mock.patch.object(agents, "follow_up_after_call", new_callable=mock.AsyncMock) as follow:
+                callengine.announce_call(call)
+                for task in list(callengine._FOLLOW_UPS):
+                    await task
+            follow.assert_awaited_once_with(mid, aid, "Post the meal here and search for its ingredients.")
+            self.assertIn("Next, as you asked: Post the meal here", self.chat_text(mid)[0])
+
+    async def test_a_call_that_got_no_answer_does_not_trigger_the_afterwards_work(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, status="no_answer", after_call="Search the ingredients.")
+            with mock.patch.object(agents, "follow_up_after_call", new_callable=mock.AsyncMock) as follow:
+                callengine.announce_call(call)
+                self.assertEqual(callengine._FOLLOW_UPS, set())
+            follow.assert_not_awaited()
+
+
+class SmsErrorTests(CallReportBase):
+    async def test_a_text_that_cannot_be_sent_explains_the_twilio_number_problem(self):
+        from app import integrations
+        hint = integrations.twilio_error_hint(21606, "The 'From' phone number provided is not a valid, SMS-capable Twilio phone number.", "messaging")
+        self.assertIn("SMS capability", hint)
+        self.assertIn("Active numbers", hint)
+        self.assertIn("Geo permissions", integrations.twilio_error_hint(21408, "", "messaging"))
+        self.assertEqual(integrations.twilio_error_hint(21606, "", "voice"), "")  # a voice call error is explained elsewhere

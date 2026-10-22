@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { api, usePoll } from '../../api'
 import { useConfirm } from '../../Feedback'
 import VoiceTest from '../../VoiceTest'
+import VoiceBrowser, { CurrentVoice } from '../../VoiceBrowser'
 
 const VOICES = ['marin', 'cedar', 'coral', 'sage', 'ballad', 'verse', 'ash', 'alloy', 'echo', 'shimmer']
 const COLORS = ['#fe5011', '#221d1b', '#8fb3c6', '#c45423', '#12806f', '#7c4a8b', '#d4a373', '#4f6d5a']
@@ -16,8 +17,9 @@ export default function AgentSettings({ a, reload }) {
   const [mail, setMail] = useState({ email: a.email || '', password: '' })
   const [test, setTest] = useState(null)
   const [busy, setBusy] = useState('')
+  const [pickVoice, setPickVoice] = useState(false)
   useEffect(() => {
-    setF({ name: a.name, gender: a.gender, role: a.role, personality: a.personality, persona: a.persona, bio: a.bio, openai_voice: a.openai_voice, color: a.color, autonomy: a.autonomy, signature: a.signature || '', works_alone: !!a.works_alone, spend_cap_day: a.spend_cap_day || 0, approve_outside: !!a.approve_outside })
+    setF({ name: a.name, gender: a.gender, role: a.role, personality: a.personality, persona: a.persona, bio: a.bio, openai_voice: a.openai_voice, eleven_voice: a.eleven_voice || '', call_name: a.call_name || '', color: a.color, autonomy: a.autonomy, signature: a.signature || '', works_alone: !!a.works_alone, spend_cap_day: a.spend_cap_day || 0, approve_outside: !!a.approve_outside })
     setMail({ email: a.email || '', password: '' }); setTest(null)
   }, [a.id]) // eslint-disable-line
   if (!f) return null
@@ -57,6 +59,17 @@ export default function AgentSettings({ a, reload }) {
         <div className="row2">
           <label className="f">Voice for calls and meetings<select value={f.openai_voice} onChange={set('openai_voice')}>{VOICES.map((v) => <option key={v}>{v}</option>)}</select></label>
           <label className="f">Works<select value={f.autonomy} onChange={set('autonomy')}><option value="full">On their own, then reports back</option><option value="ask">Asks me before changing anything</option></select></label>
+        </div>
+        <div className="f">Phone voice and name <span className="faint">(ElevenLabs; leave empty to use the company’s caller voice and name from Settings → Calling)</span>
+          <div className="row2" style={{ marginTop: 6 }}>
+            <label className="f">Name on calls<input value={f.call_name} onChange={set('call_name')} placeholder="e.g. Sophie" maxLength={40} /></label>
+            <div className="f">Voice<div style={{ padding: '8px 0' }}><CurrentVoice voiceId={f.eleven_voice} fallback="Company default" /></div></div>
+          </div>
+          <div className="actions">
+            <button type="button" className="btn" onClick={() => setPickVoice(!pickVoice)}>{pickVoice ? 'Close the list' : f.eleven_voice ? 'Choose a different voice' : 'Choose a voice'}</button>
+            {f.eleven_voice && <button type="button" className="link" onClick={() => setF({ ...f, eleven_voice: '' })}>Use the company default</button>}
+          </div>
+          {pickVoice && <VoiceBrowser currentId={f.eleven_voice} onPick={(v) => { setF({ ...f, eleven_voice: v.voice_id, call_name: f.call_name || v.name.split(/[ \-–—]/)[0] }); setPickVoice(false); setMsg(`${v.name} chosen. Press Save to keep it.`) }} />}
         </div>
         <label className="check"><input type="checkbox" checked={f.works_alone} onChange={(e) => setF({ ...f, works_alone: e.target.checked })} /> Works through their to-do list by themselves</label>
         <label className="check"><input type="checkbox" checked={f.approve_outside} onChange={(e) => setF({ ...f, approve_outside: e.target.checked })} /> Every email they send outside the company waits for my approval</label>

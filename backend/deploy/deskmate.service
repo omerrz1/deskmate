@@ -12,7 +12,10 @@ Environment=PYTHONUNBUFFERED=1
 Environment=DATA_DIR=/var/lib/deskmate
 Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/deskmate/browsers
 # Only Caddy (on this machine) talks to it.
-ExecStart=/opt/deskmate/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+# On a restart, give open connections 20 seconds, then run the shutdown steps (writing waiting call results into their sheets, ending calls) and exit.
+# Without this a restart waited the full 90 seconds for connections that never close and then killed the process, skipping those steps.
+ExecStart=/opt/deskmate/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1 --timeout-graceful-shutdown 20
+TimeoutStopSec=45
 Restart=always
 RestartSec=3
 LimitNOFILE=65536

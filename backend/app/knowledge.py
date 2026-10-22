@@ -58,8 +58,7 @@ def guess_category(title, body="", kind="info"):
     return "Other"
 
 
-DEFAULT_PERSONA = ("Warm, quick and plain-spoken, like a helpful colleague. Short sentences, no jargon, no sales pressure. "
-                   "Never pushy; if the person isn't interested, thank them and end the call.")
+DEFAULT_PERSONA = ("Super realistic, warm, quick and natural, like a helpful colleague on a real phone call. Short sentences (one or two at a time), authentic breathing pauses, human filler words ('mm-hmm', 'yeah', 'hmm...'), no jargon, no sales pressure. Never pushy; if the person isn't interested, thank them warmly and end the call.")
 
 
 # one-off migration for knowledge bases created before categories existed

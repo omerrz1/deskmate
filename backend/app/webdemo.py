@@ -412,7 +412,7 @@ async def learn(url, pasted="", kb_id=None):
     company = (info.get("company") or home["meta"].get("og:site_name") or home["title"].split("|")[0].split("-")[0].strip() or host)[:60]
     facts = info.get("key_facts") or []
     fields = {"name": f"Website: {company}", "agent_name": "",
-              "persona": info.get("persona") or f"Friendly, quick rep for {company}. Plain words, short sentences.",
+              "persona": info.get("persona") or f"Super realistic, warm, quick rep for {company}. Short conversational sentences, authentic breathing pauses, natural filler words ('mm-hmm', 'yeah', 'hmm...').",
               "context": f"{company}: {info.get('what_they_do') or home['meta'].get('description') or ''} (from {host})",
               "key_facts": "\n".join(f"- {f}" for f in facts), "next_steps": info.get("call_goal") or "", "contact": ""}
     existing = db.q1("SELECT id FROM knowledge_bases WHERE id=?", (kb_id,)) if kb_id else None

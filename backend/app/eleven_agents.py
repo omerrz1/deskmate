@@ -238,11 +238,10 @@ def tuning_for_call(profile):
 
 
 def tags_guide(profile):
-    """Breath tags sounded staged, so only an occasional laugh is allowed; the rest of the naturalness comes from the wording."""
+    """Encourage human naturalness, conversational pauses, and gentle expressiveness in ElevenLabs calls."""
     if llm.lang_code(profile.get("language")) != "en":
-        return ""
-    return ("\nLAUGHTER: now and then, when something is genuinely light, funny or awkward, you may add [laughs softly] or [chuckles] in square brackets "
-            "(the voice acts it out, never read it). At most once or twice in the whole call, never in the greeting or goodbye. No other bracket tags, no breathing sounds.")
+        return ("\nNATURAL SPEECH & REALISM: Speak in short, super realistic spoken sentences with authentic breathing pauses (using '...' or '—') and human filler words ('mm-hmm', 'yeah', 'hmm...'). Never speak in long robotic paragraphs.")
+    return ("\nNATURAL SPEECH & REALISM: Speak in short, super realistic spoken turns (one or two short sentences). Use natural human breathing pauses with punctuation ('...', '—') and conversational filler words ('mm-hmm', 'yeah', 'hmm, let's see...', 'got it', 'sure') to sound completely authentic, thoughtful, and alive. When something is light or amusing, you may use [chuckles] or [laughs softly]. Never read bracket directions aloud; act them naturally.")
 
 
 async def warm_agents():

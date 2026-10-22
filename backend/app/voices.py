@@ -23,7 +23,7 @@ SEEDS = [  # (name, language, calling codes, ElevenLabs voice id, spoken name, d
     ("Arabic (Levant)", "Arabic", ["961", "962", "963", "970"], "a1KZUXKFVFDOb33I1uqr", "Rania", "Levantine Arabic, warm and colloquial"),
     ("Arabic (Tunisia)", "Arabic", ["216"], "GLRyn2pNxpZ4FAjmlY3z", "Rima", "Tunisian-friendly simple Arabic"),
     ("Arabic (default)", "Arabic", [], "ML7jGRDg4E9hIl5qEm1Z", "Layla", "clear, simple Modern Standard Arabic with a light colloquial feel"),
-    ("English", "English", [], "Xb7hH8MSUJpSbSDYk0k2", "", "natural English, warm, relaxed and conversational"),
+    ("English", "English", [], "Xb7hH8MSUJpSbSDYk0k2", "", "natural everyday spoken English, warm, super realistic with natural breathing pauses and conversational flow"),
 ]
 
 
@@ -45,7 +45,7 @@ def _ensure_english():
     """Databases created before English had its own voice profile get one (a built-in ElevenLabs voice)."""
     if not any(p["language"] == "English" for p in profiles()):
         db.run("INSERT INTO voice_profiles(name,language,countries,voice_id,agent_name,dialect,created_at) VALUES(?,?,?,?,?,?,?)",
-               ("English", "English", "[]", "Xb7hH8MSUJpSbSDYk0k2", "", "natural English, warm, relaxed and conversational", db.now()))
+               ("English", "English", "[]", "Xb7hH8MSUJpSbSDYk0k2", "", "natural everyday spoken English, warm, super realistic with natural breathing pauses and conversational flow", db.now()))
 
 
 
@@ -72,7 +72,7 @@ def profiles():
         rows = db.q("SELECT * FROM voice_profiles ORDER BY language, id")
     if not any(r["language"] == "English" for r in rows):
         db.run("INSERT INTO voice_profiles(name,language,countries,voice_id,agent_name,dialect,created_at) VALUES(?,?,?,?,?,?,?)",
-               ("English", "English", "[]", "Xb7hH8MSUJpSbSDYk0k2", "", "natural English, warm, relaxed and conversational", db.now()))
+               ("English", "English", "[]", "Xb7hH8MSUJpSbSDYk0k2", "", "natural everyday spoken English, warm, super realistic with natural breathing pauses and conversational flow", db.now()))
         rows = db.q("SELECT * FROM voice_profiles ORDER BY language, id")
     for r in rows:
         r["countries"] = db.jload(r["countries"], [])

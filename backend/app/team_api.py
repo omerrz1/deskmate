@@ -548,7 +548,7 @@ def central_get():
     return {
         "calls_enabled": voices.get_setting("calls_enabled", "1") == "1",
         "call_route": voices.get_setting("call_route", "whatsapp_then_phone"),
-        "voice_engine": voices.get_setting("voice_engine", "openai"),
+        "voice_engine": voices.get_setting("voice_engine", "elevenlabs"),
         "messaging_policy": voices.get_setting("messaging_policy", "auto"),
         "admin_phone": voices.get_setting("admin_phone", ""),
         "live_question_timeout": int(voices.get_setting("live_question_timeout", "75") or 75),
@@ -556,7 +556,7 @@ def central_get():
         "work_paused": agents.paused(), "max_tasks_per_day": agents.per_agent_limit(), "company_tasks_per_day": agents.company_limit(), "work_pace_seconds": agents._pace(),
         "tasks_today": agents._runs_today(),
         "models": {"agent_work": llm.CHEAP_MODEL, "meetings_voice": llm.MEETING_REALTIME_MODEL, "meetings_voice_replies": "gpt-4o-mini-tts", "summaries_and_reports": llm.CHEAP_MODEL,
-                   "phone_calls": llm.REALTIME_MODEL if voices.get_setting("voice_engine", "openai") == "openai" else "ElevenLabs agent (calls only)"},
+                   "phone_calls": llm.REALTIME_MODEL if voices.get_setting("voice_engine", "elevenlabs") == "openai" else "ElevenLabs agent (calls only)"},
         "elevenlabs_rule": "ElevenLabs is used only for live phone calls, and only when the call voice engine is set to ElevenLabs. Meetings, email, tasks, reports and everything else use OpenAI's cheaper models.",
     }
 

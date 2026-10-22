@@ -52,7 +52,11 @@ def _ensure_english():
 
 def get_setting(key, default=None):
     r = db.q1("SELECT value FROM settings WHERE key=?", (key,))
-    return r["value"] if r else default
+    if r:
+        return r["value"]
+    if key == "voice_engine":
+        return "elevenlabs"
+    return default
 
 
 def set_setting(key, value):

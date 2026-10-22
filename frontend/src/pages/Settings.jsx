@@ -100,10 +100,10 @@ export default function Settings({ embedded = false }) {
 
       <Panel title="Which voice engine makes the calls?">
         <div className="modes">
-          {[['openai', 'OpenAI Realtime', 'One model hears and speaks (gpt-realtime-2.1). Fastest to respond, works in every language.'],
-            ['elevenlabs', 'ElevenLabs', 'Native-sounding voices per country, set up under Voice profiles below.']].map(([k, t, d]) => (
-            <label key={k} className={`mode-card ${(settings?.voice_engine || 'openai') === k ? 'on' : ''}`}>
-              <input type="radio" name="engine" checked={(settings?.voice_engine || 'openai') === k} onChange={async () => { await api.put('/settings', { voice_engine: k }); reloadS() }} />
+          {[['elevenlabs', 'ElevenLabs', 'Native-sounding voices per country, set up under Voice profiles below.'],
+            ['openai', 'OpenAI Realtime', 'One model hears and speaks (gpt-realtime-2.1). Fastest to respond, works in every language.']].map(([k, t, d]) => (
+            <label key={k} className={`mode-card ${(settings?.voice_engine || 'elevenlabs') === k ? 'on' : ''}`}>
+              <input type="radio" name="engine" checked={(settings?.voice_engine || 'elevenlabs') === k} onChange={async () => { await api.put('/settings', { voice_engine: k }); reloadS() }} />
               <div><b>{t}</b><small>{d}</small></div>
             </label>
           ))}

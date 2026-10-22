@@ -1618,7 +1618,7 @@ def countries_list():
 @app.get("/api/settings")
 def settings_get():
     return {"language_source": voices.get_setting("language_source", "smart"),
-            "voice_engine": voices.get_setting("voice_engine", "openai"),
+            "voice_engine": voices.get_setting("voice_engine", "elevenlabs"),
             "call_voice": voices.get_setting("call_voice", "marin"),
             "max_concurrent_calls": callengine.concurrency_limit(),
             "english_only": voices.english_only(),

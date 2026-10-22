@@ -36,7 +36,7 @@ def profile_for(contact):
     from . import voices
     code = llm.lang_code(contact.get("language"))
     from . import voices as _v
-    if not (enabled() and code) or _v.get_setting("voice_engine", "openai") != "elevenlabs":
+    if not (enabled() and code) or _v.get_setting("voice_engine", "elevenlabs") != "elevenlabs":
         return None
     p = voices.resolve(contact)
     return p if (p and p.get("voice_id")) else None
@@ -248,7 +248,7 @@ def tags_guide(profile):
 async def warm_agents():
     """At startup, create/locate every profile's agent in the background so the first call never waits on ElevenLabs."""
     from . import voices
-    if not enabled() or voices.get_setting("voice_engine", "openai") != "elevenlabs":
+    if not enabled() or voices.get_setting("voice_engine", "elevenlabs") != "elevenlabs":
         return
     for p in voices.profiles():
         if p.get("voice_id"):

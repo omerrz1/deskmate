@@ -10,7 +10,8 @@ import httpx
 from . import costs, db, office, secretbox
 
 KINDS = {"approval": "An email or text is waiting for your OK", "meeting": "An employee asks for a meeting", "failure": "Work failed or got stuck",
-         "budget": "A spend cap was reached", "security": "Security events (sign-ins, key and setting changes)"}
+         "budget": "A spend cap was reached", "security": "Security events (sign-ins, key and setting changes)",
+         "mission": "A calling mission started, passed or failed its pilot, or finished"}
 SLACK_OK = ("https://hooks.slack.com/", "https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")
 _sent = {}  # (workspace, kind, title) -> time, so the same alert is not repeated within the hour
 _LOOP = [None]

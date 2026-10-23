@@ -4,7 +4,7 @@ import time
 import unittest
 from unittest import mock
 
-from app import agents, callengine, capabilities, db, files, knowledge, missions, office, runtime, voices
+from app import agents, alerts, callengine, capabilities, db, files, knowledge, missions, office, runtime, voices
 from .test_call_task_and_report import CallReportBase
 
 INSTRUCTIONS = ("Call each lead on behalf of AA London College and tell them about our Level 5 Business Management diploma. The fee is 950 pounds, payable in monthly instalments. "
@@ -42,6 +42,7 @@ class MissionBase(CallReportBase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
+        self.alert = alerts.send   # the stand-in: what the admin would have been sent
         with db.use(self.ws):
             self.aid, self.mid = self.make_chat("Ethan")
             db.update("agents", self.aid, role="Operations lead")
@@ -211,6 +212,22 @@ class HandOverTests(MissionBase):
             self.assertIn("950 pounds", brief)
             self.assertIn("I am away until tomorrow", brief)
             self.assertEqual(db.q1("SELECT leads_doc_id FROM missions")["leads_doc_id"], sheet)
+
+    async def test_two_lead_sheets_become_one_list_with_the_people_in_both_called_once(self):
+        with db.use(self.ws):
+            self.sheet("Webinar sign-ups", ["Student", "Mobile", "E-mail"], [[f"Person {i}", f"07700 9{i:05d}", f"p{i}@x.com"] for i in range(0, 30)])
+            self.sheet("Open day", ["Name", "Phone", "Email"], [[f"person {i}", f"+44 7700 9{i:05d}", ""] for i in range(20, 50)])   # 10 people are on both lists
+            self.doc("Instructions", INSTRUCTIONS)
+            out = await self.start(leads=["Webinar sign-ups", "Open day"], instructions="Instructions")
+            self.assertNotIn("error", out, out)
+            m = db.q1("SELECT * FROM missions")
+            self.assertEqual(m["callable_leads"], 50)                                       # 30 + 30 - 10 on both
+            t = json.loads(db.q1("SELECT body FROM documents WHERE id=?", (m["work_doc_id"],))["body"])
+            self.assertIn("Source", t["columns"])
+            self.assertEqual(len(t["rows"]), 50)
+            both = [r for r in t["rows"] if "+" in r[t["columns"].index("Source")]]
+            self.assertEqual(len(both), 10)
+            self.assertEqual(db.q1("SELECT leads_doc_id FROM missions")["leads_doc_id"], db.q1("SELECT id FROM documents WHERE title='Webinar sign-ups'")["id"])
 
     async def test_a_second_hand_over_of_the_same_list_does_not_start_a_second_mission(self):
         with db.use(self.ws):
@@ -407,6 +424,74 @@ class PilotAndRunTests(MissionBase):
             self.assertEqual(self.chat_text(self.mid)[-1], final)   # said once
 
 
+class QuietAndNotifyTests(MissionBase):
+    def sent(self, kind):
+        return [c.args for c in self.alert.call_args_list if c.args[0] == kind]
+
+    async def test_the_admin_is_told_where_they_are_when_it_launches_passes_its_pilot_and_finishes(self):
+        with db.use(self.ws):
+            out = await self.launched()
+            launch = self.sent("mission")
+            self.assertEqual(len(launch), 1)
+            self.assertIn("Mission 'Business diploma outreach': launched", launch[0][1])
+            self.assertIn("Leads: 60 callable of 63", launch[0][2])
+            m = db.q1("SELECT * FROM missions WHERE id=?", (out["mission_id"],))
+            for c in self.calls(campaign_id=m["campaign_id"]):
+                self.finish_call(c["id"])
+            callengine._check_campaign_done(m["campaign_id"])
+            await self.tick()
+            self.assertIn("passed its pilot", self.sent("mission")[-1][1])
+            for c in self.calls(campaign_id=m["campaign_id"], status="queued"):
+                self.finish_call(c["id"], outcome="interested")
+            callengine._check_campaign_done(m["campaign_id"])
+            await self.tick()
+            last = self.sent("mission")[-1]
+            self.assertIn("finished", last[1])
+            self.assertIn("FINAL REPORT", last[2])
+            self.assertIn("mission", alerts.KINDS)       # and it shows as a switch in Settings → Alerts
+
+    async def test_when_nothing_has_happened_since_the_last_report_it_stays_quiet_with_one_note_a_day(self):
+        with db.use(self.ws):
+            out = await self.launched()
+            m = db.q1("SELECT * FROM missions WHERE id=?", (out["mission_id"],))
+            for c in self.calls(campaign_id=m["campaign_id"]):
+                self.finish_call(c["id"])
+            callengine._check_campaign_done(m["campaign_id"])
+            await self.tick()                                                                # ramp
+            db.update("missions", m["id"], last_report_at=db.now() - 4 * 3600)
+            await self.tick()
+            self.assertIn("progress report", self.chat_text(self.mid)[-1])                   # something changed since the launch: reported
+            posted = len(self.chat_text(self.mid))
+            db.update("calls", self.calls(campaign_id=m["campaign_id"], status="queued")[0]["id"], not_before=db.now() + 10 ** 6)
+            for c in self.calls(campaign_id=m["campaign_id"], status="queued"):
+                db.update("calls", c["id"], not_before=db.now() + 10 ** 6)                   # the night: nothing is due
+            db.update("missions", m["id"], last_report_at=db.now() - 4 * 3600)
+            await self.tick()
+            self.assertEqual(len(self.chat_text(self.mid)), posted)                          # nothing new, so nothing said
+            self.assertGreater(db.q1("SELECT last_report_at FROM missions")["last_report_at"], db.now() - 60)
+            quiet_since = json.loads(db.q1("SELECT last_stats FROM missions")["last_stats"])["_quiet_since"]
+            db.update("missions", m["id"], last_report_at=db.now() - 4 * 3600,
+                      last_stats=json.dumps({**json.loads(db.q1("SELECT last_stats FROM missions")["last_stats"]), "_quiet_since": quiet_since - 90000}))
+            await self.tick()
+            self.assertEqual(len(self.chat_text(self.mid)), posted + 1)                      # a day on: one "still alive" report
+
+    async def test_the_launch_report_warns_about_a_missing_link_and_about_alerts_that_only_reach_the_app(self):
+        with db.use(self.ws):
+            voices.set_setting("main_link", "")
+            await self.launched(30)
+            text = self.chat_text(self.mid)[-1]
+            self.assertIn("HEADS UP: the follow-up text has a link in it, but no main link is set", text)
+            self.assertIn("HEADS UP: alerts reach you only inside this app", text)
+
+    async def test_no_warnings_when_the_link_and_a_way_to_reach_the_admin_are_set(self):
+        with db.use(self.ws):
+            voices.set_setting("main_link", "https://aacollege.example/courses")
+            alerts._put("notify_slack", "sealed-webhook")
+            await self.launched(30)
+            text = self.chat_text(self.mid)[-1]
+            self.assertNotIn("HEADS UP", text)
+
+
 class WatchTests(MissionBase):
     async def running(self):
         out = await self.launched(40)
@@ -427,7 +512,7 @@ class WatchTests(MissionBase):
             text = self.chat_text(self.mid)[-1]
             self.assertIn("calls are due but none has started for 15 minutes", text)
             self.assertIn("calls are due now and nothing is ringing", text)
-            notify.assert_called_once()
+            self.assertEqual(len([c for c in notify.call_args_list if c.args[0] == "failure"]), 1)
             before = len(self.chat_text(self.mid))
             await self.tick()
             self.assertEqual(len(self.chat_text(self.mid)), before)           # not repeated every half minute
@@ -613,3 +698,29 @@ class RegistrationTests(MissionBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealPathTests(MissionBase):
+    """What really happens when the employee's model calls the tool: through the harness, with its policies, and then what a caller can look up."""
+
+    async def test_the_tool_works_through_the_employee_harness_not_only_when_called_directly(self):
+        with db.use(self.ws):
+            self.sheet("Leads", ["Name", "Phone", "Email"], lead_rows(30))
+            self.doc("Instructions", INSTRUCTIONS)
+            out = await agents.run_agent_tool(self.agent(), "start_mission", {"leads": ["Leads"], "instructions": "Instructions", "confirmed": True})
+            self.assertEqual(out[0]["status"] if isinstance(out, tuple) else out["status"], "running")
+            status = await agents.run_agent_tool(self.agent(), "mission", {"action": "status"})
+            status = status[0] if isinstance(status, tuple) else status
+            self.assertEqual(status["name"], "Business diploma outreach")
+
+    async def test_a_caller_on_a_mission_call_can_look_up_the_admins_instructions(self):
+        with db.use(self.ws):
+            out = await self.launched(30)
+            m = db.q1("SELECT * FROM missions WHERE id=?", (out["mission_id"],))
+            call = self.calls(campaign_id=m["campaign_id"])[0]
+            hits = await knowledge.lookup_company("how much is the fee and can I pay monthly", call_id=call["id"])
+            self.assertTrue(any("950 pounds" in h for h in hits), hits)
+            row, contact, camp = callengine.call_context(call["id"])
+            prompt = callengine.system_prompt(row, contact, camp, realtime=True, external=True)
+            self.assertIn("Fee 950 pounds, monthly instalments.", prompt)        # the distilled script is in the brief
+            self.assertIn("Tell them about the Level 5 Business Management diploma", prompt)

@@ -75,6 +75,20 @@ def _say(m, text, project=True):
     db.log("mission", f"[{m['name']}] {text.splitlines()[0][:160]}")
 
 
+def _notify(m, title, body):
+    """Tell the admin where they are (email, Slack or Telegram), not only inside the app. Alerts of kind 'mission' are on by default and can be switched off in Settings → Alerts."""
+    from . import alerts
+    alerts.send("mission", f"Mission '{m['name']}': {title}", body[:600])
+
+
+def _alerts_reach_the_admin():
+    """Would an alert get to the admin outside the app? (an email address with a mailbox to send from, Slack or Telegram)"""
+    from . import alerts, office
+    c = alerts.config()
+    email_ok = bool(c["email"] and "@" in (c.get("admin_email") or "") and office.any_sender())
+    return email_ok or c["slack_set"] or c["telegram_set"]
+
+
 def _note(m, who, text):
     notes = db.jload(m.get("notes"), [])
     notes.append({"ts": db.now(), "by": who, "note": text[:300]})
@@ -517,6 +531,7 @@ async def _ramp(m, said=""):
         return False
     _set(m["id"], status="running", phase="run", hold_reason="")
     _clear(m, "pilot held", "the hold is lifted.")
+    _notify(m, "passed its pilot", (said + " " if said else "") + f"Calling the rest of the list now: {q['queued']} more calls queued.")
     _say(m, f"{said} Calling the rest of the list now: {q['queued']} more calls queued." if said else f"Calling the rest of the list now: {q['queued']} more calls queued.")
     return True
 
@@ -574,7 +589,8 @@ async def _finish(m, why="The whole list has been called."):
     m = _get(m["id"])
     _set(m["id"], status="done", phase="closed", finished_at=db.now())
     m = _get(m["id"])
-    _report(m, "final")
+    text = _report(m, "final")
+    _notify(m, "finished", text)
     if m.get("project_id"):
         db.update("projects", m["project_id"], status="done")
     _duty(m["owner_id"], f"Final review: {m['name']}"[:200],
@@ -611,7 +627,23 @@ async def _check(m):
             await _finish(m)
             return
     if now - (m.get("last_report_at") or 0) >= (m.get("report_every") or 10800):
+        _scheduled_report(m)
+
+
+def _scheduled_report(m):
+    """A progress report, unless nothing has happened since the last one (overnight, between calling hours): then it stays quiet, with one 'still waiting' note a day."""
+    last = db.jload(m.get("last_stats"), {})
+    s = stats(m, deep=False)
+    quiet = last.get("attempts") == s["attempts"] and not s["in_progress"] and not any(v.get("open") for v in db.jload(m.get("alerts"), {}).values())
+    if not quiet:
         _report(m)
+        return
+    since = last.get("_quiet_since") or db.now()
+    if db.now() - since >= 86400:
+        _report(m)                                   # a heartbeat: still alive, and why nothing is happening
+        return
+    last["_quiet_since"] = since
+    _set(m["id"], last_report_at=db.now(), last_stats=last)
 
 
 async def tick():
@@ -735,6 +767,11 @@ async def start(agent, a):
     lines.append(f"Lead list: {original_rows} rows → {callable_n} callable. " + _clean_sentence(clean_report))
     if m["pilot_size"]:
         lines.append(f"Pilot: {m['pilot_size']} calls first. If they look healthy I call the rest by myself; if they show a real problem I hold and tell you.")
+    from . import voices
+    if "{link}" in (charter["after_text"] or "") and not voices.get_setting("main_link", ""):
+        lines.append("HEADS UP: the follow-up text has a link in it, but no main link is set (Settings → Company), so texts would go out without one. Set it and the next texts include it.")
+    if not _alerts_reach_the_admin():
+        lines.append("HEADS UP: alerts reach you only inside this app. Add your email (with a mailbox to send from), Slack or Telegram in Settings → Alerts if you want to hear about problems, the pilot and the finish when you are away.")
     if charter["assumptions"]:
         lines.append("Assumptions I made: " + "; ".join(charter["assumptions"]))
     if charter["risks"]:
@@ -747,6 +784,7 @@ async def start(agent, a):
     final = "\n".join(lines)
     _say(_get(mid), final)
     _write_report_doc(_get(mid), final)
+    _notify(_get(mid), "launched" if launched["launched"] else "set up, not dialing yet", final)
     return {"mission_id": mid, "project_id": pid, "campaign_id": cid, "status": _get(mid)["status"], "callable_leads": callable_n, "pilot": m["pilot_size"],
             "team": [{"name": t["name"], "role": t["role"], "hired": t["hired"]} for t in team], "launched": launched,
             "next": "The launch report is posted in the chat. Tell the admin in one or two sentences what is running; the system posts progress by itself and raises problems. Do not wait for anything."}

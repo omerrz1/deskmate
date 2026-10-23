@@ -186,6 +186,19 @@ class HandOverTests(MissionBase):
             live = db.q1("SELECT body FROM documents WHERE title LIKE '%Live report'")
             self.assertIn("launched", live["body"])
 
+    async def test_the_launch_report_says_whose_clock_the_calling_hours_follow(self):
+        with db.use(self.ws):
+            voices.set_setting("timezone", "Europe/London")
+            await self.launched(30)
+            self.assertIn("Calling hours: 10:00–18:00 (Europe/London)", self.chat_text(self.mid)[-1])
+        missions._last.clear()
+
+    async def test_without_a_company_time_zone_the_report_warns_that_the_hours_run_on_the_server_clock(self):
+        with db.use(self.ws):
+            voices.set_setting("timezone", "")
+            await self.launched(30)
+            self.assertIn("the server's clock (UTC): set the company time zone in Settings → Company", self.chat_text(self.mid)[-1])
+
     async def test_without_names_it_uses_what_the_admin_shared_and_pasted_in_the_chat(self):
         with db.use(self.ws):
             sheet = self.sheet("Leads", ["Name", "Phone", "Email"], lead_rows(40))

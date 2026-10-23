@@ -86,7 +86,8 @@ def _hours(h):
 
 
 def _clock(ts):
-    return time.strftime("%a %d %b %H:%M", time.localtime(ts))
+    from . import schedule
+    return schedule.local(ts).strftime("%a %d %b %H:%M")
 
 
 def _doc_text(d):
@@ -724,10 +725,12 @@ async def start(agent, a):
     _set(mid, last_report_at=db.now())
     text_out = render_report(_get(mid), stats(_get(mid)), "launch")
     lines = [text_out, "", f"Objective: {charter['objective']}", f"Success means: {charter['success_means'] or 'not stated, so every conversation is judged against the objective'}"]
+    from . import schedule
+    where = (str(schedule.tz()) if schedule.tz() else "the server's clock (UTC): set the company time zone in Settings → Company so calling hours mean your local time")
     if charter["call_hours"]:
-        lines.append(f"Calling hours: {charter['call_hours']['start']}–{charter['call_hours']['end']}")
+        lines.append(f"Calling hours: {charter['call_hours']['start']}–{charter['call_hours']['end']} ({where})")
     else:
-        lines.append("Calling hours: 09:00–20:00, every day (server time)")
+        lines.append(f"Calling hours: 09:00–20:00, every day ({where})")
     lines.append(f"Each lead is tried up to {charter['max_attempts']} times, {charter['retry_delay_minutes']} minutes apart.")
     lines.append(f"Lead list: {original_rows} rows → {callable_n} callable. " + _clean_sentence(clean_report))
     if m["pilot_size"]:

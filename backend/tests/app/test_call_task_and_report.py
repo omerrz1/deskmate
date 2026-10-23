@@ -1276,7 +1276,7 @@ class RealisticReactionsTests(unittest.IsolatedAsyncioTestCase):
             return eleven_agents.tags_guide({"language": "English"})
 
     def test_the_brief_asks_for_laughs_sighs_breaths_and_soft_asides_without_creepy_whispering(self):
-        text = self.guide()
+        text = self.guide("natural")
         for needle in ("[laughs]", "[chuckles]", "[giggles]", "[sighs]", "[exhales]", "[whispers]", "[excited]", "never low or creepy", "few words only",
                        "A light joke or a soft laugh at your own joke is welcome", "never read a tag aloud"):
             self.assertIn(needle, text)
@@ -1287,7 +1287,8 @@ class RealisticReactionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("a few times in a whole call", self.guide("subtle"))
         self.assertIn("every few turns", self.guide("natural"))
         self.assertIn("most turns", self.guide("lively"))
-        self.assertIn("every few turns", self.guide("something-else"))  # unknown values fall back to the default
+        self.assertIn("most turns", self.guide("something-else"))  # unknown values fall back to the default, which is Lively
+        self.assertIn("most turns", self.guide())
         self.assertEqual(eleven_agents.tags_guide({"language": "Arabic"}), "")  # tags are only written into English calls
 
     def test_reactions_never_appear_in_a_transcript(self):
@@ -1536,3 +1537,43 @@ class LinksTheAdminGaveTests(CallReportBase):
         from app import agent_tools
         self.assertIn("read_page", agent_tools.SPECS)
         self.assertGreaterEqual(eleven_agents.TOOL_TIMEOUTS["search_web"], 15)
+
+
+class LivelyVoiceTests(CallReportBase):
+    def agent_row(self, ok=True):
+        pid = voices.profiles()[0]["id"]
+        db.run("INSERT OR REPLACE INTO el_agents(code,agent_id,voice_id,model,created_at,overrides_ok) VALUES(?,?,?,?,?,?)", (f"p{pid}", "agent_1", "A" * 20, "m", db.now(), 1 if ok else 0))
+        return {"id": pid, "tuning": {}}
+
+    async def test_lively_is_the_default_and_it_brightens_the_delivery_not_only_the_wording(self):
+        with db.use(self.ws):
+            profile = self.agent_row()
+            tuning = eleven_agents.tuning_for_call(profile)
+            self.assertEqual((tuning["stability"], tuning["speed"]), (0.38, 1.05))  # a more varied voice, a touch brisker
+            brief = eleven_agents.tags_guide({"language": "English"})
+            self.assertIn("bright and upbeat, with a real smile in your voice", brief)
+            self.assertIn("Vary your pitch", brief)
+            self.assertIn("never shouting, never hyper", brief)
+
+    async def test_the_dial_moves_energy_pace_and_expressiveness_together(self):
+        with db.use(self.ws):
+            profile = self.agent_row()
+            voices.set_setting("call_expression", "natural")
+            self.assertEqual(eleven_agents.tuning_for_call(profile), {})  # the voice's own defaults
+            self.assertIn("warm and friendly", eleven_agents.tags_guide({"language": "English"}))
+            voices.set_setting("call_expression", "subtle")
+            self.assertEqual(eleven_agents.tuning_for_call(profile), {"stability": 0.6, "speed": 0.98})
+            self.assertIn("calm and steady", eleven_agents.tags_guide({"language": "English"}))
+
+    async def test_what_the_admin_set_on_a_voice_profile_beats_the_dial(self):
+        with db.use(self.ws):
+            profile = {**self.agent_row(), "tuning": {"speed": 0.9, "stability": 0.7, "turn_eagerness": "eager"}}
+            self.assertEqual(eleven_agents.tuning_for_call(profile), {"stability": 0.7, "speed": 0.9})
+
+    async def test_nothing_is_sent_until_elevenlabs_has_accepted_per_call_overrides(self):
+        with db.use(self.ws):
+            self.assertEqual(eleven_agents.tuning_for_call(self.agent_row(ok=False)), {})
+
+    async def test_settings_report_lively_until_someone_chooses_otherwise(self):
+        st, r = await self.owner.get("/api/settings")
+        self.assertEqual((st, r["call_expression"]), (200, "lively"))

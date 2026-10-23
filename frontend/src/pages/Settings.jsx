@@ -33,13 +33,13 @@ function CallerVoice({ profiles, reload, setMsg, settings, reloadS }) {
           onBlur={async (e) => { const v = e.target.value.trim(); if (v !== (prof.agent_name || '') && await save({ agent_name: v })) setMsg('Caller name saved. It applies from the next call.') }} /></label>
         <div className="f" style={{ flex: 2 }}>Voice<div style={{ padding: '8px 0' }}><CurrentVoice voiceId={prof.voice_id} /></div></div>
       </div>
-      <label>Laughs, sighs and soft jokes
-        <select value={settings?.call_expression || 'natural'} onChange={async (e) => { try { await api.put('/settings', { call_expression: e.target.value }); reloadS(); setMsg('Saved. It applies from the next call.') } catch (x) { setMsg(x.message) } }}>
-          <option value="subtle">Subtle: now and then, a few times in a call</option>
-          <option value="natural">Natural (recommended): every few turns, light jokes</option>
-          <option value="lively">Lively: laughs and reacts in most turns</option>
+      <label>How lively the voice is
+        <select value={settings?.call_expression || 'lively'} onChange={async (e) => { try { await api.put('/settings', { call_expression: e.target.value }); reloadS(); setMsg('Saved. It applies from the next call.') } catch (x) { setMsg(x.message) } }}>
+          <option value="subtle">Subtle: calm and steady, a reaction now and then</option>
+          <option value="natural">Natural: warm, a reaction every few turns, light jokes</option>
+          <option value="lively">Lively (recommended): bright and upbeat, laughs and reacts in most turns</option>
         </select>
-        <span className="faint">The little laughs, breaths and playful asides that make the voice sound like a person. English calls.</span>
+        <span className="faint">Sets the energy and pace of the voice, and how often it laughs, sighs and makes a soft joke. Anything you set on a voice profile (Pace, Expressiveness) overrides the pace and expressiveness here. English calls.</span>
       </label>
       <div className="actions"><button className="btn" onClick={() => setOpen(!open)}>{open ? 'Close the list' : 'Choose a different voice'}</button></div>
       {open && <VoiceBrowser language={prof.language} currentId={prof.voice_id} onPick={async (v) => {

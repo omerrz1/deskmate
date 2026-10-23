@@ -275,12 +275,21 @@ def llm_scrub(t):
     return auth.scrub(t)
 
 
+# The "Laughs, sighs and soft jokes" dial also sets how bright the delivery is. Lower stability = a more varied, expressive voice; speed 1.0 is the voice's own pace.
+EXPRESSION_DEFAULT = "lively"
+LEVEL_TUNING = {"subtle": {"stability": 0.6, "speed": 0.98}, "natural": {}, "lively": {"stability": 0.38, "speed": 1.05}}
+
+
 def tuning_for_call(profile):
-    """Per-call pace/expressiveness, only once ElevenLabs has confirmed the agent accepts those overrides."""
+    """Per-call pace/expressiveness, only once ElevenLabs has confirmed the agent accepts those overrides. The dial sets the starting point;
+    anything an admin set on the voice profile itself (Pace, Expressiveness) wins over it."""
     row = db.q1("SELECT overrides_ok FROM el_agents WHERE code=?", (f"p{profile['id']}",))
     if not (row and row["overrides_ok"]):
         return {}
-    return {k: v for k, v in (profile.get("tuning") or {}).items() if k in ("speed", "stability")}
+    from . import voices
+    base = dict(LEVEL_TUNING.get(voices.get_setting("call_expression", EXPRESSION_DEFAULT), LEVEL_TUNING[EXPRESSION_DEFAULT]))
+    base.update({k: v for k, v in (profile.get("tuning") or {}).items() if k in ("speed", "stability")})
+    return base
 
 
 # A reaction the voice acts out, written in square brackets: [laughs], [whispers], [sighs, softly]... Never shown in a transcript.
@@ -291,6 +300,12 @@ def strip_tags(text):
     return TAG.sub(" ", text or "").strip()
 
 
+ENERGY = {
+    "subtle": "ENERGY: calm and steady, easy-going.",
+    "natural": "ENERGY: warm and friendly, with a smile in your voice.",
+    "lively": ("ENERGY: bright and upbeat, with a real smile in your voice. Vary your pitch, lean on the key word of a sentence, pick up the pace a little when you are pleased, "
+               "and let your energy rise when they are enthusiastic. Sound delighted to be talking to them. Warm and animated, never shouting, never hyper."),
+}
 EXPRESSION_LEVELS = {
     "subtle": "Use one only now and then: a few times in a whole call.",
     "natural": ("Use one every few turns, wherever it truly fits: after something funny (their joke, or a small one of yours), when you relax or think, "
@@ -304,11 +319,12 @@ def tags_guide(profile):
     if llm.lang_code(profile.get("language")) != "en":
         return ""
     from . import voices
-    level = voices.get_setting("call_expression", "natural")
-    return ("\nREACTIONS: your voice acts out reactions written in square brackets just before the words they colour, and they are what makes you sound like a person, so use them. "
+    level = voices.get_setting("call_expression", EXPRESSION_DEFAULT)
+    level = level if level in EXPRESSION_LEVELS else EXPRESSION_DEFAULT
+    return ("\n" + ENERGY[level] + "\nREACTIONS: your voice acts out reactions written in square brackets just before the words they colour, and they are what makes you sound like a person, so use them. "
             "Laughter and amusement: [laughs], [chuckles], [laughs softly], [giggles]. Breath and small human moments: [sighs], [exhales]. "
             "A playful aside, or a joke said just between the two of you: [whispers] for a few words only, warm and light, never low or creepy, then straight back to your normal voice. "
-            "Good news: [excited]. Slower for a detail: [slow]. " + EXPRESSION_LEVELS.get(level, EXPRESSION_LEVELS["natural"]) + " "
+            "Good news: [excited]. Slower for a detail: [slow]. " + EXPRESSION_LEVELS[level] + " "
             "Rules: a tag colours only the next few words, so keep it short; never whisper a whole sentence or anything important; one tag at a time, no stacking; "
             "none in your very first hello, and none while you say a number, price, address or link; never laugh at something sad or serious or when they are upset; never read a tag aloud.")
 

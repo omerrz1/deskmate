@@ -1641,7 +1641,7 @@ def settings_get():
             "english_only": voices.english_only(),
             "main_link": voices.get_setting("main_link", ""),
             "call_instructions": voices.get_setting("call_instructions", ""),
-            "call_expression": voices.get_setting("call_expression", "natural"),
+            "call_expression": voices.get_setting("call_expression", eleven_agents.EXPRESSION_DEFAULT),
             "transcript_retention_days": int(voices.get_setting("transcript_retention_days", "0") or 0)}
 
 

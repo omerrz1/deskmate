@@ -6,7 +6,7 @@ import time
 from . import db
 
 TABLES = ["activity", "agent_activity", "agent_notes", "agents", "app_requests", "call_actions", "calls", "campaigns", "connectors", "contacts", "datasets", "discuss_items", "documents",
-          "duties", "emails", "events", "folders", "hooks", "integrations", "kb_docs", "kb_pron", "knowledge_bases", "live_questions", "meeting_msgs", "meeting_requests", "meetings",
+          "duties", "emails", "events", "folders", "hooks", "integrations", "kb_docs", "kb_pron", "kb_vectors", "knowledge_bases", "learned_rules", "live_questions", "meeting_msgs", "meeting_requests", "meetings",
           "outbox", "project_members", "project_updates", "projects", "shares", "skills", "training_runs", "trainings", "video_sessions", "agent_notes"]
 SETTINGS = ["company_name", "company_about", "company_website", "company_doc_id", "main_link", "application_link", "timezone", "builtin_off", "admin_phone", "admin_email", "company_domain",
             "email_policy", "messaging_policy", "discuss_email", "live_question_timeout", "smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_tls", "imap_host", "imap_port",

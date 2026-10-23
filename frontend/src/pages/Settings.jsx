@@ -11,6 +11,55 @@ const MODES = [
   ['sheet', 'Always the spreadsheet', 'Ignore phone codes; use the language column.'],
 ]
 
+// What the team has learned from the admin's corrections: proposals wait for a yes, approved rules are followed in every chat and call.
+const SCOPE_LABEL = { calls: 'Phone calls', chat: 'Chats and work', all: 'Everything' }
+function LearnedRules({ setMsg }) {
+  const [data, reload] = usePoll('/learned-rules', 5000)
+  const [add, setAdd] = useState({ rule: '', scope: 'all' })
+  const [edit, setEdit] = useState(null)
+  const act = async (fn, ok) => { try { await fn(); await reload(); if (ok) setMsg(ok) } catch (x) { setMsg(x.message) } }
+  const rules = data?.rules || []
+  const waiting = rules.filter((r) => r.status === 'proposed')
+  const following = rules.filter((r) => r.status === 'active')
+  const row = (r, extra) => (
+    <div key={r.id} className="row-split">
+      <div>
+        {edit?.id === r.id
+          ? <input style={{ minWidth: 320 }} value={edit.rule} maxLength={200} onChange={(e) => setEdit({ ...edit, rule: e.target.value })} />
+          : <b>{r.rule}</b>}
+        <small>{SCOPE_LABEL[r.scope]} · {r.employee ? `only ${r.employee}` : 'everyone'}{r.source && r.source !== 'added by hand' ? ' · from your correction' : ''}</small>
+      </div>
+      <span className="actions">{extra}</span>
+    </div>
+  )
+  return (
+    <Panel title="What your team has learned from you">
+      <p className="muted small">When you correct an employee (“don’t retype numbers”, “keep calls shorter”), they offer to remember it. A rule you approve is followed in every chat and every call, and never overrides honesty about being an AI, do-not-call requests or consent.</p>
+      {waiting.length > 0 && <>
+        <h5>Waiting for your OK</h5>
+        {waiting.map((r) => row(r, <>
+          <button className="btn small solid" onClick={() => act(() => api.post(`/learned-rules/${r.id}/approve`), 'Rule kept. It applies from now on.')}>Keep it</button>
+          <button className="btn small" onClick={() => act(() => api.post(`/learned-rules/${r.id}/retire`))}>Not that</button>
+        </>))}
+      </>}
+      <h5>Following now ({following.length}{data?.max_active ? ` of ${data.max_active}` : ''})</h5>
+      {following.length === 0 && <p className="muted small">Nothing yet.</p>}
+      {following.map((r) => row(r, edit?.id === r.id ? <>
+        <button className="btn small solid" onClick={() => act(async () => { await api.put(`/learned-rules/${r.id}`, { rule: edit.rule, scope: r.scope, agent_id: r.agent_id || 0 }); setEdit(null) }, 'Rule updated.')}>Save</button>
+        <button className="btn small" onClick={() => setEdit(null)}>Cancel</button>
+      </> : <>
+        <button className="link" onClick={() => setEdit({ id: r.id, rule: r.rule })}>Edit</button>
+        <button className="link" onClick={() => act(() => api.post(`/learned-rules/${r.id}/retire`), 'Rule switched off.')}>Switch off</button>
+      </>))}
+      <div className="form-row" style={{ marginTop: 12 }}>
+        <label style={{ flex: 3 }}>Add a rule yourself<input value={add.rule} maxLength={200} onChange={(e) => setAdd({ ...add, rule: e.target.value })} placeholder="e.g. Always confirm the person’s name before sending a text" /></label>
+        <label>Applies to<select value={add.scope} onChange={(e) => setAdd({ ...add, scope: e.target.value })}>{Object.entries(SCOPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
+        <div className="actions" style={{ alignSelf: 'end' }}><button className="btn solid" disabled={add.rule.trim().split(/\s+/).length < 3} onClick={() => act(async () => { await api.post('/learned-rules', add); setAdd({ ...add, rule: '' }) }, 'Rule added.')}>Add</button></div>
+      </div>
+    </Panel>
+  )
+}
+
 // The panel most people want: which voice and which name the caller uses, with a list to choose from.
 function CallerVoice({ profiles, reload, setMsg, settings, reloadS }) {
   const list = profiles || []
@@ -137,6 +186,8 @@ export default function Settings({ embedded = false }) {
           placeholder="e.g. Keep it under two minutes. Never discuss prices. If they ask to stop, stop. Always confirm their name first."
           onBlur={async (e) => { if (e.target.value.trim() !== (settings?.call_instructions || '')) { try { await api.put('/settings', { call_instructions: e.target.value }); reloadS(); setMsg('Standing call instructions saved.') } catch (x) { setMsg(x.message) } } }} />
       </Panel>
+
+      <LearnedRules setMsg={setMsg} />
 
       <Panel title="Backup voice (OpenAI)">
         <p className="muted small">Only used when ElevenLabs is switched off or can’t connect. Each call’s report says which voice it used and why.</p>

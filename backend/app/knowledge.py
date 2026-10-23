@@ -32,6 +32,8 @@ except Exception:
     # FTS5 is optional on custom SQLite builds; the lexical scan below remains a safe fallback.
     _HAS_FTS = False
 
+from . import semantic  # noqa: E402  (adds kb_vectors and the triggers that keep it in step with kb_docs)
+
 CATEGORIES = ["Products & services", "Pricing & payment", "Requirements", "How to get started", "FAQ", "Policies", "Objection handling",
               "Contact & locations", "Support", "Other"]
 
@@ -104,13 +106,54 @@ def _tok(s):
     return set(re.findall(r"\w{3,}", s.lower()))
 
 
+# Words that mean the same thing to a customer. A question using one finds a page using another ("tuition cost" finds "Fees"). Free and instant, so it
+# works on live web pages and when embeddings are unavailable; a synonym counts for less than the word itself.
+SYNONYM_GROUPS = [
+    "fee fees cost costs price prices pricing tuition charge charges charged payment payments afford affordable expensive cheap instalment instalments installment installments",
+    "course courses programme programmes program programs diploma diplomas certificate certificates qualification qualifications module modules",
+    "apply applying application applications enrol enroll enrolment enrollment enrolling register registering registration admission admissions",
+    "start starts starting begin begins commence intake intakes semester",
+    "deadline deadlines closing cutoff",
+    "requirement requirements eligibility eligible entry criteria prerequisite prerequisites",
+    "contact phone email reach address location locations directions",
+    "refund refunds cancel cancellation cancelling withdraw withdrawal",
+    "duration length weeks months years full-time part-time",
+    "online remote distance virtual",
+    "scholarship scholarships bursary bursaries funding grant grants discount discounts finance financial loan loans",
+    "timetable schedule schedules timings",
+    "job jobs career careers employment employer salary progression",
+    "accredited accreditation recognised recognized approved awarding ofqual regulated validated",
+    "teacher teachers tutor tutors lecturer lecturers instructor instructors trainer",
+]
+_SYN = {}
+for _g in SYNONYM_GROUPS:
+    _words = set(_g.split())
+    for _w in _words:
+        _SYN.setdefault(_w, set()).update(_words - {_w})
+
+
+def expand(terms):
+    """The extra words that mean the same as any of these terms (not including the terms themselves)."""
+    extra = set()
+    for t in terms:
+        extra |= _SYN.get(t, set()) | _SYN.get(t.rstrip("s"), set()) | _SYN.get(t + "s", set())
+    return {w for w in extra if len(w) >= 3} - set(terms)
+
+
+def relevance(terms, text_tokens, extra=None):
+    """How well a piece of text matches a question: a full point per word in common, 0.6 per word that means the same."""
+    extra = expand(terms) if extra is None else extra
+    return len(terms & text_tokens) + 0.6 * len(extra & text_tokens)
+
+
 def search(kb_id, query, k=3, categories=None, category=None):
     q = _tok(query) - _STOP
     if not q or not kb_id:
         return []
+    qx = expand(q)
     docs = []
     if _HAS_FTS:
-        match = " OR ".join(f'"{term}"*' for term in sorted(q))
+        match = " OR ".join(f'"{term}"*' for term in sorted(q | qx))
         where = ["kb_docs_search MATCH ?", "d.kb_id=?"]
         args = [match, kb_id]
         if categories:
@@ -132,9 +175,9 @@ def search(kb_id, query, k=3, categories=None, category=None):
             continue
         if category and d["category"] != category:
             continue
-        title_hit = len(q & _tok(d["title"]))
+        title_hit = relevance(q, _tok(d["title"]), qx)
         for c in _chunks(d):
-            score = len(q & _tok(c)) + 3 * title_hit
+            score = relevance(q, _tok(c), qx) + 3 * title_hit
             if score:
                 scored.append((score, c))
     scored.sort(key=lambda x: -x[0])
@@ -148,6 +191,30 @@ def search(kb_id, query, k=3, categories=None, category=None):
         if len(out) >= max(1, min(12, int(k or 3))):
             break
     return out
+
+
+async def search_hybrid(kb_id, query, k=3, categories=None, category=None):
+    """Keyword search and search by meaning, merged (the way each ranks a section is combined, so one that both like comes first).
+    -> (sections, similarity of the best one by meaning, 0 when that is not available)."""
+    lexical = search(kb_id, query, k=max(k, 6), categories=categories, category=category)
+    by_meaning = await semantic.search(kb_id, query, k=max(k, 6), categories=categories, category=category)
+    if not by_meaning:
+        return lexical[:k], 0.0
+    ids = list({d for _s, d, _n in by_meaning})
+    docs = {r["id"]: r for r in db.q(f"SELECT id,title,body,source FROM kb_docs WHERE id IN ({','.join('?' for _ in ids)})", ids)}
+    sem = []
+    for _score, doc_id, n in by_meaning:
+        pieces = _chunks(docs[doc_id]) if doc_id in docs else []
+        if n < len(pieces):
+            sem.append(pieces[n][:1500])
+    rank, text = {}, {}
+    for ranking in (lexical, sem):
+        for i, c in enumerate(ranking):
+            key = c.casefold()
+            text.setdefault(key, c)
+            rank[key] = rank.get(key, 0) + 1 / (60 + i)
+    merged = [text[key] for key in sorted(rank, key=lambda key: -rank[key])]
+    return merged[:k], by_meaning[0][0]
 
 
 def add_doc(kb_id, title, text, kind="info", category=None, source=None):
@@ -312,8 +379,9 @@ def search_workspace(query, agent=None, k=8):
     terms = _tok(query) - _STOP
     if not terms:
         return []
+    more = expand(terms)
     scored = []
-    for doc in _file_candidates(terms):
+    for doc in _file_candidates(terms | more):
         if not team.can_access_doc(agent, doc):
             continue
         body = doc.get("body") or ""
@@ -323,10 +391,10 @@ def search_workspace(query, agent=None, k=8):
             except Exception:
                 continue
         source = f"file {doc['id']}, drive {doc['agent_id']}/{files.path_of(doc.get('folder_id'))}"
-        if not terms.intersection(_tok(doc["title"] + " " + body)):
+        if not (terms | more).intersection(_tok(doc["title"] + " " + body)):
             continue
         for chunk in _chunks({"title": doc["title"], "body": body, "source": source}):
-            score = len(terms & _tok(chunk))
+            score = relevance(terms, _tok(chunk), more)
             if score:
                 scored.append((score, chunk))
     scored.sort(key=lambda item: -item[0])
@@ -343,29 +411,39 @@ async def lookup_company(query, call_id=None, kb_id=None):
     agent_id = (camp or {}).get("agent_id") or (call or {}).get("report_agent_id")
     agent = db.q1("SELECT * FROM agents WHERE id=?", (agent_id,)) if agent_id else None
     internal = search_workspace(query, agent, k=6)
-    hits = []
+    hits, best_meaning = [], 0.0
+
+    async def saved(kb, k):
+        got, sim = await search_hybrid(kb, query, k=k)  # words and meaning
+        nonlocal best_meaning
+        best_meaning = max(best_meaning, sim)
+        hits.extend(got)
     # Admin answers must be available regardless of the campaign's attached KB.
     for kb in db.q("SELECT DISTINCT kb_id FROM kb_docs WHERE source='answered by the admin'"):
-        hits.extend(search(kb["kb_id"], query, k=3))
+        await saved(kb["kb_id"], 3)
     hits.extend(internal)
     if kb_id:
-        hits.extend(search(kb_id, query, k=4))
+        await saved(kb_id, 4)
     website_id = voices.get_setting("company_website_kb_id", "")
     company_ws = db.company()  # the website knowledge is kept once, in the company's own workspace, and every workspace of the company searches it
     if website_id and (str(website_id) != str(kb_id) or company_ws != db.current()):
         with db.use(company_ws):
-            hits.extend(search(website_id, query, k=6))
+            await saved(website_id, 6)
     terms = _tok(query) - _STOP
-    coverage = max((len(terms & _tok(hit)) for hit in hits), default=0)
-    if call_id and (not hits or coverage < min(2, len(terms))):
+    more = expand(terms)
+
+    def answered():
+        """Is the question covered by what was found? Words in common (a word that means the same counts less), or a section clearly about the same thing."""
+        best = max((relevance(terms, _tok(hit), more) for hit in hits), default=0)
+        return bool(hits) and (best >= 0.6 * min(2, len(terms)) or best_meaning >= semantic.COVERED)
+    if call_id and not answered():
         # Not in what we have saved: look in the links the admin gave (instruction files, the chat, the campaign, the lead's row), read live
         from . import reference_links
         try:
             hits.extend(await asyncio.wait_for(reference_links.search(call_id, query), 8))
         except Exception:
             pass
-        coverage = max((len(terms & _tok(hit)) for hit in hits), default=0)
-    if not hits or coverage < min(2, len(terms)):
+    if not answered():
         url = voices.get_setting("company_website", "").strip()
         if url:
             # Calls must not wait for a full crawl. Inspect relevant known pages concurrently.

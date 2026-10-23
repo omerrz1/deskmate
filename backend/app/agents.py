@@ -6,7 +6,7 @@ import time
 
 from harness import RunContext
 
-from . import addressing, apps, costs, discuss, live_help, capabilities, crm, db, files, llm, office, runtime, team, voices  # live_help: importing it creates the live_questions table
+from . import addressing, apps, costs, discuss, learning, live_help, capabilities, crm, db, files, llm, office, runtime, team, voices  # live_help: importing it creates the live_questions table
 from .runtime.policies import meeting_gate  # noqa: F401  main.py's live-meeting tool endpoint calls agents.meeting_gate
 
 for stmt in (
@@ -446,6 +446,7 @@ THE REST OF THE TEAM: {team}.
 YOUR DESK: {office.agent_context(agent['id'])}
 YOUR CONNECTED APPS: {apps.summary_line(agent)}
 {discuss.prompt_block(agent['id'])}
+{learning.block(agent['id'], 'chat')}
 {org}
 {audience_note} It is {time.strftime('%A %d %B %Y, %H:%M')}.
 {writing_note}
@@ -543,6 +544,15 @@ async def meeting_message(mid, text):
         return
     db.run("INSERT INTO meeting_msgs(meeting_id,role,text,created_at) VALUES(?,?,?,?)", (mid, "admin", text[:4000], db.now()))
     ags = m["agents"]
+    answered = learning.handle_reply(mid, text)  # "yes" / "no" to an employee asking whether to keep a rule it just learned
+    if answered:
+        who = get(answered[0]) or (ags[0] if ags else None)
+        if who:
+            yield {"type": "speaker", "agent_id": who["id"], "name": who["name"]}
+            db.run("INSERT INTO meeting_msgs(meeting_id,role,agent_id,text,tools,created_at) VALUES(?,?,?,?,?,?)", (mid, "agent", who["id"], answered[1], "[]", db.now()))
+            yield {"type": "agent_done", "agent_id": who["id"], "name": who["name"], "text": answered[1], "tools": []}
+            yield {"type": "done"}
+            return
     direct_call_done = False
     for ag in await _responders(text, ags, mid):
         hist = _chat_history(mid, ag)
@@ -588,6 +598,7 @@ async def meeting_message(mid, text):
         db.run("INSERT INTO meeting_msgs(meeting_id,role,agent_id,text,tools,created_at) VALUES(?,?,?,?,?,?)",
                (mid, "agent", ag["id"], final, json.dumps(used), db.now()))
         yield {"type": "agent_done", "agent_id": ag["id"], "name": ag["name"], "text": final, "tools": used}
+    learning.schedule(mid, text)  # was that a correction worth keeping as a rule? checked in the background
     yield {"type": "done"}
 
 

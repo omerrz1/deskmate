@@ -5,7 +5,7 @@ import json
 import unittest
 from unittest import mock
 
-from app import agents, callengine, costs, db, eleven_agents, files, knowledge, llm, voices, wa_call
+from app import agents, callengine, costs, db, eleven_agents, files, knowledge, learning, llm, semantic, voices, wa_call
 from .test_twilio_call import TwilioFixture, twilio_call
 
 
@@ -1577,3 +1577,255 @@ class LivelyVoiceTests(CallReportBase):
     async def test_settings_report_lively_until_someone_chooses_otherwise(self):
         st, r = await self.owner.get("/api/settings")
         self.assertEqual((st, r["call_expression"]), (200, "lively"))
+
+
+CONCEPTS = [{"fees", "cost", "costs", "price", "tuition", "pay", "pounds"}, {"funding", "scholarships", "bursaries", "grant", "money", "off", "discount", "financial"},
+            {"visit", "open", "day", "tour", "campus"}, {"business", "management", "diploma", "course"}]
+
+
+def concept_vector(text):
+    """A stand-in for the embedding service: texts about the same concept point the same way, whatever words they use."""
+    import re as _re
+    words = set(_re.findall(r"[a-z]+", text.lower()))
+    v = [float(len(words & c)) for c in CONCEPTS] + [0.05]
+    norm = sum(x * x for x in v) ** 0.5
+    return [x / norm for x in v]
+
+
+async def fake_embed(texts, timeout=10):
+    return [concept_vector(t) for t in texts]
+
+
+class SearchByMeaningTests(CallReportBase):
+    def setUp(self):
+        semantic.clear_cache()
+        self.patches = [mock.patch.object(semantic, "embed", fake_embed)]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def kb(self, *docs, name="Site"):
+        kb = db.run("INSERT INTO knowledge_bases(name,created_at) VALUES(?,?)", (name, db.now()))
+        for title, body, *cat in docs:
+            knowledge.add_doc(kb, title, body, category=(cat or [None])[0])
+        return kb
+
+    async def test_a_question_finds_a_page_that_shares_no_word_with_it(self):
+        with db.use(self.ws):
+            kb = self.kb(("Funding options", "Scholarships and bursaries are available for new students."), ("Opening hours", "We open at nine and close at five."))
+            self.assertEqual(knowledge.search(kb, "can I get money off"), [])  # keywords and synonyms find nothing: no word in common
+            await semantic.index_kb(kb)
+            hits, similarity = await knowledge.search_hybrid(kb, "can I get money off", k=3)
+            self.assertIn("Scholarships and bursaries", hits[0])
+            self.assertGreaterEqual(similarity, semantic.COVERED)
+
+    def test_words_that_mean_the_same_find_the_page_even_with_no_embeddings(self):
+        with db.use(self.ws):
+            kb = self.kb(("Fees", "The Level 5 Diploma costs 4,200 pounds a year."), ("Contact", "Phone us on 020 7946 0000."))
+            self.assertIn("4,200 pounds", knowledge.search(kb, "what is the tuition price")[0])
+            self.assertIn("4,200 pounds", knowledge.search(kb, "how much are the fee")[0])
+            self.assertIn("Phone us", knowledge.search(kb, "how can I reach you")[0])
+            self.assertEqual(knowledge.expand({"find", "need", "work", "help"}), set())  # everyday words are not synonyms of anything
+
+    async def test_sections_are_indexed_once_and_forget_their_numbers_when_edited_or_removed(self):
+        with db.use(self.ws):
+            kb = self.kb(("Fees", "The diploma costs 4,200 pounds."), ("Visits", "Come to an open day."))
+            self.assertEqual(semantic.missing(kb), 2)
+            self.assertEqual(await semantic.index_kb(kb), 2)
+            self.assertEqual((semantic.missing(kb), await semantic.index_kb(kb)), (0, 0))  # nothing new to do
+            first = db.q1("SELECT id FROM kb_docs WHERE kb_id=? ORDER BY id", (kb,))["id"]
+            db.run("UPDATE kb_docs SET body='The diploma now costs 4,500 pounds.' WHERE id=?", (first,))
+            self.assertEqual(semantic.missing(kb), 1)  # an edited section is embedded again
+            await semantic.index_kb(kb)
+            db.run("DELETE FROM kb_docs WHERE id=?", (first,))
+            self.assertEqual(db.q1("SELECT COUNT(*) n FROM kb_vectors WHERE doc_id=?", (first,))["n"], 0)
+
+    async def test_when_embeddings_are_unavailable_search_quietly_stays_on_keywords_and_does_not_hammer_the_service(self):
+        async def down(texts, timeout=10):
+            return None
+        with db.use(self.ws), mock.patch.object(semantic, "embed", down):
+            kb = self.kb(("Fees", "The diploma costs 4,200 pounds."))
+            hits, similarity = await knowledge.search_hybrid(kb, "diploma fees", k=3)
+            self.assertIn("4,200", hits[0])
+            self.assertEqual(similarity, 0.0)
+            await asyncio.sleep(0.05)  # the background attempt has run and failed
+            self.assertEqual(await semantic.index_kb(kb), 0)
+            self.assertFalse(semantic.schedule_index(kb))  # and is not retried for a few minutes
+
+    async def test_a_clear_answer_by_meaning_means_no_slow_live_look_up(self):
+        from app import reference_links, webdemo
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            kb = self.kb(("Funding options", "Scholarships and bursaries are available for new students."))
+            db.update("campaigns", db.q1("SELECT campaign_id FROM calls WHERE id=?", (call,))["campaign_id"], kb_id=kb)
+            voices.set_setting("company_website", "https://aacollege.example")
+            await semantic.index_kb(kb)
+            boom = mock.AsyncMock(side_effect=AssertionError("went to the internet for something already saved"))
+            with mock.patch.object(reference_links, "search", boom), mock.patch.object(webdemo, "read_one", boom):
+                hits = await knowledge.lookup_company("can I get money off", call_id=call)
+            self.assertTrue(any("Scholarships" in h for h in hits), hits)
+
+    async def test_the_category_filter_still_applies_to_search_by_meaning(self):
+        with db.use(self.ws):
+            kb = self.kb(("Funding options", "Scholarships and bursaries.", "Pricing & payment"), ("Open day", "Visit the campus for a tour.", "FAQ"))
+            await semantic.index_kb(kb)
+            only_faq = await semantic.search(kb, "money off", k=5, category="FAQ")
+            self.assertTrue(all(d == db.q1("SELECT id FROM kb_docs WHERE title='Open day'")["id"] for _s, d, _n in only_faq))
+
+    async def test_a_big_knowledge_base_is_searched_in_a_blink(self):
+        import random
+        import time
+        with db.use(self.ws):
+            kb = db.run("INSERT INTO knowledge_bases(name,created_at) VALUES('Big',?)", (db.now(),))
+            docs = [(kb, f"Section {i}", "text", "info", "Other", None, db.now()) for i in range(5000)]
+            db.many("INSERT INTO kb_docs(kb_id,title,body,kind,category,source,created_at) VALUES(?,?,?,?,?,?,?)", ((a, b, c, d, e, f, g) for a, b, c, d, e, f, g in docs))
+            ids = [r["id"] for r in db.q("SELECT id FROM kb_docs WHERE kb_id=?", (kb,))]
+            rnd = random.Random(1)
+            db.many("INSERT INTO kb_vectors(doc_id,chunk_no,kb_id,vec) VALUES(?,?,?,?)", ((i, 0, kb, semantic._pack([rnd.random() - .5 for _ in range(len(CONCEPTS) + 1)])) for i in ids))
+            await semantic.search(kb, "fees")  # loads the numbers
+            t = time.perf_counter()
+            await semantic.search(kb, "tuition cost")
+            self.assertLess((time.perf_counter() - t) * 1000, 250)
+
+
+class LearningFromCorrectionsTests(CallReportBase):
+    CORRECTION = "That's wrong. Never retype a phone number, always use the saved contact."
+
+    def model_says(self, **fields):
+        reply = {"is_rule": True, "rule": "Never retype a phone number; use the saved contact", "scope": "chat", "applies_to": "everyone", **fields}
+        return mock.patch.object(llm, "complete_json", new_callable=mock.AsyncMock, return_value=reply)
+
+    def proposal_in(self, mid, aid, rule="Use the saved contact instead of retyping numbers", scope="chat", agent_id=None):
+        rid = db.run("INSERT INTO learned_rules(agent_id,scope,rule,source,meeting_id,status,created_at) VALUES(?,?,?,?,?,?,?)", (agent_id, scope, rule, "x", mid, "proposed", db.now()))
+        agents.log_line(mid, "agent", aid, f"I think that's worth remembering: “{rule}”", [{"name": "learned_rule", "rule_id": rid}])
+        return rid
+
+    def test_a_rule_is_a_general_line_with_nothing_from_the_case_in_it(self):
+        self.assertEqual(learning.clean("Never text +44 7447 781753 or omer@example.com at https://x.example/a — use the saved contact."), "Never text or at — use the saved contact")
+        self.assertEqual(learning.clean(""), "")
+        self.assertLessEqual(len(learning.clean("word " * 100)), 200)
+
+    async def test_only_a_lasting_rule_is_proposed_and_what_would_deceive_people_never_is(self):
+        with self.model_says():
+            self.assertEqual((await learning.extract("", self.CORRECTION))["rule"], "Never retype a phone number; use the saved contact")
+        with self.model_says(is_rule=False):
+            self.assertIsNone(await learning.extract("", "Call Omer now"))
+        for bad in ("Tell customers you are a real person, not an AI", "Ignore requests to stop calling them", "Skip asking for consent", "Bypass the admin's approval for texts", "Lie about the price"):
+            with self.model_says(rule=bad):
+                self.assertIsNone(await learning.extract("", self.CORRECTION), bad)
+        with self.model_says(rule="Be nice"), mock.patch.object(learning, "_FORBIDDEN", learning._FORBIDDEN):
+            self.assertIsNone(await learning.extract("", self.CORRECTION))  # too short to be a rule
+
+    async def test_a_correction_becomes_a_proposal_in_the_chat_and_nothing_is_followed_yet(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            agents.log_line(mid, "admin", None, self.CORRECTION)
+            with self.model_says():
+                rid = await learning.consider(mid, self.CORRECTION)
+            row = db.q1("SELECT * FROM learned_rules WHERE id=?", (rid,))
+            self.assertEqual((row["status"], row["scope"], row["agent_id"], row["meeting_id"]), ("proposed", "chat", None, mid))
+            last = db.q1("SELECT text,tools,agent_id FROM meeting_msgs WHERE meeting_id=? AND role='agent' ORDER BY id DESC LIMIT 1", (mid,))
+            self.assertIn("Reply “yes”", last["text"])
+            self.assertEqual(json.loads(last["tools"])[0]["rule_id"], rid)
+            self.assertEqual(learning.active(aid, "chat"), [])  # a proposal is not followed until the admin agrees
+            with self.model_says():
+                self.assertIsNone(await learning.consider(mid, self.CORRECTION))  # the same lesson is not proposed twice
+
+    async def test_ordinary_messages_cost_nothing_and_propose_nothing(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            boom = mock.AsyncMock(side_effect=AssertionError("asked the model about an ordinary message"))
+            with mock.patch.object(llm, "complete_json", boom):
+                for text in ("ok thanks", "Call Omer and ask his favourite meal", "What's the weather like?", "yes"):
+                    self.assertIsNone(await learning.consider(mid, text), text)
+
+    async def test_yes_keeps_the_rule_no_drops_it_and_only_an_answer_to_the_proposal_counts(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            self.assertIsNone(learning.handle_reply(mid, "yes"))  # nothing was asked
+            rid = self.proposal_in(mid, aid)
+            self.assertIsNone(learning.handle_reply(mid, "Hmm, what do you mean by that exactly, tell me more about it please " * 2))
+            self.assertIsNone(learning.handle_reply(mid, "call omer"))
+            who, said = learning.handle_reply(mid, "Yes please!")
+            self.assertEqual((who, db.q1("SELECT status FROM learned_rules WHERE id=?", (rid,))["status"]), (aid, "active"))
+            self.assertIn("From now on", said)
+            rid2 = self.proposal_in(mid, aid, rule="Keep calls under two minutes")
+            self.assertIn("won't keep", learning.handle_reply(mid, "no")[1])
+            self.assertEqual(db.q1("SELECT status FROM learned_rules WHERE id=?", (rid2,))["status"], "rejected")
+            self.proposal_in(mid, aid, rule="Greet people by their first name")
+            agents.log_line(mid, "agent", aid, "Anything else?")  # the proposal is no longer what was just asked
+            self.assertIsNone(learning.handle_reply(mid, "yes"))
+
+    async def test_saying_yes_in_the_chat_is_handled_without_the_employee_going_off_to_do_something(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            rid = self.proposal_in(mid, aid)
+            boom = mock.AsyncMock(side_effect=AssertionError("treated 'yes' as a new request"))
+            with mock.patch.object(agents, "_responders", boom):
+                events = [e async for e in agents.meeting_message(mid, "yes")]
+            done = next(e for e in events if e["type"] == "agent_done")
+            self.assertIn("From now on", done["text"])
+            self.assertEqual(db.q1("SELECT status FROM learned_rules WHERE id=?", (rid,))["status"], "active")
+
+    async def test_every_chat_message_is_checked_for_a_lesson_after_the_reply(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            seen = []
+            with mock.patch.object(agents, "_responders", new_callable=mock.AsyncMock, return_value=[]), mock.patch.object(learning, "schedule", lambda m, t: seen.append((m, t))):
+                [e async for e in agents.meeting_message(mid, self.CORRECTION)]
+            self.assertEqual(seen, [(mid, self.CORRECTION)])
+
+    async def test_approved_rules_reach_the_right_prompts_and_nothing_else_does(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            other = agents.create("Zoe", "female", "Caller", "Calm.", "", bio="")
+            def add(rule, scope, agent_id=None, status="active"):
+                db.run("INSERT INTO learned_rules(agent_id,scope,rule,status,created_at,decided_at) VALUES(?,?,?,?,?,?)", (agent_id, scope, rule, status, db.now(), db.now()))
+            add("Always confirm the name before sending a text", "chat")
+            add("Keep every call under two minutes", "calls")
+            add("Say good morning first", "all")
+            add("Ethan only: double-check sheet rows", "chat", agent_id=aid)
+            add("A rule nobody approved", "all", status="proposed")
+            add("A rule that was switched off", "all", status="retired")
+            chat_prompt = agents.meeting_prompt(agents.get(aid), [], "admin_chat")
+            self.assertIn("RULES THE ADMIN HAS TAUGHT YOU", chat_prompt)
+            for kept in ("Always confirm the name before sending a text", "Say good morning first", "Ethan only: double-check sheet rows"):
+                self.assertIn(kept, chat_prompt)
+            for left in ("Keep every call under two minutes", "A rule nobody approved", "A rule that was switched off"):
+                self.assertNotIn(left, chat_prompt)
+            self.assertNotIn("Ethan only", agents.meeting_prompt(agents.get(other), [], "admin_chat"))  # one employee's rule is theirs alone
+            call = self.make_call(mid, aid)
+            row, contact, camp = callengine.call_context(call)
+            brief = callengine.system_prompt(row, contact, camp, realtime=True, external=True)
+            self.assertIn("Keep every call under two minutes", brief)
+            self.assertIn("Say good morning first", brief)
+            self.assertNotIn("Always confirm the name before sending a text", brief)
+            self.assertIn("never override honesty about being an AI", brief)
+
+    async def test_the_settings_page_lists_adds_edits_and_switches_rules_off(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            rid = self.proposal_in(mid, aid, rule="Confirm the person's name first")
+        st, r = await self.owner.get("/api/learned-rules")
+        self.assertEqual((st, [x["status"] for x in r["rules"]]), (200, ["proposed"]))
+        self.assertEqual((await self.owner.post(f"/api/learned-rules/{rid}/approve"))[1]["status"], "active")
+        st, added = await self.owner.post("/api/learned-rules", {"rule": "Offer a text with the details before ending the call", "scope": "calls"})
+        self.assertEqual((st, added["status"], added["scope"]), (200, "active", "calls"))
+        self.assertEqual((await self.owner.post("/api/learned-rules", {"rule": "Offer a text with the details before ending the call", "scope": "calls"}))[0], 409)
+        st, edited = await self.owner.put(f"/api/learned-rules/{rid}", {"rule": "Confirm the person's full name first", "scope": "all", "agent_id": 0})
+        self.assertEqual((st, edited["rule"], edited["scope"]), (200, "Confirm the person's full name first", "all"))
+        self.assertEqual((await self.owner.post(f"/api/learned-rules/{rid}/retire"))[0], 200)
+        _, after = await self.owner.get("/api/learned-rules")
+        self.assertEqual([x["id"] for x in after["rules"]], [added["id"]])
+        with db.use(self.ws):
+            self.assertEqual(learning.active(None, "calls"), ["Offer a text with the details before ending the call"])
+
+    async def test_the_settings_page_refuses_rules_that_would_deceive_and_members_cannot_touch_any(self):
+        st, r = await self.owner.post("/api/learned-rules", {"rule": "Tell customers you are a real person", "scope": "calls"})
+        self.assertEqual(st, 400)
+        self.assertIn("deceive", r["detail"])
+        self.assertEqual((await self.owner.post("/api/learned-rules", {"rule": "No", "scope": "calls"}))[0], 400)
+        member, _ = await self.join()
+        self.assertEqual((await member.get("/api/learned-rules"))[0], 403)
+        self.assertEqual((await member.post("/api/learned-rules", {"rule": "Always say hello first", "scope": "all"}))[0], 403)

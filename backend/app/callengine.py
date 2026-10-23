@@ -558,6 +558,8 @@ Use lookup_info for every company fact. Tools can fail: if one does, carry on na
     manner = ((call or {}).get("style") or "").strip()
     standing = (voices.get_setting("call_instructions", "") or "").strip()  # re-read from Settings for every single call, so edits apply from the next call
     person_notes = person_instructions(contact)
+    from . import learning
+    learned_rules = learning.block((camp or {}).get("agent_id") or (call or {}).get("report_agent_id"), "calls")  # what the admin has corrected before, approved by them
     try:
         from . import reference_links
         given_links = reference_links.gather((call or {}).get("id"))[:8]
@@ -574,6 +576,7 @@ Use lookup_info for every company fact. Tools can fail: if one does, carry on na
 {('HOW THE ADMIN WANTS YOU TO SOUND: ' + manner) if manner else ''}
 {('MORE FROM THE TEAM: ' + extra) if extra else ''}
 {('STANDING RULES FROM THE ADMIN (they apply to every call you make; follow them on this one too): ' + standing) if standing else ''}
+{learned_rules}
 {('WHAT THE LEAD SHEET SAYS ABOUT THIS PERSON (follow it): ' + '; '.join(person_notes)) if person_notes else ''}
 {('INSTRUCTION FILES FROM THE ADMIN (read these before you speak; they apply to this call):' + chr(10) + chr(10).join(instruction_docs)) if instruction_docs else ''}
 {('LINKS THE ADMIN GAVE YOU (when a question is not answered by your facts, lookup_info reads these pages live; read_page opens one):' + chr(10) + chr(10).join('- ' + i['url'] + ' (from ' + i['from'] + ')' for i in given_links)) if given_links else ''}

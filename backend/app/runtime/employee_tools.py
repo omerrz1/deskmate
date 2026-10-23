@@ -99,7 +99,8 @@ async def update_knowledge_base(agent, a):
 
 @tool("search_knowledge")
 async def search_knowledge(agent, a):
-    return knowledge.search(a["kb_id"], a["query"], k=4), "/knowledge"
+    hits, _ = await knowledge.search_hybrid(a["kb_id"], a["query"], k=4)
+    return hits, "/knowledge"
 
 
 async def _company_website_kb(refresh=False):
@@ -141,7 +142,7 @@ async def search_company_website(agent, a):
     if error:
         return {"error": error}, None
     with db.use(db.company()):
-        hits = knowledge.search(kb_id, str(a["query"])[:500], k=8)
+        hits, _ = await knowledge.search_hybrid(kb_id, str(a["query"])[:500], k=8)
     sources = list(dict.fromkeys(re.findall(r"source:\s*(https?://[^\s\]]+)", "\n".join(hits))))
     return {"kb_id": kb_id, "results": hits or ["NOTHING FOUND in the crawled website pages. Do not guess; say you could not verify the answer."],
             "sources": sources}, "/knowledge"

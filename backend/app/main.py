@@ -34,6 +34,8 @@ app.include_router(chat_hooks.router)
 app.include_router(setup_api.router)
 from . import voice_library
 app.include_router(voice_library.router)
+from . import learning
+app.include_router(learning.router)
 app.add_middleware(CORSMiddleware, allow_origins=sorted(security.ALLOWED_ORIGINS), allow_credentials=True,
                    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token"])
 

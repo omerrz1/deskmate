@@ -95,9 +95,10 @@ def passages(page, query, limit=3, size=700):
     """The parts of a page that best match the question, as 'knowledge base' style hits that carry their source address."""
     from . import knowledge
     terms = _tok(query)
+    more = knowledge.expand(terms)
     scored = []
     for chunk in knowledge._chunks({"title": page.get("title") or page["url"], "body": page.get("text") or "", "source": page["url"]}):
-        overlap = len(terms & _tok(chunk))
+        overlap = knowledge.relevance(terms, _tok(chunk), more)  # a word that means the same counts too ("cost" for "fees")
         if overlap:
             scored.append((overlap, chunk[:size + 160]))
     scored.sort(key=lambda t: -t[0])
@@ -112,12 +113,15 @@ async def search(call_id, query, pages=6, follow=3):
     if not links or not _tok(query):
         return []
     fetched = await asyncio.gather(*(fetch(item["url"]) for item in links[:pages]))
+    from . import knowledge
     terms, hits, seen_urls = _tok(query), [], set()
+    more = knowledge.expand(terms)
+    score = lambda c: knowledge.relevance(terms, _tok(c), more)  # noqa: E731
     pool = [p for p in fetched if p]
     for p in pool:
         seen_urls.add(p["url"])
-        hits.extend((len(terms & _tok(c)), c) for c in passages(p, query))
-    if not hits or max(h[0] for h in hits) < min(2, len(terms)):  # the given pages do not answer it: follow their links that look relevant
+        hits.extend((score(c), c) for c in passages(p, query))
+    if not hits or max(h[0] for h in hits) < 0.6 * min(2, len(terms)):  # the given pages do not answer it: follow their links that look relevant
         candidates = {}
         for p in pool:
             try:
@@ -130,7 +134,7 @@ async def search(call_id, query, pages=6, follow=3):
         ranked = [u for u, n in sorted(candidates.items(), key=lambda t: -t[1]) if n][:follow]
         for p in await asyncio.gather(*(fetch(u) for u in ranked)):
             if p:
-                hits.extend((len(terms & _tok(c)), c) for c in passages(p, query))
+                hits.extend((score(c), c) for c in passages(p, query))
     hits.sort(key=lambda t: -t[0])
     return list(dict.fromkeys(c for _n, c in hits))[:6]
 

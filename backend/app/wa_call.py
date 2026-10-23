@@ -662,7 +662,7 @@ class OpenAIEngine:
                 "type": "realtime", "model": model, "instructions": self.instructions, "output_modalities": ["audio"],
                 "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}, "transcription": tr, "turn_detection": {"type": "semantic_vad", "eagerness": "low"}, "noise_reduction": {"type": "far_field"}},
                           "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": self.voice, "speed": 1.0}},
-                "max_output_tokens": 600, "tools": _tool_defs(), "tool_choice": "auto"}}))
+                "max_output_tokens": 200, "tools": _tool_defs(), "tool_choice": "auto"}}))
             greeting = ("The customer just called us. Greet them now with your first turn." if self.sess.direction == "in" else "The customer just picked up the phone. Begin the call now with your first turn.")
             await ws.send(json.dumps({"type": "response.create", "response": {"instructions": greeting}}))
             async for raw in ws:

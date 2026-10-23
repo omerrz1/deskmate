@@ -357,6 +357,14 @@ async def lookup_company(query, call_id=None, kb_id=None):
             hits.extend(search(website_id, query, k=6))
     terms = _tok(query) - _STOP
     coverage = max((len(terms & _tok(hit)) for hit in hits), default=0)
+    if call_id and (not hits or coverage < min(2, len(terms))):
+        # Not in what we have saved: look in the links the admin gave (instruction files, the chat, the campaign, the lead's row), read live
+        from . import reference_links
+        try:
+            hits.extend(await asyncio.wait_for(reference_links.search(call_id, query), 8))
+        except Exception:
+            pass
+        coverage = max((len(terms & _tok(hit)) for hit in hits), default=0)
     if not hits or coverage < min(2, len(terms)):
         url = voices.get_setting("company_website", "").strip()
         if url:

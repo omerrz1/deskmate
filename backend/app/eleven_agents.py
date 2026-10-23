@@ -12,6 +12,8 @@ from . import db, llm
 BASE = "https://api.elevenlabs.io/v1"
 AGENT_LLM = os.getenv("ELEVENLABS_AGENT_LLM", "gpt-4.1")
 # Lower than 1 keeps the agent on its task; the wording still varies from call to call.
+# A safety net, not the way short sentences are achieved (the brief does that): no single reply can run on past about 90 words.
+AGENT_MAX_TOKENS = int(os.getenv("ELEVENLABS_AGENT_MAX_TOKENS", "120"))
 AGENT_TEMPERATURE = float(os.getenv("ELEVENLABS_AGENT_TEMPERATURE", "0.6"))
 # "patient" waits for the person to finish thinking aloud instead of cutting in on a pause. Override: eager | normal | patient.
 TURN_EAGERNESS = os.getenv("ELEVENLABS_TURN_EAGERNESS", "patient")
@@ -68,22 +70,31 @@ def unavailable_reason(contact):
 
 
 async def _tool_id(h):
-    row = db.q1("SELECT tool_id FROM el_tools WHERE name='lookup_info'")
-    if row:
-        return row["tool_id"]
-    cfg = {"tool_config": {"type": "client", "name": "lookup_info", "expects_response": True, "response_timeout_secs": 10,
-                           "description": "Look up facts about the company: products or services, prices, requirements, dates, how to get started or support. Always use before stating any fact. Say just 'one sec' first.",
+    """lookup_info: the one tool every call has. Kept in step with this file like the others, so a change here reaches the agent that ElevenLabs holds."""
+    import hashlib
+    import json
+    cfg = {"tool_config": {"type": "client", "name": "lookup_info", "expects_response": True, "response_timeout_secs": 20,
+                           "description": "Look up facts about the company: products or services, prices, requirements, dates, how to get started or support. Always use before stating any fact. "
+                                          "It checks saved answers and company files, then the links the admin gave (read live), then the company website. Say just 'one sec' first.",
                            "parameters": {"type": "object", "required": ["query"], "properties": {
                                "query": {"type": "string", "description": "What to look up, e.g. 'price of the standard plan'"},
                                "category": {"type": "string", "description": "Optional: Products & services, Pricing & payment, Requirements, How to get started, FAQ, Policies, Contact & locations, Support"}}}}}
+    sig = hashlib.sha1(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:16]
+    row = db.q1("SELECT tool_id,sig FROM el_tools WHERE name='lookup_info'")
+    if row:
+        if row.get("sig") != sig:
+            r = await h.patch(f"{BASE}/convai/tools/{row['tool_id']}", json=cfg, timeout=20)
+            if r.status_code == 200:
+                db.run("UPDATE el_tools SET sig=? WHERE name='lookup_info'", (sig,))
+        return row["tool_id"]
     r = await h.post(f"{BASE}/convai/tools", json=cfg)
     r.raise_for_status()
     tid = r.json()["id"]
-    db.run("INSERT OR REPLACE INTO el_tools(name,tool_id) VALUES('lookup_info',?)", (tid,))
+    db.run("INSERT OR REPLACE INTO el_tools(name,tool_id,sig) VALUES('lookup_info',?,?)", (tid, sig))
     return tid
 
 
-TOOL_TIMEOUTS = {"ask_admin": 120, "send_information": 20, "search_web": 12}  # seconds a tool may take before the agent gives up on it
+TOOL_TIMEOUTS = {"ask_admin": 120, "send_information": 20, "search_web": 16, "read_page": 14}  # seconds a tool may take before the agent gives up on it
 
 
 async def _extra_tool_ids(h):
@@ -154,7 +165,7 @@ async def ensure_agent(profile):
         tid = await _tool_id(h)
         body = {"name": name, "conversation_config": {
             "agent": {"language": code, "first_message": "Hello?",
-                      "prompt": {"prompt": "You are a helpful phone agent.", "llm": AGENT_LLM, "tool_ids": [tid],
+                      "prompt": {"prompt": "You are a helpful phone agent.", "llm": AGENT_LLM, "tool_ids": [tid], "max_tokens": AGENT_MAX_TOKENS,
                                  "built_in_tools": {"end_call": {"name": "end_call", "description": "End the call after you have said goodbye.",
                                                                  "params": {"system_tool_type": "end_call"}}}}},
             "tts": {"voice_id": voice, "model_id": model},
@@ -239,7 +250,7 @@ async def apply_tuning(profile_id):
         tids = None
         db.log("voice", f"Could not register the agent tools yet ({auth_scrub(str(e))[:120]})")
     body["conversation_config"] = {"tts": {"voice_id": prof["voice_id"], "model_id": model}}
-    body["conversation_config"]["agent"] = {"prompt": {"temperature": AGENT_TEMPERATURE, **({"tool_ids": tids} if tids else {})}}  # the agent itself uses this voice and model too
+    body["conversation_config"]["agent"] = {"prompt": {"temperature": AGENT_TEMPERATURE, "max_tokens": AGENT_MAX_TOKENS, **({"tool_ids": tids} if tids else {})}}  # the agent itself uses this voice and model too
     body["conversation_config"]["turn"] = {"turn_eagerness": t.get("turn_eagerness") or TURN_EAGERNESS}
     try:
         async with httpx.AsyncClient(timeout=90, headers=_h()) as h:

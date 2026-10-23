@@ -159,7 +159,7 @@ class PromptTests(CallReportBase):
             self.assertIn("Ask them what their favourite meal is", prompt)
             self.assertNotIn("Selling is", prompt)
             self.assertNotIn("PRODUCTS / SERVICES", prompt)
-            self.assertIn("one short sentence", prompt)
+            self.assertIn("Every sentence is 15 words or fewer", prompt)
             self.assertIn("Never talk over them", prompt)
             self.assertIn("say it back in a few words", prompt)  # the answer is confirmed aloud, so the transcript holds it
 
@@ -1317,3 +1317,222 @@ class ExpressionSettingTests(CallReportBase):
             aid, mid = self.make_chat()
             row, contact, camp = callengine.call_context(self.make_call(mid, aid))
             self.assertIn("a light joke or an easy laugh when the moment allows", callengine.system_prompt(row, contact, camp, realtime=True, external=True))
+
+
+class ShortSentencesTests(CallReportBase):
+    def test_the_brief_sets_hard_numeric_limits_not_just_a_mood(self):
+        for needle in ("Every sentence is 15 words or fewer", "one or two sentences, about 25 words at most", "make two short ones",
+                       "Give the one key point", "Never read out what you found"):
+            self.assertIn(needle, self.brief())
+
+    def brief(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            row, contact, camp = callengine.call_context(self.make_call(mid, aid))
+            return callengine.system_prompt(row, contact, camp, realtime=True, external=True)
+
+    def test_the_report_measures_how_the_caller_actually_spoke(self):
+        talk = [{"role": "agent", "text": "Hi, is this Omer?"}, {"role": "customer", "text": "Yes"},
+                {"role": "agent", "text": "Great. Quick one. What is your favourite meal? I will note it down for the team and then send you a text with the details later today if that is okay."},
+                {"role": "customer", "text": "Pizza"}]
+        stats = callengine.speech_stats(talk)
+        self.assertEqual((stats["turns"], stats["long_sentences"]), (2, 1))
+        self.assertGreaterEqual(stats["longest_sentence"], 21)
+        self.assertEqual(callengine.speech_stats([{"role": "customer", "text": "Hello"}]), None)
+        self.assertIn("1 sentence ran past 20 words", callengine._speech_line(stats))
+        calm = callengine.speech_stats([{"role": "agent", "text": "Hi there. How are you?"}])
+        self.assertNotIn("ran past", callengine._speech_line(calm))
+
+    async def test_the_style_line_is_part_of_the_write_up_in_the_chat(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            talk = [{"role": "agent", "text": "Hi. Quick question.", "t": 1}, {"role": "customer", "text": "Sure", "t": 3}]
+            call = self.make_call(mid, aid, transcript=json.dumps(talk), duration=20)
+            with mock.patch.object(llm, "complete_json", new_callable=mock.AsyncMock, return_value={"summary": "ok", "outcome": "interested"}):
+                await callengine.finalize(call, "completed")
+            self.assertIn("How it spoke: 1 turns, 3.0 words on average, longest sentence 2 words.", self.chat_text(mid)[0])
+
+    async def test_a_reply_can_never_run_on_the_voice_agent_has_a_token_ceiling(self):
+        seen = []
+
+        class Http:
+            async def patch(self, url, json=None, timeout=None):
+                seen.append(json)
+                return mock.Mock(status_code=200, json=lambda: {}, text="")
+
+            async def post(self, url, json=None, timeout=None):
+                return mock.Mock(status_code=200, json=lambda: {"id": "tool_1"}, text="")
+
+            async def get(self, *a, **k):
+                return mock.Mock(status_code=200, json=lambda: {}, text="")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+        with db.use(self.ws):
+            pid = voices.profiles()[0]["id"]
+            db.run("INSERT OR REPLACE INTO el_agents(code,agent_id,voice_id,model,created_at) VALUES(?,?,?,?,?)", (f"p{pid}", "agent_1", "A" * 20, "m", db.now()))
+            with mock.patch.object(eleven_agents.httpx, "AsyncClient", lambda *a, **k: Http()), mock.patch.object(llm, "eleven_key", return_value="key"):
+                await eleven_agents.apply_tuning(pid)
+        agent_patch = next(j for j in seen if "conversation_config" in j)
+        self.assertEqual(agent_patch["conversation_config"]["agent"]["prompt"]["max_tokens"], eleven_agents.AGENT_MAX_TOKENS)
+        self.assertLessEqual(eleven_agents.AGENT_MAX_TOKENS, 150)
+
+
+class LinksTheAdminGaveTests(CallReportBase):
+    SITE = "https://aacollege.example"
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        from app import reference_links
+        reference_links.clear_cache()
+        self.ref = reference_links
+
+    def call_with_links(self):
+        aid, mid = self.make_chat()
+        call = self.make_call(mid, aid, objective="Sell the course. Details are at https://aacollege.example/prospectus")
+        row = db.q1("SELECT campaign_id,contact_id FROM calls WHERE id=?", (call,))
+        db.update("campaigns", row["campaign_id"], instructions="Our fees page https://aacollege.example/fees is the truth.", report_meeting_id=mid)
+        db.update("contacts", row["contact_id"], extra=json.dumps({"Course link": "https://aacollege.example/courses/business", "__source_row": 3}))
+        padding = "Filler. " * 400  # the link is far past the first 1,500 characters that go into the brief
+        db.run("INSERT INTO documents(agent_id,title,kind,body,created_at,updated_at) VALUES(0,'Call script','doc',?,?,?)", (padding + "Policy: https://aacollege.example/policies/refunds", db.now(), db.now()))
+        db.run("INSERT INTO documents(agent_id,title,kind,body,created_at,updated_at) VALUES(0,'Lunch menu','doc','Soup: https://soup.example/today',?,?)", (db.now(), db.now()))
+        agents.log_line(mid, "admin", None, "Also check https://aacollege.example/open-days when asked about visits")
+        voices.set_setting("company_website", self.SITE)
+        voices.set_setting("call_instructions", "Use https://aacollege.example/faq for common questions.")
+        return aid, mid, call
+
+    async def test_every_link_the_admin_put_anywhere_is_collected_with_where_it_came_from(self):
+        with db.use(self.ws):
+            _, _, call = self.call_with_links()
+            got = {i["url"]: i["from"] for i in self.ref.gather(call)}
+            self.assertEqual(got["https://aacollege.example/prospectus"], "the task for this call")
+            self.assertEqual(got["https://aacollege.example/fees"], "the campaign's instructions")
+            self.assertEqual(got["https://aacollege.example/courses/business"], "this lead's 'Course link' cell")
+            self.assertEqual(got["https://aacollege.example/policies/refunds"], "the instruction file 'Call script'")
+            self.assertEqual(got["https://aacollege.example/open-days"], "the chat that asked for this")
+            self.assertEqual(got["https://aacollege.example/faq"], "the standing call instructions")
+            self.assertEqual(got["https://aacollege.example"], "the company website")
+            self.assertNotIn("https://soup.example/today", got)  # a document that is not an instruction file
+
+    async def test_the_brief_lists_the_links_so_the_caller_knows_what_it_can_read(self):
+        with db.use(self.ws):
+            _, _, call = self.call_with_links()
+            row, contact, camp = callengine.call_context(call)
+            prompt = callengine.system_prompt(row, contact, camp, realtime=True, external=True)
+            self.assertIn("LINKS THE ADMIN GAVE YOU", prompt)
+            self.assertIn("https://aacollege.example/fees (from the campaign's instructions)", prompt)
+            self.assertIn("read_page", prompt)
+            self.assertIn("Never say \"I don't know\" before you have searched", prompt)
+
+    def fake_site(self):
+        pages = {
+            "https://aacollege.example": {"url": "https://aacollege.example", "title": "AA College", "text": "Welcome to AA College. " * 20, "links": ["https://aacollege.example/fees", "https://aacollege.example/blog"]},
+            "https://aacollege.example/fees": {"url": "https://aacollege.example/fees", "title": "Fees", "text": "The Level 5 Diploma in Business Management costs 4,200 pounds a year, payable in monthly instalments.", "links": []},
+        }
+        calls = []
+
+        async def read_one(url):
+            calls.append(url)
+            if url in pages:
+                return pages[url]
+            raise RuntimeError("not found")
+        return read_one, calls
+
+    async def test_a_question_is_answered_from_the_admins_pages_following_the_links_that_look_relevant(self):
+        from app import webdemo
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            voices.set_setting("company_website", self.SITE)
+            read_one, fetched = self.fake_site()
+            with mock.patch.object(webdemo, "read_one", read_one):
+                hits = await self.ref.search(call, "Business Management diploma fees")
+            self.assertTrue(any("4,200 pounds" in h and "source: https://aacollege.example/fees" in h for h in hits), hits)
+            with mock.patch.object(webdemo, "read_one", read_one):
+                await self.ref.search(call, "diploma fees")
+            self.assertEqual(fetched.count("https://aacollege.example/fees"), 1)  # the second question reuses what was just read
+
+    async def test_lookup_info_checks_saved_knowledge_first_then_the_admins_links_live(self):
+        from app import webdemo
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            voices.set_setting("company_website", self.SITE)
+            read_one, fetched = self.fake_site()
+            with mock.patch.object(webdemo, "read_one", read_one):
+                hits = await knowledge.lookup_company("Business Management diploma fees", call_id=call)
+            self.assertTrue(any("4,200 pounds" in h for h in hits), hits)
+            kb = db.run("INSERT INTO knowledge_bases(name,created_at) VALUES('Saved',?)", (db.now(),))
+            db.update("campaigns", db.q1("SELECT campaign_id FROM calls WHERE id=?", (call,))["campaign_id"], kb_id=kb)
+            await knowledge.ingest(kb, "Fees", "The Business Management diploma fees are 4,500 pounds, saved by the admin.")
+            fetched.clear()
+            self.ref.clear_cache()
+            with mock.patch.object(webdemo, "read_one", read_one):
+                hits = await knowledge.lookup_company("Business Management diploma fees", call_id=call)
+            self.assertTrue(any("saved by the admin" in h for h in hits))
+            self.assertEqual(fetched, [])  # saved knowledge answered it: no page was fetched
+
+    async def test_read_page_opens_the_admins_links_and_company_pages_but_not_any_address_a_caller_names(self):
+        from app import agent_tools, webdemo
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            voices.set_setting("company_website", self.SITE)
+            read_one, _ = self.fake_site()
+            with mock.patch.object(webdemo, "read_one", read_one):
+                ok = await agent_tools.arun(call, "read_page", {"url": "https://aacollege.example/fees", "question": "diploma fees"})
+                refused = await agent_tools.arun(call, "read_page", {"url": "https://evil.example/steal", "question": "x"})
+            self.assertIn("4,200 pounds", ok)
+            self.assertIn("not instructions", ok)
+            self.assertIn("I can only open links the admin gave me", refused)
+
+    async def test_search_web_reads_the_top_pages_and_returns_their_words(self):
+        from app import agent_tools, public_tools
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            results = [{"title": "Salmon burger", "url": "https://food.example/salmon-burger", "snippet": "A recipe."}]
+
+            async def fetch(url, timeout=6):
+                return {"url": url, "title": "Salmon burger", "text": "Salmon burger ingredients: salmon fillet, brioche bun, dill mayonnaise and lettuce.", "links": []}
+            with mock.patch.object(public_tools, "web_search", new_callable=mock.AsyncMock, return_value=results), mock.patch.object(self.ref, "fetch", fetch):
+                out = await agent_tools.arun(call, "search_web", {"query": "salmon burger ingredients"})
+            self.assertIn("FROM THE TOP PAGES", out)
+            self.assertIn("brioche bun", out)
+            self.assertIn("ignore", out)
+
+    async def test_a_link_the_admin_gave_may_be_texted_but_an_invented_one_still_may_not(self):
+        from app import link_guard
+        with db.use(self.ws):
+            _, _, call = self.call_with_links()
+
+            async def none(url):
+                return 404
+            with mock.patch.object(link_guard, "_status", side_effect=none):
+                kept, _ = await link_guard.fix("Fees: https://aacollege.example/fees", call_id=call)
+                swapped, notes = await link_guard.fix("Fees: https://aacollege.example/fees-2024-final", call_id=call, hint="fees")
+            self.assertEqual(kept, "Fees: https://aacollege.example/fees")
+            self.assertTrue(notes)
+            self.assertNotIn("2024-final", swapped)
+
+    async def test_lookup_info_in_elevenlabs_is_kept_in_step_with_the_code(self):
+        sent = []
+
+        class Http:
+            async def patch(self, url, json=None, timeout=None):
+                sent.append(("PATCH", json["tool_config"]["name"], json["tool_config"]["response_timeout_secs"]))
+                return mock.Mock(status_code=200, json=lambda: {}, text="")
+        with db.use(self.ws):
+            db.run("DELETE FROM el_tools WHERE name='lookup_info'")
+            db.run("INSERT INTO el_tools(name,tool_id) VALUES('lookup_info','tool_old')")  # registered with the old 10-second limit
+            self.assertEqual(await eleven_agents._tool_id(Http()), "tool_old")
+            self.assertEqual(sent, [("PATCH", "lookup_info", 20)])
+            sent.clear()
+            await eleven_agents._tool_id(Http())
+            self.assertEqual(sent, [])
+        from app import agent_tools
+        self.assertIn("read_page", agent_tools.SPECS)
+        self.assertGreaterEqual(eleven_agents.TOOL_TIMEOUTS["search_web"], 15)

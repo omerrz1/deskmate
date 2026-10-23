@@ -142,6 +142,9 @@ async def fix(text, *, call_id=None, meeting_id=None, hint=""):
     seen = dict(_seen.get((db.current(), call_id), {})) if call_id else {}
     links = company_links()
     trusted = set(seen) | {normalise(u) for _l, u in links} | _admin_typed(meeting_id)
+    if call_id:
+        from . import reference_links
+        trusted |= {normalise(i["url"]) for i in reference_links.gather(call_id)}  # links the admin put in instructions, the chat or the campaign
     trusted |= _in_a_knowledge_base([u for _s, _e, u in found if normalise(u) not in trusted])
     bad = set()
     for _s, _e, url in found:

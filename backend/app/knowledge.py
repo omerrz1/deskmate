@@ -473,4 +473,5 @@ async def lookup_company(query, call_id=None, kb_id=None):
                     for chunk in _chunks({**page, "body": page["text"], "source": page["url"]}):
                         if terms & _tok(chunk):
                             hits.append(chunk)
-    return list(dict.fromkeys(hits))[:16] or ["No verified answer found after searching company files, saved admin answers and website evidence. Use ask_admin now; do not guess. An admin answer is authoritative for this call."]
+    return list(dict.fromkeys(hits))[:16] or ["NOTHING FOUND in the company's files, saved answers or website. You do NOT know this. Do not state it, estimate it or generalise it: 'usually', 'typically', 'most people', 'around', 'about' and 'several' are all guesses. "
+  "Say plainly that you don't have it to hand, offer to include it in the text you send or to have the team confirm, and carry on. Use ask_admin only if the answer decides the sale; an admin answer is authoritative for this call."]

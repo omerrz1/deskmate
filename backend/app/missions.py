@@ -36,7 +36,7 @@ TOOLS = [
      "makes the instructions searchable for the callers, creates the campaign, gives everyone their standing tasks, runs a small pilot, and then calls the rest. After that it watches itself: progress reports in this chat, "
      "alerts when something breaks, and a final report. Do not ask for permission to hire, to clean the list or to start: the admin's request is the permission. Pass confirmed=true when the admin asked you to call this list. "
      "Leave `instructions` and `leads` out to use what the admin shared or pasted in this chat.",
-     "parameters": {"type": "object", "properties": {"name": {**_S, "description": "a short name for the project (optional)"}, "instructions": {**_S, "description": "title or id of the instructions document (optional: the chat is used)"},
+     "parameters": {"type": "object", "properties": {"name": {**_S, "description": "a short name for the project (optional)"}, "instructions": {**_S, "description": "the title or id of the instructions document, or the instructions text itself. Usually leave it out: what the admin shared or pasted in this chat is used"},
                                                      "leads": {"type": "array", "items": _S, "description": "title(s) of the lead sheet(s); several are merged into one list (optional: the sheet shared in this chat)"},
                                                      "goal": {**_S, "description": "the goal in your own words, if the admin stated one"}, "confirmed": _B, "max_hires": {"type": "integer", "description": "most helpers to hire (default 2, at most 4)"},
                                                      "start_calling": {**_B, "description": "false = set everything up and do not dial yet"}, "report_every_hours": {"type": "number"},
@@ -140,21 +140,29 @@ def _chat_text(meeting_id):
 
 def _instructions(agent, a, meeting_id):
     """-> (text, source document or None, title). From the document named, else the one shared in the chat, else what the admin wrote in the chat."""
-    doc = None
+    doc, pasted = None, ""
     if a.get("instructions"):
-        ref = a["instructions"]
-        doc, err = files.resolve_document(agent, int(ref) if str(ref).isdigit() else None, None if str(ref).isdigit() else str(ref))
-        if err:
-            raise ValueError(err)
-    else:
+        ref = str(a["instructions"]).strip()
+        if len(ref) > 160 or "\n" in ref:
+            pasted = ref                      # the brief itself, not the name of a document: that is what a model naturally passes
+        else:
+            doc, err = files.resolve_document(agent, int(ref) if ref.isdigit() else None, None if ref.isdigit() else ref)
+            if err:
+                if len(ref.split()) >= 8:
+                    pasted, doc = ref, None   # a sentence, not a title
+                else:
+                    raise ValueError(err)
+    if not doc and not pasted:
         docs = [d for d in _chat_attachments(agent, meeting_id) if d["kind"] != "sheet"]
         doc = docs[0] if docs else None
     chat = _chat_text(meeting_id)
     parts = []
+    if pasted:
+        parts.append(pasted)
     if doc:
         parts.append(_doc_text(doc))
-    if chat and (not doc or len(chat) >= 40):
-        parts.append(("The admin's messages in the chat:\n" if doc else "") + chat)
+    if chat and ((not doc and not pasted) or (len(chat) >= 40 and chat.strip() not in pasted)):
+        parts.append(("The admin's messages in the chat:\n" if (doc or pasted) else "") + chat)
     text = "\n\n---\n".join(p for p in parts if p.strip()).strip()
     if len(text) < 80:
         raise ValueError("I need the instructions: paste them in this chat, share a document, or name it with `instructions`.")
@@ -724,7 +732,8 @@ async def start(agent, a):
         res = importer.import_rows(f"{name} — leads", f"{name} — leads", header, [dict(zip(header, [ops.s(x) for x in r])) for r in nrows], mapping, source_doc_id=work["id"])
         _set(mid, work_doc_id=work["id"], dataset_id=res["dataset_id"])
         step = "the knowledge for the callers"
-        kb = db.run("INSERT INTO knowledge_bases(name,context,created_at) VALUES(?,?,?)", (f"{name} — instructions", "The facts, rules and answers for this campaign are the admin's instructions in the sections below. Use lookup_info for anything you are asked.", now))
+        # A knowledge base's name is what the caller says it is calling from, so it is the company's name, never the project's.
+        kb = db.run("INSERT INTO knowledge_bases(name,context,created_at) VALUES(?,?,?)", (llm.company_name(), f"The facts, rules and answers for the calling project '{name}' are the admin's instructions in the sections below. Use lookup_info for anything you are asked.", now))
         try:
             await knowledge.ingest(kb, "Instructions", text, source=f"Mission {mid} instructions")
         except Exception:
@@ -942,5 +951,8 @@ async def run_tool(agent, name, a):
         if name == "mission":
             return await control(agent, a), "/projects"
     except ValueError as e:
+        if name == "start_mission":
+            return {"error": str(e), "nothing_started": True, "next": "The mission did NOT start and nothing was created. Do not tell the admin it is running. Fix the problem (usually: leave `instructions` out so the chat is used, "
+                                                                     "and name the lead sheet in `leads`) and call start_mission again; if you cannot, tell the admin plainly what is missing."}, None
         return {"error": str(e)}, None
     return {"error": f"unknown tool {name}"}, None

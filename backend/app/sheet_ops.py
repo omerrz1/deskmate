@@ -185,10 +185,14 @@ def norm_phone(v, code=""):
     elif n.startswith("0"):
         if not code:
             return "", "it starts with 0 and no country code is set (Settings → Company → time zone / calling code)"
+        if len(n) - 1 < 7:
+            return "", "too short to be a phone number"      # 01234 must not become +441234
         full = code + n[1:]
     elif code and n.startswith(code) and len(n) >= 11:
         full = n
     elif code:
+        if len(n) < 7:
+            return "", "too short to be a phone number"      # 12345 must not become +4412345, which looks real and would be dialed
         full = code + n
     else:
         full = n

@@ -4,7 +4,7 @@ import time
 import unittest
 from unittest import mock
 
-from app import agents, alerts, callengine, capabilities, db, files, knowledge, missions, office, runtime, voices
+from app import agents, alerts, callengine, capabilities, db, files, knowledge, llm, missions, office, runtime, voices
 from .test_call_task_and_report import CallReportBase
 
 INSTRUCTIONS = ("Call each lead on behalf of AA London College and tell them about our Level 5 Business Management diploma. The fee is 950 pounds, payable in monthly instalments. "
@@ -130,6 +130,9 @@ class HandOverTests(MissionBase):
             self.assertEqual(db.q1("SELECT COUNT(*) n FROM contacts WHERE dataset_id=?", (m["dataset_id"],))["n"], 63)
             # the knowledge for the callers, and the campaign
             self.assertTrue(db.q1("SELECT 1 x FROM kb_docs WHERE kb_id=?", (m["kb_id"],)))
+            kb_name = db.q1("SELECT name FROM knowledge_bases WHERE id=?", (m["kb_id"],))["name"]
+            self.assertNotIn("diploma", kb_name.lower())                      # the caller says the knowledge base's name as the company it rings from: never the project's
+            self.assertEqual(kb_name, llm.company_name())
             c = db.q1("SELECT * FROM campaigns WHERE id=?", (m["campaign_id"],))
             self.assertEqual((c["objective"], c["max_attempts"], c["retry_delay_min"], c["concurrency"], c["agent_id"], c["kb_id"]), (self.charter["objective"], 2, 120, 20, self.aid, m["kb_id"]))
             self.assertEqual(json.loads(c["call_window"]), {"start": "10:00", "end": "18:00", "days": [0, 1, 2, 3, 4]})
@@ -228,6 +231,26 @@ class HandOverTests(MissionBase):
             both = [r for r in t["rows"] if "+" in r[t["columns"].index("Source")]]
             self.assertEqual(len(both), 10)
             self.assertEqual(db.q1("SELECT leads_doc_id FROM missions")["leads_doc_id"], db.q1("SELECT id FROM documents WHERE title='Webinar sign-ups'")["id"])
+
+    async def test_the_brief_itself_may_be_passed_as_the_instructions_argument(self):
+        """Regression, found by the live evaluation: the model passed the pasted brief where a document title was expected, and the tool refused."""
+        with db.use(self.ws):
+            self.sheet("Leads", ["Name", "Phone", "Email"], lead_rows(30))
+            out = await self.start(leads=["Leads"], instructions=INSTRUCTIONS)               # the whole brief, not the name of a document
+            self.assertNotIn("error", out, out)
+            self.assertIn("950 pounds", db.q1("SELECT body FROM documents WHERE id=(SELECT brief_doc_id FROM missions)")["body"])
+            self.sheet("Leads 2", ["Name", "Phone", "Email"], lead_rows(30))
+            out = await self.start(leads=["Leads 2"], instructions="Call everyone about the diploma, the fee is 950 pounds, weekdays between 10 and 18 only please")   # a sentence
+            self.assertNotIn("error", out, out)
+
+    async def test_a_failed_start_says_plainly_that_nothing_started(self):
+        with db.use(self.ws):
+            self.sheet("Leads", ["Name", "Phone", "Email"], lead_rows(30))
+            out = await self.start(leads=["Leads"], instructions="Instructions doc")        # a short title of a document that is not there
+            self.assertIn("No accessible file named 'Instructions doc'", out["error"])
+            self.assertTrue(out["nothing_started"])
+            self.assertIn("did NOT start", out["next"])
+            self.assertEqual(db.q1("SELECT COUNT(*) n FROM missions")["n"], 0)
 
     async def test_a_second_hand_over_of_the_same_list_does_not_start_a_second_mission(self):
         with db.use(self.ws):
@@ -692,7 +715,7 @@ class RegistrationTests(MissionBase):
         self.assertTrue({"start_mission", "mission", "browser_click", "sheet_clean", "web_search"} <= offered)
         self.assertTrue({"start_mission", "mission"} <= set(next(g for g in capabilities.GROUPS if g[0] == "calls")[3]))
         for needle in ("OWNERSHIP: when the admin hands you a lead list and instructions", "call start_mission straight away with confirmed=true", "Do not ask permission to hire, clean, plan or start",
-                       "when an URGENT mission task reaches you", "never from memory"):
+                       "when an URGENT mission task reaches you", "never from memory", "A mission is running only if start_mission returned a mission_id", "NOTHING started"):
             self.assertIn(needle, prompt)
 
 

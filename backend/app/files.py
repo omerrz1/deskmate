@@ -203,6 +203,32 @@ def _sheet(d):
     return t
 
 
+def _did_you_mean(agent, wanted, kind):
+    """When a title is not found: the closest titles, then the other files of that kind the employee can open, so they can offer the admin a choice instead of a dead end."""
+    import difflib
+
+    from . import team
+    rows = [d for d in db.q("SELECT id,title,agent_id,folder_id FROM documents WHERE (? IS NULL OR kind=?) ORDER BY updated_at DESC LIMIT 400", (kind, kind)) if team.can_access_doc(agent, d)]
+    titles = list(dict.fromkeys(d["title"] for d in rows))
+    if not titles:
+        return ""
+    low = {t.casefold(): t for t in titles}
+    close = [low[c] for c in difflib.get_close_matches(wanted.casefold(), list(low), n=3, cutoff=0.6)]
+    want_words = re.findall(r"\w{4,}", wanted.casefold())
+
+    def likeness(title):  # how alike one word of the title and one word asked for are ("leeds" and "leads")
+        return max((difflib.SequenceMatcher(None, a, b).ratio() for a in re.findall(r"\w{4,}", title.casefold()) for b in want_words), default=0)
+    word = sorted((t for t in titles if t not in close and likeness(t) >= 0.75), key=lambda t: -likeness(t))[:3]
+    out = ""
+    if close or word:
+        out += " Did you mean: " + ", ".join(f"'{t}'" for t in (close + word)[:3]) + "?"
+    others = [t for t in titles if t not in close + word][:8]
+    kind_word = {"sheet": "spreadsheets", "doc": "documents"}.get(kind, "files")
+    if others:
+        out += f" The {kind_word} you can open include: " + ", ".join(f"'{t}'" for t in others) + "."
+    return out
+
+
 def resolve_document(agent, doc_id=None, title=None, kind=None):
     """Find an accessible document by its supplied id or title, returning a useful ambiguity error."""
     if doc_id:
@@ -228,7 +254,7 @@ def resolve_document(agent, doc_id=None, title=None, kind=None):
         return rows[0], ""
     if len(rows) > 1:
         return None, "More than one accessible file matches that title: " + ", ".join(f"{d['title']} (id {d['id']})" for d in rows[:8])
-    return None, f"No accessible file named '{title}' was found. Use list_documents to search."
+    return None, f"No accessible file named '{title}' was found." + _did_you_mean(agent, wanted, kind) + " Use list_documents to search."
 
 
 SMALL_SHEET = 10             # up to this many data rows a row number alone is accepted by edit_sheet

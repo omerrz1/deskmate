@@ -92,6 +92,19 @@ class ProfileAndCleanToolTests(SheetBase):
             self.sheet("Tidy", ["Name", "Phone"], [["Ann Lee", "+447447781753"]])
             self.assertIn("nothing_to_do", await self.tool("sheet_clean", title="Tidy"))
 
+    async def test_a_sheet_that_is_not_found_comes_with_the_closest_titles_and_the_sheets_that_exist(self):
+        with db.use(self.ws):
+            for title in ("Leads", "Webinar sign-ups", "Follow-up list"):
+                self.sheet(title, ["Name"], [["a"]])
+            err = (await self.tool("sheet_clean", title="Leeds enquiries"))["error"]
+            self.assertIn("No accessible file named 'Leeds enquiries' was found.", err)
+            self.assertIn("Did you mean: 'Leads'?", err)
+            self.assertIn("'Webinar sign-ups'", err)
+            self.assertIn("'Follow-up list'", err)
+            nothing = (await self.tool("sheet_profile", title="Zzzzzz"))["error"]
+            self.assertNotIn("Did you mean", nothing)                                  # no guess when nothing is close
+            self.assertIn("spreadsheets you can open include", nothing)
+
     async def test_mistakes_come_back_as_plain_errors_the_employee_can_act_on(self):
         with db.use(self.ws):
             self.sheet("Leads", *LEADS)
@@ -259,6 +272,23 @@ class RowJobTests(SheetBase):
                     self.assertEqual(seg, "VIP " + name, (name, seg))  # nobody got somebody else's answer
             self.assertNotIn("Person 4", [r[0] for r in rows])  # the one that disappeared meanwhile
             self.assertGreaterEqual(sum(1 for r in rows if len(r) > 2 and r[2]), 18)
+
+    async def test_many_rows_with_the_same_text_are_all_done_not_just_the_first_batch(self):
+        """Regression, found by the live evaluation: reading only the Notes column, 180 rows had a dozen distinct texts, and after the first batch the rest looked 'already tried'."""
+        with db.use(self.ws), mock.patch.object(sheet_tools.llm, "complete_json", new=mock.AsyncMock(side_effect=self.by_notes)):
+            notes = ["Very keen, wants to enrol", "Just browsing", "Comparing colleges"]
+            self.sheet("Follow-ups", ["Name", "Phone", "Notes"], [[f"P{i}", f"0770{i:07d}", notes[i % 3]] for i in range(200)])
+            out = await self.tool("sheet_job", action="start", title="Follow-ups", instruction="Rate the interest", outputs=["Interest"], inputs=["Notes"])
+            self.assertTrue(out["started"])
+            await self.finish_jobs()
+            rows = self.table("Follow-ups")[1]
+            self.assertEqual(sum(1 for r in rows if r[3]), 200)                                # every row, not 60
+            self.assertEqual([r[3] for r in rows[:3]], ["High", "Low", "Medium"])
+            self.assertEqual(db.q1("SELECT status, done, skipped FROM sheet_jobs")["done"], 200)
+
+    async def by_notes(self, system, user, model=None):
+        label = {"Very keen, wants to enrol": "High", "Just browsing": "Low", "Comparing colleges": "Medium"}
+        return {"rows": [{"id": r["id"], "Interest": label[r["fields"]["Notes"]]} for r in json.loads(user)["rows"]]}
 
     async def test_a_row_the_model_has_nothing_for_stays_blank_and_does_not_loop_forever(self):
         model = FakeModel()

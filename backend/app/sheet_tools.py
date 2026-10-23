@@ -405,13 +405,14 @@ async def _run(job_id):
                     continue
                 for n, i in enumerate(batch):
                     fp = _fp(rows[i], ins)
-                    attempted.add(fp)
                     got = res.get(str(n))
                     if not got or not any(got.values()):
+                        attempted.add(fp)   # nothing to go on for this text: not again in this run (a filled row leaves the work by itself, so it needs no mark)
                         skipped += 1
                         continue
                     target = next((j for j in where_fp.get(fp, []) if not any(ops.clean_text(rows2[j][o]) for o in outs2)), None)
                     if target is None:  # the row changed or went while we were working: leave it, the next pass looks again
+                        attempted.add(fp)
                         skipped += 1
                         continue
                     for o, name in zip(outs2, outputs):

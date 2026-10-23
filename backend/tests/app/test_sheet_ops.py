@@ -41,6 +41,9 @@ class ValuesTests(unittest.TestCase):
         for raw, want in (("07447 781753", "+447447781753"), ("+44 7447 781753", "+447447781753"), ("0044 7447 781753", "+447447781753"), ("447447781753", "+447447781753"),
                           ("7447781753", "+447447781753"), ("+44 (0)7447 781753", "+447447781753"), ("(0744) 778-1753 ext 12", "+447447781753")):
             self.assertEqual(so.norm_phone(raw, "44"), (want, ""), raw)
+        for junk in ("12345", "01234", "999", "0", "1234 56"):                                          # short rubbish must never become a plausible-looking number
+            self.assertEqual(so.norm_phone(junk, "44")[0], "", junk)
+            self.assertIn("too short", so.norm_phone(junk, "44")[1], junk)
         self.assertIn("letters", so.norm_phone("call me", "44")[1])
         self.assertIn("UK mobile", so.norm_phone("07447 78175", "44")[1])
         self.assertIn("no country code is set", so.norm_phone("07447 781753", "")[1])  # never guesses a country

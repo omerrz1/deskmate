@@ -154,6 +154,18 @@ Each company uses its **own** OpenAI and ElevenLabs keys, so it pays those provi
 ## Work email (Gmail)
 Open an agent → Settings → Work email and follow the on-screen guide to create a Google **app password** (2-Step Verification must be on). Use a separate mailbox per employee.
 
+## Live evaluations (the real model on messy work, scored against known answers)
+
+`backend/evals/` (see its README) runs the real model on realistic work and scores it against answers known in advance: `python -m evals.run` (about 5 minutes, about $2). The unit tests use a scripted fake model; this is the check that the real thing behaves. Last full run: **69 of 69 checks passed**.
+
+- **Sheet engine, 2,300 messy rows (no model, under half a second):** 1,680-row lead list with 120 hidden duplicates, a switchboard number shared by 15 people, 30 pairs of different people with the same name, junk numbers and blank rows, plus a 600-row sign-up sheet with different headers and 270 people already on the first list. Result: exactly the right 1,540 people after cleaning and exactly 1,870 after the merge, every one once; the 270 on both lists found exactly; the 15 conflicts between the lists counted exactly; no phone number changed into anyone else's.
+- **Ethan on sheet tasks (real model):** looks at a sheet properly before answering, states no number he did not get from a tool, uses the bulk tools, refuses to start a 1,540-row job without telling the admin the time and cost and asking, previews before a job, classifies free-text notes at 96% accuracy with each answer on its own person's row, finds exactly the 25 people with no usable number, and when asked about a sheet that does not exist says so and lists the sheets he can see.
+- **A whole mission (real model, production-like caller, simulated customers and line):** from a pasted brief to a closed project in about 4 minutes: correct charter (calling hours 10:00–18:00 weekdays, fee exactly 950, no invented prices, two tries, text for the interested), two helpers hired, the list tidied to exactly 36 callable people, a pilot judged by the system and ramped, about 40 calls, scheduled and final reports, results written back into the sheet. The caller marks everyone who says stop as do-not-call (9 of 9), texts the details to people who want them, names the college every time, and averages about 20 words a turn.
+
+The evaluation found, and these are fixed and covered by tests: the row-by-row job stopped after the first 60 rows when many rows had the same text (60 of 180 done); the phone cleaner turned the junk `12345` into the plausible-looking `+4412345`; `start_mission` refused the pasted brief when the model passed it as the instructions argument, and the employee then talked as if it were running; the mission's knowledge base was named after the project, so the caller sometimes introduced itself as "Level 5 Business Management diploma outreach"; and, with the live prompt, the caller invented facts (course length "about one year": 7 of 35 conversations), invented where it got a customer's number ("from a sign-up form": about half of the 13 times it was asked) and answered questions in 45 words. After strengthening the prompts and re-measuring on the same simulated customers: invented facts 0 of 36, invented sources 0 of 12, 20 words a turn.
+
+Not covered: ElevenLabs, Twilio, real audio and real people. A first real run on a small list is still the check that matters.
+
 ## Try it
 1. Settings → Calling → Customers: upload your Excel sheet.
 2. Campaigns: pick a knowledge base and objective, then start calling.

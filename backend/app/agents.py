@@ -468,6 +468,7 @@ def meeting_prompt(agent, others, kind, live=False):
             "call start_mission straight away with confirmed=true. It is your whole job, and it does the set-up for you: it reads the instructions, tidies the list, opens the project, hires the helpers it needs, "
             "creates the campaign, runs a small pilot and then the full list, and reports to this chat by itself on a schedule. Do not ask permission to hire, clean, plan or start: the request is the permission. "
             "Do not break the job into your own small steps and do not wait; call it once. Afterwards tell the admin in one or two sentences what is running. "
+            "A mission is running only if start_mission returned a mission_id. If it returned an error, NOTHING started: fix the call and call it again (leave `instructions` out to use the chat), and never describe the job as under way, in the future tense or otherwise. "
             "A mission that exists is yours to look after: when an URGENT mission task reaches you, use `mission` action='status', find the cause, fix what you can (adjust the script or the pace, fix the setting), "
             "resume it when it is safe, and tell the admin plainly what happened and what you did. Answer questions about it from the live status, never from memory. "
             "Only come to the admin for a decision that is truly theirs, with the exact fix, never to hand the work back.\n")

@@ -11,7 +11,7 @@ echo "==> Preparing the server"
 remote 'command -v rsync >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq rsync; }; sudo mkdir -p /opt/deskmate/backend && sudo chown -R "$(id -un)": /opt/deskmate/backend'
 echo "==> Copying the code"
 rsync -az --delete -e "ssh $SSH_OPTS" \
-  --exclude '.git/' --exclude '.venv/' --exclude '__pycache__/' --exclude '*.pyc' --exclude '.env' --exclude 'data/' --exclude 'tests/' --exclude '.DS_Store' \
+  --exclude '.git/' --exclude '.venv/' --exclude '__pycache__/' --exclude '*.pyc' --exclude '.env' --exclude 'data/' --exclude 'tests/' --exclude 'evals/' --exclude '.DS_Store' \
   "$ROOT/" "$HOST:/opt/deskmate/backend/"
 echo "==> Setting up and restarting"
 remote "sudo API_HOST='${API_HOST:-api.deskmate.londoncbs.uk}' APP_ORIGIN='${APP_ORIGIN:-https://deskmate.londoncbs.uk}' bash /opt/deskmate/backend/deploy/setup.sh"

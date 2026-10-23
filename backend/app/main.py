@@ -35,6 +35,7 @@ app.include_router(setup_api.router)
 from . import voice_library
 app.include_router(voice_library.router)
 from . import learning
+from . import sheet_tools
 app.include_router(learning.router)
 app.add_middleware(CORSMiddleware, allow_origins=sorted(security.ALLOWED_ORIGINS), allow_credentials=True,
                    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token"])
@@ -69,6 +70,7 @@ async def _start_scheduler():
     asyncio.create_task(bus.pump())
     asyncio.create_task(meeting_bot.loop())
     asyncio.create_task(eleven_agents.warm_agents_all())
+    asyncio.create_task(sheet_tools.resume_all())  # row-by-row jobs that were running when the server stopped carry on
 
     async def loop():
         last_purge = {}

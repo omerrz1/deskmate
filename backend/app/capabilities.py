@@ -10,7 +10,8 @@ GROUPS = [
      ["check_inbox", "read_email", "send_email", "reply_email", "search_email", "notify_admin"]),
     ("files", "Files and spreadsheets", "Keep documents and spreadsheets in folders on their own computer, and share them with teammates.",
      ["search_files", "organize_instructions", "create_document", "create_spreadsheet", "edit_sheet", "read_document", "update_document", "list_documents", "list_files", "create_folder", "move_file", "delete_file",
-      "share_file", "share_folder", "unshare", "list_shared_with_me", "export_document", "copy_file"]),
+      "share_file", "share_folder", "unshare", "list_shared_with_me", "export_document", "copy_file",
+      "sheet_profile", "sheet_clean", "sheet_merge", "sheet_query", "sheet_job"]),
     ("calendar", "Calendar", "Put events and reminders on the calendar.", ["create_event", "list_events", "cancel_event"]),
     ("web", "Web reading", "Read public web pages and learn from websites, including the linked company site and its subdomains.", ["read_webpage", "learn_from_website", "learn_company_website"]),
     ("browser", "Real web browser", "Open pages in a real browser, click, scroll, type and sign in with saved logins, like a person at a computer. The company switch (off, read only, full) is in Settings → Browser.",
@@ -28,7 +29,7 @@ GROUPS = [
     ("messaging", "Texts and WhatsApp", "Send text and WhatsApp messages to customers (needs a messaging app connected).", ["send_sms", "send_whatsapp"]),
     ("chats", "Customer chats and WhatsApp calls", "Answer customers who write on WhatsApp, Instagram, Messenger, text or Telegram, ask permission to call them on WhatsApp, and call them (needs the messaging apps connected).",
      ["list_chats", "read_chat", "reply_chat", "close_chat", "ask_call_permission", "call_on_whatsapp"]),
-    ("data", "Data and analysis", "Calculate, summarise and query spreadsheets, make charts, and turn a sheet into customers.", ["calculate", "sheet_summary", "sheet_query", "sheet_to_customers", "make_chart"]),
+    ("data", "Data and analysis", "Calculate, make charts, and turn a sheet into customers. (Looking over, cleaning, merging and querying spreadsheets is under Files and spreadsheets.)", ["calculate", "sheet_to_customers", "make_chart"]),
 ]
 MANAGER = ("platform", "Run the platform", "Manager powers: manage the team, set tasks, change settings, add connectors and approve emails, like the admin, and report back.",
            ["team_overview", "review_agent", "update_agent", "hire_agent", "remove_agent", "set_setting", "list_pending_emails", "approve_email", "reject_email",

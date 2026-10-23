@@ -26,11 +26,6 @@ def file_dir():
 TOOLS = [
     {"name": "calculate", "description": "Calculate an arithmetic expression exactly, e.g. '(1200*0.2)+45'. Use it instead of doing sums in your head. Supports + - * / ** % // and round(), min(), max(), abs().",
      "parameters": {"type": "object", "properties": {"expression": _S}, "required": ["expression"]}},
-    {"name": "sheet_summary", "description": "Summarise a spreadsheet: rows, each column's type, min/max/average/total for numbers, most common values for text, and empty cells.",
-     "parameters": {"type": "object", "properties": {"id": _I}, "required": ["id"]}},
-    {"name": "sheet_query", "description": "Filter, sort, group and total a spreadsheet. where: list of {column, op (=, !=, >, <, >=, <=, contains), value}. group_by a column with aggregate {column, func: count|sum|avg|min|max}.",
-     "parameters": {"type": "object", "properties": {"id": _I, "where": {"type": "array", "items": {"type": "object"}}, "sort_by": _S, "descending": {"type": "boolean"}, "group_by": _S,
-                                                    "aggregate": {"type": "object"}, "limit": _I}, "required": ["id"]}},
     {"name": "sheet_to_customers", "description": "Import the rows of a spreadsheet as customers (columns like name, phone, email, company are recognised). Returns how many were added.",
      "parameters": {"type": "object", "properties": {"id": _I}, "required": ["id"]}},
     {"name": "make_chart", "description": "Draw a chart (bar, line or pie) from two columns of a spreadsheet and file it as an image in your files.",
@@ -99,61 +94,6 @@ def _col_index(cols, name):
         if str(c).lower() == str(name).lower():
             return i
     raise KeyError(name)
-
-
-def summary(cols, rows):
-    out = []
-    for i, c in enumerate(cols):
-        vals = [r[i] if i < len(r) else "" for r in rows]
-        filled = [v for v in vals if str(v).strip()]
-        nums = [n for n in (_num(v) for v in filled) if n is not None]
-        info = {"column": c, "empty": len(vals) - len(filled)}
-        if filled and len(nums) >= 0.8 * len(filled):
-            info.update(type="number", min=min(nums), max=max(nums), average=round(sum(nums) / len(nums), 2), total=round(sum(nums), 2))
-        else:
-            counts = {}
-            for v in filled:
-                counts[v] = counts.get(v, 0) + 1
-            info.update(type="text", unique=len(counts), most_common=sorted(counts.items(), key=lambda kv: -kv[1])[:5])
-        out.append(info)
-    return {"rows": len(rows), "columns": out}
-
-
-def query(cols, rows, a):
-    sel = rows
-    for w in (a.get("where") or [])[:6]:
-        i = _col_index(cols, w["column"])
-        op, val = w.get("op", "="), w.get("value")
-        def ok(r):
-            cell = r[i] if i < len(r) else ""
-            if op == "contains":
-                return str(val).lower() in str(cell).lower()
-            cn, vn = _num(cell), _num(val)
-            a_, b_ = (cn, vn) if cn is not None and vn is not None else (str(cell).lower(), str(val).lower())
-            return {"=": a_ == b_, "!=": a_ != b_, ">": a_ > b_, "<": a_ < b_, ">=": a_ >= b_, "<=": a_ <= b_}.get(op, False)
-        sel = [r for r in sel if ok(r)]
-    if a.get("group_by"):
-        gi = _col_index(cols, a["group_by"])
-        agg = a.get("aggregate") or {"func": "count"}
-        func = agg.get("func", "count")
-        ai = _col_index(cols, agg["column"]) if agg.get("column") else None
-        groups = {}
-        for r in sel:
-            groups.setdefault(r[gi] if gi < len(r) else "", []).append(r)
-        res = []
-        for k, rs in groups.items():
-            if func == "count" or ai is None:
-                v = len(rs)
-            else:
-                nums = [n for n in (_num(r[ai] if ai < len(r) else "") for r in rs) if n is not None]
-                v = (sum(nums) if func == "sum" else sum(nums) / len(nums) if func == "avg" and nums else min(nums) if func == "min" and nums else max(nums) if func == "max" and nums else 0)
-            res.append({a["group_by"]: k, f"{func}{('_' + agg['column']) if agg.get('column') else ''}": round(v, 2) if isinstance(v, float) else v})
-        return {"groups": sorted(res, key=lambda x: -list(x.values())[1])[:50]}
-    if a.get("sort_by"):
-        si = _col_index(cols, a["sort_by"])
-        sel = sorted(sel, key=lambda r: (_num(r[si]) is None, _num(r[si]) if _num(r[si]) is not None else str(r[si]).lower()) if si < len(r) else (True, ""), reverse=bool(a.get("descending")))
-    lim = min(int(a.get("limit") or 25), 50)
-    return {"columns": cols, "rows": sel[:lim], "matching_rows": len(sel)}
 
 
 # ---------- charts (plain SVG, no libraries) ----------
@@ -298,10 +238,6 @@ async def run_tool(agent, name, a):
         return {"error": "That is a document, not a spreadsheet."}, None
     cols, rows = _table(d)
     try:
-        if name == "sheet_summary":
-            return summary(cols, rows), None
-        if name == "sheet_query":
-            return query(cols, rows, a), None
         if name == "sheet_to_customers":
             header = [str(c) for c in cols]
             body = [dict(zip(header, [str(x) for x in r])) for r in rows]

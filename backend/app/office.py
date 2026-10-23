@@ -12,7 +12,7 @@ import time
 from email.message import EmailMessage
 from email.utils import formataddr, parseaddr
 
-from . import db, files, schedule, voices
+from . import db, files, schedule, sheet_tools, voices
 
 for stmt in (
     "CREATE TABLE IF NOT EXISTS emails(id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER, folder TEXT, from_addr TEXT, to_addr TEXT, cc TEXT DEFAULT '', "
@@ -374,6 +374,7 @@ TOOLS += [
      "parameters": {"type": "object", "properties": {"who": {**_S, "description": "colleague's name, or 'admin'"}, "question": _S, "context": _S, "urgent": {"type": "boolean"}}, "required": ["who", "question"]}},
 ]
 TOOLS = [t for t in TOOLS if t["name"] not in files.TOOL_NAMES] + files.TOOLS  # file tools live in files.py
+TOOLS += sheet_tools.TOOLS  # so do the spreadsheet tools (profile, clean, merge, query, a task for every row)
 TOOL_NAMES = {t["name"] for t in TOOLS}
 
 
@@ -427,6 +428,8 @@ async def run_tool(agent, name, a):
     me = agent
     if name in files.TOOL_NAMES:
         return await files.run_tool(agent, name, a)
+    if name in sheet_tools.TOOL_NAMES:
+        return await sheet_tools.run_tool(agent, name, a)
     if name == "check_inbox":
         w = "agent_id=? AND folder='inbox'" + (" AND status='unread'" if a.get("unread_only") else "")
         rows = db.q(f"SELECT id,from_addr,subject,status,created_at FROM emails WHERE {w} ORDER BY id DESC LIMIT ?", (aid, min(a.get("limit") or 15, 30)))

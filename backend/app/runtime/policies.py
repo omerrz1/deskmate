@@ -9,6 +9,7 @@ LIVE_KINDS = ("one_to_one", "group")  # conversations where the admin is talking
 
 # Jobs that take real work. In a meeting they go on a to-do list instead (done right after the meeting), unless the admin says to do it now.
 HEAVY = {"organize_instructions", "create_document", "create_spreadsheet", "export_document", "make_chart", "edit_sheet", "update_document", "sheet_to_customers", "learn_from_website", "create_knowledge_base",
+         "sheet_clean", "sheet_merge", "sheet_job",
          "add_knowledge", "update_knowledge_base", "create_campaign", "start_campaign", "call_contact", "schedule_call"}
 NOW_WORDS = re.compile(r"\b(now|right now|right away|straight away|straightaway|immediately|asap|at once|this minute|this second|go ahead and do)\b", re.I)
 
@@ -26,7 +27,7 @@ def meeting_gate(mid, name, args=None):
     if later:
         if name == "add_todo" and not (args or {}).get("do_now") and not re.search(r"\b(don't|do not|cancel)\b", text, re.I):
             return None
-    elif not negative and (NOW_WORDS.search(text) or re.search(r"\b(call|phone|hire|create|start|run|process|import|update|send|assign|delegate|make|build|prepare)\b", text, re.I)):
+    elif not negative and (NOW_WORDS.search(text) or re.search(r"\b(call|phone|hire|create|start|run|process|import|update|send|assign|delegate|make|build|prepare|clean|merge|combine|dedupe|tidy|fix|fill|sort|classify)\b", text, re.I)):
         return None
     return {"error": "You are in a meeting. Before changing anything or adding a task, ask: Would you like me to do that now or after the meeting? Wait for the admin's timing choice. If they chose later, only use add_todo with do_now=false. Do not perform the work yet."}
 

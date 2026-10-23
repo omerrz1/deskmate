@@ -11,7 +11,7 @@ db.run("CREATE TABLE IF NOT EXISTS training_runs(id INTEGER PRIMARY KEY AUTOINCR
 
 FIELDS = ("name", "goal", "when_to_use", "inputs", "steps", "good_result", "avoid", "ask_help")
 READONLY_PREFIX = ("get_", "list_", "read_", "check_", "search_", "team_", "review_")
-READONLY = {"weekly_report", "project_status", "lookup_course", "remember"}
+READONLY = {"weekly_report", "project_status", "lookup_course", "remember", "sheet_profile", "sheet_query"}
 
 
 def is_readonly(tool):

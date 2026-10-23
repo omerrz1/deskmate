@@ -285,6 +285,30 @@ def _without_sheet_chores(text):
     return " ".join(kept).strip()
 
 
+def plan_steps(after_call):
+    """The 'afterwards' work as separate steps, in the order the admin gave them: 'Send a message and say I said hi. Then search the price.' -> two steps."""
+    parts = re.split(r"(?<=[.;!?])\s+|\s*,?\s+(?:and\s+)?then\s+|\s+afterwards?,?\s+", (after_call or "").strip())
+    steps = []
+    for x in parts:
+        x = re.sub(r"\s+", " ", x).strip(" .;,")
+        x = re.sub(r"^(?:and\s+)?(?:then|afterwards?|finally|also|next)\b[,\s]*", "", x, flags=re.I)  # a step that begins its own sentence: "Then search it."
+        if len(re.findall(r"[^\W\d_]{2,}", x)) >= 2:
+            steps.append(x[:1].upper() + x[1:])
+    return steps[:6]
+
+
+def call_plan(objective, after_call):
+    """A short numbered plan, posted when a call is placed that has work to do after it, so the admin sees every step and can check them off at the end."""
+    steps = plan_steps(after_call)
+    if not steps:
+        return ""
+    task = re.sub(r"\s+", " ", objective or "").strip(" .")
+    lines = [f"1. Call and {task[:1].lower() + task[1:]}, then hang up" if task else "1. Make the call, then hang up"]
+    lines += [f"{n}. {step}" for n, step in enumerate(steps, 2)]
+    lines.append(f"{len(lines) + 1}. Report back here: what happened, step by step")
+    return "My plan:\n" + "\n".join(lines)
+
+
 async def refine_call_args(args, text):
     """The admin's sentence holds three things: what to say on the phone, how to sound, and what to do afterwards. Only the first two belong
     on the call; a cheap model separates them. Without a model the rule-based objective stands."""
@@ -333,15 +357,28 @@ def _chat_history(mid, ag):
     return hist
 
 
-async def follow_up_after_call(mid, agent_id, after_call):
-    """A call this employee placed has finished and its answer is in the chat. The admin also asked for something to happen once the answer was
-    known (look something up, send it on...): do it now, in the same chat."""
+async def follow_up_after_call(mid, agent_id, after_call, outcome="", request=""):
+    """A call this employee placed has finished and its result is in the chat. The admin also asked for things to happen after it (look something up, send a
+    message...): do them now, in the same chat, whatever the call turned out to be, and finish with a step-by-step report.
+    outcome: what really happened on the call. request: the admin's own words that started it."""
     m, ag = meeting_detail(mid), get(agent_id)
     if not m or not ag:
         return
+    steps = plan_steps(after_call)
+    todo = "\n".join(f"{n}. {x}" for n, x in enumerate(steps, 1)) if steps else after_call
     hist = _chat_history(mid, ag) + [{"role": "user", "content": (
-        "[Automatic note, not typed by the admin: the call you placed has finished and its result is in the chat above. When the admin asked you to call, they also said what to do afterwards: "
-        f"\"{after_call}\". Do that now with your tools, using the answer from the call, and post the result in one short message. Do not place another call. "
+        "[Automatic note, not typed by the admin: the call you placed has finished and its result is in the chat above.\n"
+        + (f"WHAT THE ADMIN ASKED: \"{request}\"\n" if request else "")
+        + (f"WHAT REALLY HAPPENED ON THE CALL: {outcome}\n" if outcome else "")
+        + f"WHAT IS LEFT TO DO AFTER THE CALL:\n{todo}\n"
+        "Do every step that is left, in order, now, with your tools. Use what really happened and the answer from the call. Do not place another call. "
+        "THINK ABOUT EACH STEP: do it if it still makes sense. A step that does not depend on the answer (sending a message, for example) is still done when the call connected, even if the person said little or nothing. "
+        "A step that needs an answer you do not have is skipped, and you say so. Never send or write anything that states something that did not happen (if nobody picked up, do not message that you said hi). "
+        "If the call did not connect, do not send what the admin only wanted sent after a successful call: tell them what happened and offer the next move (try again, or send a message that says what really happened).\n"
+        "IF SOMETHING GETS IN THE WAY: read the exact error and look for another route to the same result before you give up. A text that cannot be sent can go by WhatsApp or email if you have the way to reach them; "
+        "a missing detail you can find yourself (their saved contact, the company's own details, a search), find. Stop and ask only when it takes a decision or access that only the admin has, and then say exactly what you need.\n"
+        "FINISH WITH A FINAL REPORT in one message: one line per step, starting with the call itself, each marked ✓ done, ✗ could not or skipped, and why, with the real result of each (what was sent and to whom, the answer found). "
+        "Say plainly what you could not do and the next move. Only report what your tools confirmed. "
         "The call's status, summary and answer are written into the lead sheet automatically, onto the right person's row: do not edit that sheet's cells for this call yourself.]")}]
     final, used = "", []
     try:
@@ -409,6 +446,10 @@ def meeting_prompt(agent, others, kind, live=False):
             "If a file was just created, continue referring to it by its title; file tools resolve exact titles, so never ask the admin to repeat an id. "
             "For a single immediate call, use call_contact; for a requested lead list, use the campaign tools. If asked to update a named sheet after calling, pass its title as call_contact.report_sheet so the result is written when the call ends. If the call was already placed, look the sheet up by title, inspect the lead row, retrieve the call report and update the row now. If a tool returns an error, state its exact result and next actionable fix. "
             "Ask a person only when a tool explicitly requires a missing human decision, permission, or account setup; do not use request_meeting as a substitute for doing available work.\n")
+    org += ("MULTI-STEP REQUESTS: when the admin gives you several things to do in one message (call, then message, then report, for example), turn it into a short numbered list in your head, do EVERY step in order, and never stop after the first. "
+            "Do not wait to be asked again for the next step. If a step is blocked, look for another route to the same result before you give up (another channel, another page, another tool, a detail you can find yourself) and say what you tried. "
+            "If a step depends on something that happens later (a call that is still going), say what you will do when it finishes and do it then. "
+            "Finish with a final report: one line per step, ✓ done or ✗ not done and why, with the real result of each, and the next move for anything left.\n")
     org += ("COMMUNICATION TOOLS: Before saying you cannot send a message or make a WhatsApp call, inspect and use your available tools. "
             "send_sms and send_whatsapp send through connected providers; reply_chat replies in the current customer conversation. To text someone you know or just called, pass their saved name as contact instead of typing their number (retyped numbers lose digits). If a text fails, give the admin the exact reason and the fix; you are already talking to the admin, so never offer to notify the admin. "
             "ask_call_permission requests the customer's WhatsApp consent when the workspace calling route uses WhatsApp; call_on_whatsapp follows the configured Twilio WhatsApp/phone route and fallback. "
@@ -580,8 +621,9 @@ async def meeting_message(mid, text):
             if result.get("error"):
                 final = f"I couldn’t place the call: {result['error']}"
             else:
-                final = (f"Calling {forced_call.get('name') or result.get('phone') or forced_call['phone']} now. Task: {forced_call['objective']} "
-                         + (f"After the call I’ll {forced_call['after_call'][:1].lower() + forced_call['after_call'][1:]} " if forced_call.get("after_call") else "")
+                plan = call_plan(forced_call["objective"], forced_call.get("after_call"))
+                final = (f"Calling {forced_call.get('name') or result.get('phone') or forced_call['phone']} now. Task: {forced_call['objective']}\n"
+                         + (plan + "\n" if plan else "")
                          + "Twilio has accepted the request but hasn’t confirmed the phone is ringing yet. I’ll post what they say here as soon as the call ends.")
             db.run("INSERT INTO meeting_msgs(meeting_id,role,agent_id,text,tools,created_at) VALUES(?,?,?,?,?,?)",
                    (mid, "agent", ag["id"], final, json.dumps(used), db.now()))

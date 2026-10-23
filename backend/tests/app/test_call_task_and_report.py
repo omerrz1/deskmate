@@ -402,17 +402,81 @@ class CallBriefTests(CallReportBase):
                 callengine.announce_call(call)
                 for task in list(callengine._FOLLOW_UPS):
                     await task
-            follow.assert_awaited_once_with(mid, aid, "Post the meal here and search for its ingredients.")
+            follow.assert_awaited_once()
+            args = follow.await_args.args
+            self.assertEqual(args[:3], (mid, aid, "Post the meal here and search for its ingredients."))
+            self.assertIn("spoke", args[3])
             self.assertIn("Next, as you asked: Post the meal here", self.chat_text(mid)[0])
 
-    async def test_a_call_that_got_no_answer_does_not_trigger_the_afterwards_work(self):
+    async def test_a_call_that_got_no_answer_still_hands_the_afterwards_work_over_with_the_facts(self):
+        """The employee decides what still makes sense; it is told nobody picked up so it cannot claim the call happened."""
         with db.use(self.ws):
             aid, mid = self.make_chat()
             call = self.make_call(mid, aid, status="no_answer", after_call="Search the ingredients.")
             with mock.patch.object(agents, "follow_up_after_call", new_callable=mock.AsyncMock) as follow:
                 callengine.announce_call(call)
-                self.assertEqual(callengine._FOLLOW_UPS, set())
-            follow.assert_not_awaited()
+                for task in list(callengine._FOLLOW_UPS):
+                    await task
+            follow.assert_awaited_once()
+            self.assertIn("Nobody picked up", follow.await_args.args[3])
+
+    async def test_a_call_that_connected_but_captured_no_reply_still_gets_its_afterwards_work(self):
+        """Regression: 'call Omer, say hi, hang up, then send a message' only called; the message was dropped because no reply had been captured."""
+        transcript = [{"role": "agent", "text": "Hi, is this Omer?", "t": 0.8}]
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            agents.log_line(mid, "admin", None, "now call omer say hi, hang up and then send a message say i said hi")
+            call = self.make_call(mid, aid, status="completed", transcript=json.dumps(transcript), duration=18,
+                                  after_call="Send a message and say I said hi.", objective="Say hi.")
+            with mock.patch.object(agents, "follow_up_after_call", new_callable=mock.AsyncMock) as follow:
+                callengine.announce_call(call)
+                for task in list(callengine._FOLLOW_UPS):
+                    await task
+            follow.assert_awaited_once()
+            _, _, after, outcome, request = follow.await_args.args
+            self.assertEqual(after, "Send a message and say I said hi.")
+            self.assertIn("The call connected (0:18)", outcome)
+            self.assertIn("Hi, is this Omer?", outcome)  # what the phone agent really said
+            self.assertIn("No reply from", outcome)
+            self.assertIn("say i said hi", request)  # the admin's own words come along, so no step is lost
+            posted = self.chat_text(mid)[0]
+            self.assertIn('What I said: "Hi, is this Omer?"', posted)
+            self.assertIn("Next, as you asked: Send a message and say I said hi.", posted)
+
+    async def test_the_follow_up_note_makes_the_employee_think_about_each_step_find_another_route_and_end_with_a_checklist(self):
+        seen = {}
+
+        async def fake_loop(ag, hist, kind, others=None, **kw):
+            seen["note"] = hist[-1]["content"]
+            yield {"type": "done", "text": "Done.", "tools": []}
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            with mock.patch.object(agents, "run_loop", fake_loop):
+                await agents.follow_up_after_call(mid, aid, "Send a message and say I said hi. Then search the ingredients.",
+                                                  "The call connected (0:18). No reply from Omer was captured.", "call omer, say hi, then message him")
+        note = seen["note"]
+        for needle in ('WHAT THE ADMIN ASKED: "call omer, say hi, then message him"', "WHAT REALLY HAPPENED ON THE CALL: The call connected (0:18)",
+                       "1. Send a message and say I said hi\n2. Search the ingredients", "THINK ABOUT EACH STEP", "still done when the call connected",
+                       "Never send or write anything that states something that did not happen", "IF SOMETHING GETS IN THE WAY", "another route to the same result",
+                       "FINISH WITH A FINAL REPORT", "✓ done, ✗ could not or skipped", "Only report what your tools confirmed"):
+            self.assertIn(needle, note)
+
+    async def test_the_admin_sees_the_plan_when_a_call_has_work_after_it(self):
+        self.assertEqual(agents.plan_steps("Send a message and say I said hi."), ["Send a message and say I said hi"])
+        self.assertEqual(agents.plan_steps("Post the meal here, then search for its ingredients. Email the result to Sam."),
+                         ["Post the meal here", "Search for its ingredients", "Email the result to Sam"])
+        self.assertEqual(agents.plan_steps(""), [])
+        plan = agents.call_plan("Say hi.", "Send a message and say I said hi.")
+        self.assertEqual(plan, "My plan:\n1. Call and say hi, then hang up\n2. Send a message and say I said hi\n3. Report back here: what happened, step by step")
+        self.assertEqual(agents.call_plan("Say hi.", ""), "")  # a plain call needs no list
+
+    async def test_a_multi_step_request_is_a_standing_rule_for_every_employee(self):
+        with db.use(self.ws):
+            aid, _ = self.make_chat()
+            prompt = agents.meeting_prompt(agents.get(aid), [], "chat")
+        for needle in ("MULTI-STEP REQUESTS", "do EVERY step in order, and never stop after the first", "look for another route to the same result",
+                       "Finish with a final report: one line per step"):
+            self.assertIn(needle, prompt)
 
 
 class SmsErrorTests(CallReportBase):

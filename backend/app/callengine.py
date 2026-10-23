@@ -316,13 +316,36 @@ def call_message(call, contact):
             if convo:
                 lines.append("What was said:\n" + "\n".join(convo))
         else:
+            said = " ".join(str(t.get("text") or "").strip() for t in transcript if t.get("role") == "agent")[:240]
+            if said:
+                lines.append(f"What I said: \"{said}\"")
             lines.append(call.get("summary") or "")
+            if (call.get("after_call") or "").strip():
+                lines.append(f"Next, as you asked: {call['after_call'].strip()}")
     note = _voice_note(call)
     if note:
         lines.append(note)
     if status == "completed":
         lines.append("The full transcript and report are on the Calls page.")
     return "\n\n".join(x for x in lines if x)
+
+
+def call_outcome(call, contact):
+    """What really happened on a finished call, as plain facts, for the employee who has work to do after it. Never guesses what was not captured."""
+    status, who = call.get("status"), _who(contact)
+    if status == "no_answer":
+        return f"Nobody picked up. The call to {who} never connected."
+    if status == "declined":
+        return f"{who} declined the call. It never connected."
+    if status == "failed":
+        return f"The call to {who} did not connect: {(call.get('summary') or 'Twilio could not connect it.')[:200]}"
+    transcript = db.jload(call.get("transcript"), [])
+    dur = _clock(call.get("duration"))
+    if any(t.get("role") == "customer" for t in transcript):
+        return f"The call connected ({dur}) and {who} spoke. What was said is in the chat above."
+    said = " ".join(str(t.get("text") or "").strip() for t in transcript if t.get("role") == "agent")[:240]
+    return (f"The call connected ({dur})." + (f" The phone agent said: \"{said}\"." if said else "")
+            + f" No reply from {who} was captured (they may have said nothing, or hung up), so there is no answer to work with.")
 
 
 def announce_call(call_id):
@@ -347,15 +370,18 @@ def announce_call(call_id):
     from . import agents
     agents.log_line(meeting["id"], "agent", agent_id, text)
     after = (call.get("after_call") or "").strip()
-    if after and agent_id and call.get("status") == "completed" and any(t.get("role") == "customer" for t in db.jload(call.get("transcript"), [])):
-        _spawn_follow_up(meeting["id"], agent_id, after)  # "...and then search the ingredients": done in the chat once the answer is known
+    if after and agent_id:
+        # "...and then send a message", "...and then search the ingredients": done in the chat whatever the call turned out to be. The employee is told
+        # what really happened, so it can do the steps that still make sense, skip the ones that need an answer it does not have, and say which.
+        asked = db.q1("SELECT text FROM meeting_msgs WHERE meeting_id=? AND role='admin' AND created_at<=? ORDER BY id DESC LIMIT 1", (meeting["id"], call.get("created_at") or db.now()))
+        _spawn_follow_up(meeting["id"], agent_id, after, call_outcome(call, contact), ((asked or {}).get("text") or "")[:600])
     return True
 
 
 _FOLLOW_UPS = set()
 
 
-def _spawn_follow_up(meeting_id, agent_id, after_call):
+def _spawn_follow_up(meeting_id, agent_id, after_call, outcome="", request=""):
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -366,7 +392,7 @@ def _spawn_follow_up(meeting_id, agent_id, after_call):
         token = db._tenant.set(tenant)  # background work stays inside this company
         try:
             from . import agents
-            await agents.follow_up_after_call(meeting_id, agent_id, after_call)
+            await agents.follow_up_after_call(meeting_id, agent_id, after_call, outcome, request)
         except Exception as e:
             db.log("error", f"Follow-up after a call failed: {type(e).__name__}: {str(e)[:100]}")
         finally:

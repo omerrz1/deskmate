@@ -29,6 +29,27 @@ BROWSER_HEADERS = {
 }
 
 
+# Some sites' bot protection drops a request that CLAIMS to be Chrome but is not Chrome (the connection just closes), yet serves the same page to a plain,
+# honest client. So a page is asked for as a browser first and, if that fails, again as a plain client.
+PLAIN_HEADERS = {"User-Agent": "Deskmates/1.0", "Accept": "text/html,application/xhtml+xml,*/*;q=0.8", "Accept-Language": "en-GB,en;q=0.9"}
+IDENTITIES = (BROWSER_HEADERS, PLAIN_HEADERS)
+RETRY_STATUS = (403, 406, 429, 503)
+
+# What a bot-check page says instead of the real page. Reading one as if it were the site fills the knowledge base with "Checking the site connection".
+_CHALLENGE = re.compile(r"robot challenge|checking (?:the|your) (?:site|browser|connection)|just a moment|verify(?:ing)? (?:you are|that you are) (?:a )?human|attention required|"
+                        r"enable cookies|captcha|access denied|are you a robot|ddos protection|security check", re.I)
+# A price on a page: a currency sign and an amount, or an amount with a currency word.
+MONEY = re.compile(r"[£$€]\s?\d|\b\d[\d,]*(?:\.\d\d)?\s?(?:GBP|USD|EUR|pounds|dollars|euros)\b", re.I)
+# A question about what something costs.
+PRICE_Q = re.compile(r"\b(?:fees?|costs?|prices?|pricing|tuition|how much|charges?|payment|instal+ments?|afford\w*)\b", re.I)
+
+
+def looks_blocked(text, title=""):
+    """Is this a bot-check or error page, not the site's own content?"""
+    t = (text or "")
+    return bool(_CHALLENGE.search(f"{title}\n{t[:600]}")) and len(t) < 2500
+
+
 class Blocked(Exception):
     pass
 
@@ -173,29 +194,50 @@ async def _get(client, url, base_domain=None):
         if base_domain and not _in_scope(url, base_domain):
             raise Blocked("That link is outside the company's website and its subdomains.")
         await asyncio.get_event_loop().run_in_executor(None, _check_host, u.hostname)
-        async with client.stream("GET", url, headers=BROWSER_HEADERS) as r:
-            if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
-                url = urljoin(url, r.headers["location"])
-                continue
-            if r.status_code >= 400:
-                raise Blocked(f"The website answered with an error ({r.status_code}).")
-            content_type = r.headers.get("content-type", "html").lower()
-            is_pdf = "pdf" in content_type or urlparse(url).path.lower().endswith(".pdf")
-            if not is_pdf and not any(t in content_type for t in ("html", "text", "xml")):
-                raise Blocked("That link isn't a web page.")
-            buf = b""
-            async for chunk in r.aiter_bytes():
-                buf += chunk
-                if len(buf) > MAX_BYTES:
+        result, failure = None, None
+        for headers in IDENTITIES:  # as a browser first; if the site refuses that, as a plain client
+            try:
+                async with client.stream("GET", url, headers=headers) as r:
+                    if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
+                        result = ("redirect", urljoin(url, r.headers["location"]))
+                        break
+                    if r.status_code >= 400:
+                        failure = Blocked(f"The website answered with an error ({r.status_code}).")
+                        if r.status_code in RETRY_STATUS:
+                            continue
+                        raise failure
+                    content_type = r.headers.get("content-type", "html").lower()
+                    is_pdf = "pdf" in content_type or urlparse(url).path.lower().endswith(".pdf")
+                    if not is_pdf and not any(t in content_type for t in ("html", "text", "xml")):
+                        raise Blocked("That link isn't a web page.")
+                    buf = b""
+                    async for chunk in r.aiter_bytes():
+                        buf += chunk
+                        if len(buf) > MAX_BYTES:
+                            break
+                    if is_pdf:
+                        try:
+                            from .knowledge import extract_text
+                            text = extract_text("site.pdf", buf)
+                        except Exception:
+                            text = ""
+                        result = ("page", (str(r.url), text))
+                        break
+                    body = buf.decode(r.encoding or "utf-8", errors="replace")
+                    if headers is not IDENTITIES[-1] and looks_blocked(_Page_text(body)):
+                        failure = Blocked("The website showed a bot check.")
+                        continue
+                    result = ("page", (str(r.url), body))
                     break
-            if is_pdf:
-                try:
-                    from .knowledge import extract_text
-                    text = extract_text("site.pdf", buf)
-                except Exception:
-                    return str(r.url), ""
-                return str(r.url), text
-            return str(r.url), buf.decode(r.encoding or "utf-8", errors="replace")
+            except (httpx.TransportError, httpx.DecodingError) as e:  # connection dropped or reset: the usual sign of bot protection
+                failure = e
+                continue
+        if result is None:
+            raise failure or Blocked("The website did not answer.")
+        if result[0] == "redirect":
+            url = result[1]
+            continue
+        return result[1]
     raise Blocked("Too many redirects.")
 
 
@@ -210,6 +252,8 @@ async def _reader(client, url):
     if r.status_code != 200 or len(r.text) < 200:
         raise Blocked("The website blocked automated readers.")
     t = r.text
+    if looks_blocked(t.split("Markdown Content:", 1)[-1], (re.search(r"^Title:\s*(.+)$", t, re.M) or [None, ""])[1]):
+        raise Blocked("The website blocked automated readers.")
     links = [m for m in re.findall(r"\]\((https?://[^)\s]+)\)", t)]
     title = (re.search(r"^Title:\s*(.+)$", t, re.M) or [None, ""])[1]
     body = t.split("Markdown Content:", 1)[-1]
@@ -260,7 +304,39 @@ async def _sitemap_urls(client, start_url, base_domain):
     return list(dict.fromkeys(pages))
 
 
+# Pages that should carry a price (or the details of what is sold), most likely first.
+_PRICEY = re.compile(r"fee|pric|tuition|cost|payment|apply|admission|enrol|course|diploma|certificate|programme|program|package|plan|pass|ticket|book", re.I)
+_PRICEY_FIRST = re.compile(r"fee|pric|tuition|cost|payment", re.I)
+
+
+async def _render_pass(pages, seconds=150, cap=40):
+    """Pages that should carry a price but show none in their plain text are opened in a real browser, because many sites draw prices after the page loads
+    (course plugins, booking widgets). Only a page that then shows a price, or clearly more text, is replaced."""
+    todo = [p for p in pages[1:] if _PRICEY.search(urlparse(p["url"]).path + " " + (p.get("title") or "")) and not MONEY.search(p["text"])]
+    todo.sort(key=lambda p: 0 if _PRICEY_FIRST.search(urlparse(p["url"]).path + " " + (p.get("title") or "")) else 1)
+    deadline = time.monotonic() + seconds
+    sem = asyncio.Semaphore(2)
+
+    async def one(p):
+        if time.monotonic() > deadline:
+            return
+        async with sem:
+            seen = await render_page(p["url"])
+        if seen and (MONEY.search(seen["text"]) or len(seen["text"]) > 1.3 * len(p["text"])) and len(seen["text"]) >= 120:
+            p["text"], p["rendered"] = seen["text"], True
+    await asyncio.gather(*(one(p) for p in todo[:cap]))
+    return pages
+
+
 async def crawl(url, max_pages=MAX_PAGES):
+    pages = await _crawl_static(url, max_pages)
+    try:
+        return await _render_pass(pages)
+    except Exception:
+        return pages
+
+
+async def _crawl_static(url, max_pages=MAX_PAGES):
     if not re.match(r"^https?://", url, re.I):
         url = "https://" + url
     pages, seen = [], set()
@@ -319,6 +395,7 @@ async def crawl(url, max_pages=MAX_PAGES):
         frontier = set(sitemap_urls)
         frontier.update(urldefrag(urljoin(final, href))[0] for href in _Page_links(html))
         seen.add(urldefrag(final)[0])
+        landed = {urldefrag(final)[0]}  # where pages actually ended up: two addresses that redirect to one page are one page
         total_bytes = len(html.encode("utf-8", errors="ignore"))
         semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
         while frontier and len(pages) < max_pages and total_bytes < MAX_TOTAL_BYTES and time.monotonic() < deadline:
@@ -335,7 +412,7 @@ async def crawl(url, max_pages=MAX_PAGES):
                         final_url, content = await _get(client, page_url, base_domain)
                         if len(_Page_text(content)) < 100:
                             try:
-                                rendered = await _reader(client, final_url)
+                                rendered = await render_page(final_url) or await _reader(client, final_url)
                                 from html import escape
                                 content = "<title>" + escape(rendered["title"]) + "</title><pre>" + escape(rendered["text"]) + "</pre>"
                                 content += "".join('<a href="' + escape(link, quote=True) + '">link</a>' for link in rendered["links"])
@@ -349,6 +426,9 @@ async def crawl(url, max_pages=MAX_PAGES):
                 if not item:
                     continue
                 page_url, page_html = item
+                if urldefrag(page_url)[0] in landed:
+                    continue
+                landed.add(urldefrag(page_url)[0])
                 size = len(page_html.encode("utf-8", errors="ignore"))
                 if total_bytes + size > MAX_TOTAL_BYTES:
                     continue
@@ -465,21 +545,45 @@ async def build(url, person_name="Alex", pasted=""):
             "pages": pages, "sections": total}
 
 
-async def read_one(url):
-    """Read a single public page (same safety checks as the crawler). -> dict(url, title, text)"""
+async def render_page(url):
+    """The page drawn by a real browser (see browser_tools.render), or None."""
+    from . import browser_tools
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, _check_host, urlparse(url).hostname)
+        return await asyncio.wait_for(browser_tools.render(url), 45)
+    except Exception:
+        return None
+
+
+async def read_one(url, render=False, want_money=False):
+    """Read a single public page (same safety checks as the crawler). -> dict(url, title, text, links)
+
+    The ladder: the page as a browser asks for it, then as a plain client (see _get); if it is empty, a bot check, or a JavaScript shell, the page opened in a
+    real browser; and last the public reader service. render=True goes straight to the real browser. want_money=True is for a question about prices:
+    a page that shows none in its plain text is opened in a real browser too, because many sites draw their prices after the page loads."""
     if not re.match(r"^https?://", url, re.I):
         url = "https://" + url
+    final, plain = url, None
+    if not render:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+            try:
+                final, html = await _get(client, url)
+                p = _Page()
+                p.feed(html)
+                text = p.text()
+                if len(text) < 300:
+                    text = (text + "\n" + p.structured_text()).strip()
+                if len(text) >= 300 and not looks_blocked(text, p.title):
+                    plain = {"url": final, "title": p.title.strip(), "text": text, "links": [urljoin(final, link) for link in p.links]}
+            except (Blocked, httpx.HTTPError):
+                final = url
+        if plain and not (want_money and not MONEY.search(plain["text"])):
+            return plain
+    seen = await render_page(final)  # a real browser: runs the page's scripts, passes bot checks
+    if seen and len(seen["text"]) >= 120 and (not plain or MONEY.search(seen["text"]) or len(seen["text"]) > 1.3 * len(plain["text"])):
+        return seen
+    if plain:
+        return plain
     async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-        try:
-            final, html = await _get(client, url)
-            p = _Page()
-            p.feed(html)
-            text = p.text()
-            if len(text) < 300:
-                text = (text + "\n" + p.structured_text()).strip()
-            if len(text) >= 300:
-                return {"url": final, "title": p.title.strip(), "text": text, "links": [urljoin(final, link) for link in p.links]}
-        except Blocked:
-            final = url
         alt = await _reader(client, final)
-        return {"url": alt["url"], "title": alt["title"], "text": alt["text"], "links": alt.get("links", [])}
+    return {"url": alt["url"], "title": alt["title"], "text": alt["text"], "links": alt.get("links", [])}

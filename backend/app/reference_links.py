@@ -73,21 +73,22 @@ def gather(call_id):
     return out[:MAX_LINKS]
 
 
-async def fetch(url, timeout=6):
-    """One page, cached for a few minutes. None when it cannot be read (blocked, down, too slow)."""
+async def fetch(url, timeout=6, want_money=False):
+    """One page, cached for a few minutes. None when it cannot be read (blocked, down, too slow). want_money: the question is about prices, so a page that
+    shows none in its plain text is opened in a real browser too (slower: a few seconds more)."""
     from . import link_guard, webdemo
     key = link_guard.normalise(url)
     hit = _pages.get(key)
-    if hit and hit[0] > time.time():
+    if hit and hit[0] > time.time() and (not want_money or hit[2] or (hit[1] and webdemo.MONEY.search(hit[1]["text"]))):
         return hit[1]
     try:
-        page = await asyncio.wait_for(webdemo.read_one(url), timeout)
+        page = await asyncio.wait_for(webdemo.read_one(url, want_money=want_money), max(timeout, 25) if want_money else timeout)
     except Exception:
         page = None
     if len(_pages) > 300:
         for k in sorted(_pages, key=lambda k: _pages[k][0])[:100]:
             _pages.pop(k, None)
-    _pages[key] = (time.time() + (PAGE_TTL if page else 60), page)  # a failure is remembered only briefly
+    _pages[key] = (time.time() + (PAGE_TTL if page else 60), page, bool(want_money))  # a failure is remembered only briefly
     return page
 
 
@@ -130,9 +131,18 @@ async def search(call_id, query, pages=6, follow=3):
                 continue
             for link in p.get("links", []):
                 if link not in seen_urls and webdemo._in_scope(link, base):
-                    candidates[link] = len(terms & _tok(link))
+                    candidates[link] = knowledge.relevance(terms, _tok(link), more) + (0.5 if webdemo.PRICE_Q.search(query) and webdemo._PRICEY_FIRST.search(link) else 0)
         ranked = [u for u, n in sorted(candidates.items(), key=lambda t: -t[1]) if n][:follow]
         for p in await asyncio.gather(*(fetch(u) for u in ranked)):
+            if p:
+                pool.append(p)
+                hits.extend((score(c), c) for c in passages(p, query))
+    if webdemo.PRICE_Q.search(query) and not any(webdemo.MONEY.search(c) for _n, c in hits):
+        # A question about prices, and no price on any page read so far: many sites draw their prices after the page loads, so open the most promising
+        # pages in a real browser (two at most; each is cached for later calls).
+        candidates = sorted(pool, key=lambda p: -(knowledge.relevance(terms, _tok(p["url"] + " " + (p.get("title") or "")), more)
+                                                  + (0.5 if webdemo._PRICEY_FIRST.search(p["url"]) else 0)))[:2]
+        for p in await asyncio.gather(*(fetch(c["url"], want_money=True) for c in candidates)):
             if p:
                 hits.extend((score(c), c) for c in passages(p, query))
     hits.sort(key=lambda t: -t[0])

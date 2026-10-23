@@ -440,7 +440,7 @@ async def lookup_company(query, call_id=None, kb_id=None):
         # Not in what we have saved: look in the links the admin gave (instruction files, the chat, the campaign, the lead's row), read live
         from . import reference_links
         try:
-            hits.extend(await asyncio.wait_for(reference_links.search(call_id, query), 8))
+            hits.extend(await asyncio.wait_for(reference_links.search(call_id, query), 24 if webdemo.PRICE_Q.search(query) else 8))  # a price may need a real browser
         except Exception:
             pass
     if not answered():
@@ -453,18 +453,21 @@ async def lookup_company(query, call_id=None, kb_id=None):
             urls = sorted([r["source"] for r in sources if str(r["source"]).startswith("http")],
                           key=lambda u: -len(terms & _tok(u)))[:5]
             urls = list(dict.fromkeys([*urls, url]))
-            async def read(u):
+            price_q = bool(webdemo.PRICE_Q.search(query))
+
+            async def read(u, first):
                 try:
-                    return await asyncio.wait_for(webdemo.read_one(u), 8)
+                    return await asyncio.wait_for(webdemo.read_one(u, want_money=price_q and first), 24 if price_q and first else 8)
                 except Exception:
                     return None
-            pages = await asyncio.gather(*(read(u) for u in urls))
+            pages = await asyncio.gather(*(read(u, i < 2) for i, u in enumerate(urls)))
             if not sources:
                 from urllib.parse import urlparse
                 base = webdemo._base_domain(urlparse(url if "://" in url else "https://" + url).hostname)
                 links = {link for page in pages if page for link in page.get("links", []) if webdemo._in_scope(link, base)}
-                ranked = sorted(links, key=lambda u: -len(terms & _tok(u)))[:5]
-                pages.extend(await asyncio.gather(*(read(u) for u in ranked if u not in urls)))
+                ranked = sorted(links, key=lambda u: -(len(terms & _tok(u)) + (1 if price_q and webdemo._PRICEY_FIRST.search(u) else 0)))[:5]
+                ranked = [u for u in ranked if u not in urls]
+                pages.extend(await asyncio.gather(*(read(u, i < 2) for i, u in enumerate(ranked))))  # a price question: the two likeliest pages get the real-browser look
             for page in pages:
                 if page:
                     for chunk in _chunks({**page, "body": page["text"], "source": page["url"]}):

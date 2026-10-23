@@ -4,6 +4,7 @@ things to click; the admin sees screenshots on the employee's Computer. Safety: 
 model (saved logins are typed in by the server and never shown to it), and a company switch: off, read only, or full."""
 import asyncio
 import base64
+import os
 import re
 import time
 from collections import deque
@@ -126,6 +127,58 @@ async def _ensure_browser():
             except Exception as e:  # no Chrome installed, or the bundled browser was never downloaded
                 last = e
         raise RuntimeError("No browser was found on this server. Install Google Chrome, or run: playwright install chromium (" + type(last).__name__ + ")")
+
+
+RENDER_ENABLED = os.getenv("RENDER_PAGES", "true").lower() != "false"  # false: never open a page in the real browser just to read it
+_render_slots = None
+
+
+async def _render_route(route):
+    """Pictures, video and fonts are not needed to read a page, and loading them slows it down. Everything else (scripts, data requests) must be allowed to run."""
+    if route.request.resource_type in ("image", "media", "font"):
+        return await route.abort()
+    await _public_only(route)
+
+
+async def render(url, wait=6.0):
+    """A page as a person sees it: opened in a short-lived private browser window, so the page's own scripts run (prices, tabs and course lists that are drawn
+    after the page loads) and a real browser gets past bot checks that turn plain requests away. -> {"url","title","text","links"}, or None when the browser
+    is off, not installed, or the page would not load. Never raises. Two at a time, so a crawl cannot eat the server."""
+    global _render_slots
+    if not RENDER_ENABLED or mode() == "off":
+        return None
+    if _render_slots is None:
+        _render_slots = asyncio.Semaphore(2)
+    async with _render_slots:
+        ctx = None
+        try:
+            b = await _ensure_browser()
+            ctx = await b.new_context(viewport={"width": 1280, "height": 900}, accept_downloads=False, java_script_enabled=True, locale="en-GB")
+            await ctx.route("**/*", _render_route)
+            page = await ctx.new_page()
+            page.set_default_timeout(15000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=int(wait * 1000))  # let the page's scripts finish drawing
+            except Exception:
+                pass
+            text = await page.evaluate("() => (document.body ? document.body.innerText : '')")
+            if webdemo.looks_blocked(text, await page.title()):  # a bot check that a real browser usually passes by itself, given a few seconds
+                await page.wait_for_timeout(5000)
+                text = await page.evaluate("() => (document.body ? document.body.innerText : '')")
+            links = await page.evaluate("() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href).slice(0, 300)")
+            title = await page.title()
+            if webdemo.looks_blocked(text, title):
+                return None
+            return {"url": page.url, "title": (title or "").strip(), "meta": {}, "text": re.sub(r"\n{3,}", "\n\n", text or "").strip(), "links": links or []}
+        except Exception:
+            return None
+        finally:
+            if ctx is not None:
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
 
 
 async def _public_only(route):

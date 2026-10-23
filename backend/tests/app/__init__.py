@@ -2,6 +2,7 @@
 import os
 import tempfile
 
+os.environ["RENDER_PAGES"] = "false"  # the suite must never open a real browser or a real website
 os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="deskmate-tests-")  # set before `app` is imported: the database opens at import time
 os.environ.setdefault("OPENAI_API_KEY", "not-a-real-key")           # the model is always a scripted fake in these tests
 

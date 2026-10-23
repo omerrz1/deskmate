@@ -1435,7 +1435,7 @@ class LinksTheAdminGaveTests(CallReportBase):
         }
         calls = []
 
-        async def read_one(url):
+        async def read_one(url, **_kw):
             calls.append(url)
             if url in pages:
                 return pages[url]
@@ -1518,6 +1518,99 @@ class LinksTheAdminGaveTests(CallReportBase):
             self.assertEqual(kept, "Fees: https://aacollege.example/fees")
             self.assertTrue(notes)
             self.assertNotIn("2024-final", swapped)
+
+    def fake_priced_site(self):
+        """A site whose course page draws its price with scripts: the plain read has none, the real-browser read does."""
+        asked = []
+
+        async def read_one(url, render=False, want_money=False):
+            asked.append((url, want_money))
+            if url == "https://aacollege.example/courses/business":
+                text = "Level 5 Diploma in Business Management. Fully online with tutor support. " * 4
+                if want_money:
+                    text += "Course fee: £1,250 in total."
+                return {"url": url, "title": "Business Management", "text": text, "links": []}
+            if url == "https://aacollege.example":
+                return {"url": url, "title": "AA College", "text": "Welcome to AA College, a London college. " * 20, "links": ["https://aacollege.example/courses/business", "https://aacollege.example/blog"]}
+            raise RuntimeError("not found")
+        return read_one, asked
+
+    async def test_a_price_question_opens_the_likely_pages_in_a_real_browser_when_the_plain_text_shows_no_price(self):
+        from app import webdemo
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, objective="Answer questions")
+            voices.set_setting("company_website", self.SITE)
+            read_one, asked = self.fake_priced_site()
+            with mock.patch.object(webdemo, "read_one", read_one):
+                hits = await self.ref.search(call, "what are the Business Management course prices?")
+            self.assertTrue(any("£1,250" in h for h in hits), hits)
+            self.assertIn(("https://aacollege.example/courses/business", True), asked)
+
+    async def test_a_question_that_is_not_about_prices_never_opens_a_browser(self):
+        from app import webdemo
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, objective="Answer questions")
+            voices.set_setting("company_website", self.SITE)
+            read_one, asked = self.fake_priced_site()
+            with mock.patch.object(webdemo, "read_one", read_one):
+                hits = await self.ref.search(call, "Business Management course tutor support")
+            self.assertTrue(hits)
+            self.assertFalse([a for a in asked if a[1]], asked)
+
+    async def test_lookup_info_asks_for_a_real_browser_read_of_the_first_website_pages_only_for_price_questions(self):
+        from app import webdemo
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, objective="Answer questions")
+            voices.set_setting("company_website", self.SITE)
+            read_one, asked = self.fake_priced_site()
+            with mock.patch.object(webdemo, "read_one", read_one):
+                hits = await knowledge.lookup_company("Business Management course prices", call_id=call)
+            self.assertTrue(any("£1,250" in h for h in hits), hits)
+            self.ref.clear_cache()
+            asked.clear()
+            with mock.patch.object(webdemo, "read_one", read_one):
+                await knowledge.lookup_company("where is the college based", call_id=call)
+            self.assertFalse([a for a in asked if a[1]], asked)
+
+    async def test_the_prompts_say_that_not_finding_something_is_not_the_same_as_it_not_existing(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            prompt = agents.meeting_prompt(agents.get(aid), [], "chat")
+            self.assertIn("NOT FOUND IS NOT NOTHING", prompt)
+            self.assertIn("does not publish", prompt)
+            self.assertIn("render=true", prompt)
+            call = self.make_call(mid, aid)
+            row, contact, camp = callengine.call_context(call)
+            brief = callengine.system_prompt(row, contact, camp, realtime=True, external=True)
+            self.assertIn("never say the company does not offer, list or charge for something just because you could not find it", brief)
+
+    async def test_read_webpage_can_ask_for_a_real_browser_and_a_failure_says_it_proves_nothing(self):
+        from app import office, webdemo
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            agent = agents.get(aid)
+            seen = {}
+
+            async def read_one(url, render=False, want_money=False):
+                seen["render"] = render
+                return {"url": url, "title": "Courses", "text": "Diploma £1,250. " * 20, "links": []}
+            with mock.patch.object(webdemo, "read_one", read_one):
+                got, _ = await office.run_tool(agent, "read_webpage", {"url": "https://aacollege.example/c", "render": True})
+            self.assertTrue(seen["render"])
+            self.assertIn("£1,250", got["text"])
+
+            async def blocked(url, render=False, want_money=False):
+                raise webdemo.Blocked("The website answered with an error (403).")
+            with mock.patch.object(webdemo, "read_one", blocked):
+                got, _ = await office.run_tool(agent, "read_webpage", {"url": "https://aacollege.example/c"})
+            self.assertIn("403", got["error"])
+            self.assertIn("NOT READ", got["error"])
+            self.assertIn("render=true", got["error"])
+            spec = next(t for t in office.TOOLS if t["name"] == "read_webpage")
+            self.assertIn("render", spec["parameters"]["properties"])
 
     async def test_lookup_info_in_elevenlabs_is_kept_in_step_with_the_code(self):
         sent = []

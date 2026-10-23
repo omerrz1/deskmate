@@ -63,8 +63,12 @@ export default function VoiceBrowser({ language = 'English', currentId = '', onP
     setBusy(v.voice_id); setErr('')
     try {
       // a public-library voice has to be in the company's own ElevenLabs account before a call can speak with it
-      if (v.source === 'library' && v.public_owner_id) await api.post('/voices/add', { voice_id: v.voice_id, public_owner_id: v.public_owner_id, name: v.name })
-      await onPick(v)
+      let picked = v
+      if (v.source === 'library' && v.public_owner_id) {
+        const added = await api.post('/voices/add', { voice_id: v.voice_id, public_owner_id: v.public_owner_id, name: v.name })
+        picked = { ...v, voice_id: added?.voice_id || v.voice_id }
+      }
+      await onPick(picked)
     } catch (e) { setErr(e.message) }
     setBusy('')
   }

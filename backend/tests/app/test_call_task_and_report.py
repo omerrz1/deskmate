@@ -9,6 +9,9 @@ from app import agents, callengine, costs, db, eleven_agents, files, knowledge, 
 from .test_twilio_call import TwilioFixture, twilio_call
 
 
+OWNER_ID = "63e06b7e7cafdc46be4d2e0b3f045940231ae058d508589653d74d1265a574ca"  # the shape ElevenLabs really uses for who shares a library voice (64 hex characters)
+
+
 class CallReportBase(TwilioFixture):
     async def asyncSetUp(self):
         await super().asyncSetUp()
@@ -245,7 +248,7 @@ class FakeEleven:
                 {"voice_id": "B" * 20, "name": "Daniel", "category": "premade", "labels": {"gender": "male", "accent": "american"}, "preview_url": "https://x/daniel.mp3"}],
                 "has_more": False})
         if url.endswith("/v1/shared-voices"):
-            return self.reply(200, {"voices": [{"voice_id": "C" * 20, "public_owner_id": "D" * 20, "name": "Mia", "gender": "female", "accent": "british", "preview_url": "https://x/mia.mp3"}]})
+            return self.reply(200, {"voices": [{"voice_id": "C" * 20, "public_owner_id": OWNER_ID, "name": "Mia", "gender": "female", "accent": "british", "preview_url": "https://x/mia.mp3"}]})
         if "/v1/voices/" in url:
             return self.reply(200, {"voice_id": url.rsplit("/", 1)[1], "name": "Sophie", "labels": {"gender": "female"}, "preview_url": "https://x/sophie.mp3"})
         return self.reply(404, {})
@@ -271,15 +274,17 @@ class VoicePickerTests(CallReportBase):
         _, men = await self.owner.get("/api/voices/library", query="source=mine&gender=male")
         self.assertEqual([v["name"] for v in men], ["Daniel"])
         _, shared = await self.owner.get("/api/voices/library", query="source=library&gender=female&language=English")
-        self.assertEqual((shared[0]["name"], shared[0]["public_owner_id"], shared[0]["source"]), ("Mia", "D" * 20, "library"))
+        self.assertEqual((shared[0]["name"], shared[0]["public_owner_id"], shared[0]["source"]), ("Mia", OWNER_ID, "library"))
         self.assertEqual(FakeEleven.calls[-1][2]["gender"], "female")
 
     async def test_choosing_a_library_voice_adds_it_to_the_account_first(self):
-        st, r = await self.owner.post("/api/voices/add", {"voice_id": "C" * 20, "public_owner_id": "D" * 20, "name": "Mia"})
-        self.assertEqual((st, r["added"]), (200, True))
-        self.assertTrue(FakeEleven.calls[-1][1].endswith(f"/v1/voices/add/{'D' * 20}/{'C' * 20}"))
-        st, _ = await self.owner.post("/api/voices/add", {"voice_id": "../etc", "public_owner_id": "D" * 20})
-        self.assertEqual(st, 400)
+        st, r = await self.owner.post("/api/voices/add", {"voice_id": "C" * 20, "public_owner_id": OWNER_ID, "name": "Mia"})
+        self.assertEqual((st, r["added"]), (200, True))  # ElevenLabs' own owner IDs are 64 characters long
+        self.assertTrue(FakeEleven.calls[-1][1].endswith(f"/v1/voices/add/{OWNER_ID}/{'C' * 20}"))
+        self.assertEqual(r["voice_id"], "C" * 20)  # the id ElevenLabs reports for the voice now in the account
+        for bad_voice, bad_owner in (("../etc", OWNER_ID), ("C" * 20, "../etc"), ("C" * 20, OWNER_ID + "/x"), ("C" * 20, "")):
+            st, _ = await self.owner.post("/api/voices/add", {"voice_id": bad_voice, "public_owner_id": bad_owner})
+            self.assertEqual(st, 400, (bad_voice, bad_owner))
 
     async def test_without_an_elevenlabs_key_the_list_says_so(self):
         with mock.patch.object(llm, "eleven_key", return_value=""):

@@ -11,7 +11,8 @@ from . import auth, llm
 
 router = APIRouter(prefix="/api/voices")
 BASE = "https://api.elevenlabs.io"
-VOICE_ID = re.compile(r"[A-Za-z0-9]{10,40}")
+VOICE_ID = re.compile(r"[A-Za-z0-9]{10,40}")        # a voice: 20 letters and digits
+OWNER_ID = re.compile(r"[A-Za-z0-9]{10,100}")        # who shares a library voice: a 64-character hex string
 
 
 def _headers():
@@ -89,11 +90,17 @@ class AddIn(BaseModel):
 @router.post("/add")
 async def add(a: AddIn):
     """Put a public-library voice into the company's ElevenLabs account so calls can use it."""
-    if not VOICE_ID.fullmatch(a.voice_id) or not VOICE_ID.fullmatch(a.public_owner_id):
+    if not VOICE_ID.fullmatch(a.voice_id) or not OWNER_ID.fullmatch(a.public_owner_id):
         raise HTTPException(400, "That is not a valid ElevenLabs voice.")
     async with httpx.AsyncClient(timeout=30) as h:
         r = await h.post(f"{BASE}/v1/voices/add/{a.public_owner_id}/{a.voice_id}", headers=_headers(), json={"new_name": (a.name or "Voice")[:80]})
     text = r.text.lower()
     if r.status_code != 200 and "already" not in text:
         _fail(r)
-    return {"voice_id": a.voice_id, "added": r.status_code == 200}
+    added = ""
+    if r.status_code == 200:
+        try:
+            added = str(r.json().get("voice_id") or "")  # the voice as it now sits in the account
+        except Exception:
+            added = ""
+    return {"voice_id": added if VOICE_ID.fullmatch(added) else a.voice_id, "added": r.status_code == 200}

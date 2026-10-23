@@ -12,7 +12,7 @@ import time
 from email.message import EmailMessage
 from email.utils import formataddr, parseaddr
 
-from . import db, files, schedule, sheet_tools, voices
+from . import db, files, missions, schedule, sheet_tools, voices
 
 for stmt in (
     "CREATE TABLE IF NOT EXISTS emails(id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER, folder TEXT, from_addr TEXT, to_addr TEXT, cc TEXT DEFAULT '', "
@@ -375,6 +375,7 @@ TOOLS += [
 ]
 TOOLS = [t for t in TOOLS if t["name"] not in files.TOOL_NAMES] + files.TOOLS  # file tools live in files.py
 TOOLS += sheet_tools.TOOLS  # so do the spreadsheet tools (profile, clean, merge, query, a task for every row)
+TOOLS += missions.TOOLS  # and the one that takes ownership of a whole calling job
 TOOL_NAMES = {t["name"] for t in TOOLS}
 
 
@@ -430,6 +431,8 @@ async def run_tool(agent, name, a):
         return await files.run_tool(agent, name, a)
     if name in sheet_tools.TOOL_NAMES:
         return await sheet_tools.run_tool(agent, name, a)
+    if name in missions.TOOL_NAMES:
+        return await missions.run_tool(agent, name, a)
     if name == "check_inbox":
         w = "agent_id=? AND folder='inbox'" + (" AND status='unread'" if a.get("unread_only") else "")
         rows = db.q(f"SELECT id,from_addr,subject,status,created_at FROM emails WHERE {w} ORDER BY id DESC LIMIT ?", (aid, min(a.get("limit") or 15, 30)))

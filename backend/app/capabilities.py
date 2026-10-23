@@ -5,7 +5,7 @@ import json
 GROUPS = [
     ("calls", "Phone calls and customers", "Place and schedule calls, run campaigns, look up customers and call results. Set up centrally in Settings → Calling.",
      ["get_dashboard_stats", "get_segments", "search_contacts", "create_campaign", "schedule_call", "list_scheduled_calls", "start_campaign", "stop_campaign",
-      "list_campaigns", "call_contact", "list_calls", "get_call", "get_call_report", "export_campaign_report", "get_client_report", "update_contact", "weekly_report"]),
+      "list_campaigns", "call_contact", "list_calls", "get_call", "get_call_report", "export_campaign_report", "get_client_report", "update_contact", "weekly_report", "start_mission", "mission"]),
     ("email", "Email", "Read and send email from their own address.",
      ["check_inbox", "read_email", "send_email", "reply_email", "search_email", "notify_admin"]),
     ("files", "Files and spreadsheets", "Keep documents and spreadsheets in folders on their own computer, and share them with teammates.",

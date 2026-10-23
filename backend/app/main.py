@@ -35,7 +35,7 @@ app.include_router(setup_api.router)
 from . import voice_library
 app.include_router(voice_library.router)
 from . import learning
-from . import sheet_tools
+from . import missions, sheet_tools
 app.include_router(learning.router)
 app.add_middleware(CORSMiddleware, allow_origins=sorted(security.ALLOWED_ORIGINS), allow_credentials=True,
                    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token"])
@@ -80,6 +80,7 @@ async def _start_scheduler():
                     try:
                         if keys.complete():  # nothing runs until the company has connected its keys
                             await callengine.tick()
+                            await missions.tick()  # progress reports, alerts and the pilot gate of the missions that are running
                             await agents.tick()
                             await alerts.tick()
                             await backups.tick()

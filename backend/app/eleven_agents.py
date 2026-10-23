@@ -314,6 +314,27 @@ EXPRESSION_LEVELS = {
 }
 
 
+# Small stumbles, the way people really talk: a repeated little word, a restart, a trailing off. They are ordinary words and pauses (not tags), so they stay in
+# the transcript, and the dial sets how often. The rules are what keep them sounding like someone choosing their words instead of like a glitch.
+STUMBLE_LEVELS = {
+    "subtle": "Almost never: leave them out, or one soft \"uh\" in a whole call.",
+    "natural": "Now and then: two or three times in a whole call, where you are genuinely thinking or picking a word.",
+    "lively": "Every few turns, about one turn in three (never every turn): when you are thinking, a bit excited, or a little unsure.",
+}
+STUMBLE_GUIDE = (
+    "STUMBLES: real people do not speak in perfect sentences, so let a small stumble in now and then. "
+    "A tiny repeat with a short pause: \"I... I think so.\" \"So, so what I'd do is...\" \"We-- we can do that.\" "
+    "A soft restart: \"It's, uh, it's about two weeks.\" \"The course is-- well, the diploma is online.\" "
+    "A thought that trails off and picks up: \"That's... hm... yeah, that works.\" "
+    "How often: {rate} "
+    "Rules: only on a small word at the start of a clause (I, we, it's, so, the, and, but); one stumble per turn at most, and repeat the word once only (never \"I... I... I\"); "
+    "stumble on the words before a fact and say the fact itself cleanly, so never on a name, number, price, date, address or link; "
+    "none in your first hello or your goodbye, none while you give an important answer, and none when they are upset or the news is serious; "
+    "always finish the thought cleanly and keep the sentence short; never the same stumble twice in a row. "
+    "It must sound like someone choosing their words, never like a glitch or a stutter."
+)
+
+
 def tags_guide(profile):
     """What only the ElevenLabs voice can do: act out laughs, sighs, breaths and soft asides, which is what makes a call sound alive. How often is a setting."""
     if llm.lang_code(profile.get("language")) != "en":
@@ -326,7 +347,8 @@ def tags_guide(profile):
             "A playful aside, or a joke said just between the two of you: [whispers] for a few words only, warm and light, never low or creepy, then straight back to your normal voice. "
             "Good news: [excited]. Slower for a detail: [slow]. " + EXPRESSION_LEVELS[level] + " "
             "Rules: a tag colours only the next few words, so keep it short; never whisper a whole sentence or anything important; one tag at a time, no stacking; "
-            "none in your very first hello, and none while you say a number, price, address or link; never laugh at something sad or serious or when they are upset; never read a tag aloud.")
+            "none in your very first hello, and none while you say a number, price, address or link; never laugh at something sad or serious or when they are upset; never read a tag aloud.\n"
+            + STUMBLE_GUIDE.format(rate=STUMBLE_LEVELS[level]))
 
 
 async def warm_agents():

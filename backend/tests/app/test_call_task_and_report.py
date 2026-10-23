@@ -1296,6 +1296,25 @@ class RealisticReactionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("most turns", self.guide())
         self.assertEqual(eleven_agents.tags_guide({"language": "Arabic"}), "")  # tags are only written into English calls
 
+    def test_the_brief_asks_for_small_natural_stumbles_with_rules_that_keep_them_from_sounding_like_a_bug(self):
+        text = self.guide("natural")
+        for needle in ('"I... I think so."', '"We-- we can do that."', '"It\'s, uh, it\'s about two weeks."', "That's... hm... yeah, that works",
+                       "only on a small word at the start of a clause", "one stumble per turn at most", 'never "I... I... I"',
+                       "never on a name, number, price, date, address or link", "none in your first hello or your goodbye",
+                       "none when they are upset", "always finish the thought cleanly", "never like a glitch or a stutter"):
+            self.assertIn(needle, text)
+
+    def test_how_often_it_stumbles_follows_the_dial(self):
+        self.assertIn("Almost never", self.guide("subtle"))
+        self.assertIn("two or three times in a whole call", self.guide("natural"))
+        self.assertIn("about one turn in three (never every turn)", self.guide("lively"))
+        self.assertIn("about one turn in three", self.guide())  # Lively is the default
+        self.assertEqual(eleven_agents.tags_guide({"language": "Arabic"}), "")  # English calls only, like the reactions
+
+    def test_a_stumble_is_spoken_so_it_stays_in_the_transcript_while_the_reactions_do_not(self):
+        self.assertEqual(eleven_agents.strip_tags("I... I think [chuckles] so, so what I'd do is-- well, call them."),
+                         "I... I think so, so what I'd do is-- well, call them.")
+
     def test_reactions_never_appear_in_a_transcript(self):
         self.assertEqual(eleven_agents.strip_tags("Oh [laughs softly] that's brilliant! [whispers, playfully] between us, I love biryani too."),
                          "Oh that's brilliant! between us, I love biryani too.")

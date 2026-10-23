@@ -84,11 +84,11 @@ function CallerVoice({ profiles, reload, setMsg, settings, reloadS }) {
       </div>
       <label>How lively the voice is
         <select value={settings?.call_expression || 'lively'} onChange={async (e) => { try { await api.put('/settings', { call_expression: e.target.value }); reloadS(); setMsg('Saved. It applies from the next call.') } catch (x) { setMsg(x.message) } }}>
-          <option value="subtle">Subtle: calm and steady, a reaction now and then</option>
-          <option value="natural">Natural: warm, a reaction every few turns, light jokes</option>
-          <option value="lively">Lively (recommended): bright and upbeat, laughs and reacts in most turns</option>
+          <option value="subtle">Subtle: calm and steady, a reaction now and then, no stumbles</option>
+          <option value="natural">Natural: warm, a reaction every few turns, light jokes, the odd "I... I think"</option>
+          <option value="lively">Lively (recommended): bright and upbeat, laughs and reacts in most turns, a natural stumble every few turns</option>
         </select>
-        <span className="faint">Sets the energy and pace of the voice, and how often it laughs, sighs and makes a soft joke. Anything you set on a voice profile (Pace, Expressiveness) overrides the pace and expressiveness here. English calls.</span>
+        <span className="faint">Sets the energy and pace of the voice, and how often it laughs, sighs, makes a soft joke or stumbles over a word the way people do ("I... I think so"). Anything you set on a voice profile (Pace, Expressiveness) overrides the pace and expressiveness here. English calls.</span>
       </label>
       <div className="actions"><button className="btn" onClick={() => setOpen(!open)}>{open ? 'Close the list' : 'Choose a different voice'}</button></div>
       {open && <VoiceBrowser language={prof.language} currentId={prof.voice_id} onPick={async (v) => {

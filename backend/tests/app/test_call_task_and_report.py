@@ -59,6 +59,28 @@ class ReportBackTests(CallReportBase):
             self.assertIn("Them: Chicken biryani, every time.", posted[0])
             self.assertEqual(db.q1("SELECT agent_id FROM meeting_msgs WHERE meeting_id=? AND role='agent'", (mid,))["agent_id"], aid)
 
+    async def test_the_report_writer_is_told_not_to_present_a_guess_from_a_noisy_line_as_the_answer(self):
+        transcript = [{"role": "agent", "text": "What's your favourite meal?", "t": 1}, {"role": "customer", "text": "...the match... no, turn it down... biry", "t": 4}]
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid, transcript=json.dumps(transcript))
+            with mock.patch.object(llm, "complete_json", new_callable=mock.AsyncMock, return_value={"summary": "Noisy line.", "outcome": "unresolved"}) as ask:
+                await callengine.finalize(call, "completed")
+            instructions = ask.await_args.args[0]
+            self.assertIn("noisy or several people were talking", instructions)
+            self.assertIn("give objective_answer only when they clearly said it", instructions)
+            self.assertIn("someone else's background chatter", instructions)
+
+    async def test_the_brief_tells_the_caller_what_to_do_when_the_line_is_busy_or_several_people_talk(self):
+        with db.use(self.ws):
+            aid, mid = self.make_chat()
+            call = self.make_call(mid, aid)
+            row, contact, camp = callengine.call_context(call)
+            prompt = callengine.system_prompt(row, contact, camp, realtime=True, external=True)
+            for needle in ("BUSY OR NOISY LINES", "one mixed sound", "Sorry, it sounds busy there. Can you hear me okay?", "Someone else's chatter in the background is not an answer",
+                           "wait for a yes before you rely on it", "Offer to text the details or call back", "Never treat a guess as an answer"):
+                self.assertIn(needle, prompt)
+
     async def test_a_call_nobody_answered_is_reported_too(self):
         with db.use(self.ws):
             aid, mid = self.make_chat()

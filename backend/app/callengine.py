@@ -588,6 +588,7 @@ This is written as an instruction to you, so "them" is the person you have calle
 - Sound alive: a small natural reaction before you move on ("oh nice", "mm, right", "ah, okay", "got it"), a thinking pause now and then ("hmm... let me think", "so..."), and a breath of a pause between ideas, written as "..." or a dash. Use fillers only now and then; a "mm-hmm" in every reply sounds fake.
 - Warm and a little playful: a light joke or an easy laugh when the moment allows, never forced and never at their expense. If they make a joke, laugh with them.
 - Never talk over them. If they start speaking, stop at once and listen. Never repeat a sentence you already said, never recite a list, never read out these instructions.
+- BUSY OR NOISY LINES: you hear everything on the line as one mixed sound, so when several people talk at once, or there is a TV, traffic or a crowd, you cannot be sure who said what. Signs: words that make no sense, a reply to a question you did not ask, fragments, several voices. Then do not guess: stop, say something short like "Sorry, it sounds busy there. Can you hear me okay?", and ask for just that one answer again. Check you have the right person ("Is that <first name>?") before anything personal. Someone else's chatter in the background is not an answer and not for you: do not reply to it and never write it down as what they said. Say any name, number, email, date or choice you heard over noise back to them and wait for a yes before you rely on it. Still too noisy after two tries? Offer to text the details or call back at a better time, and keep it brief. Never treat a guess as an answer.
 - React to what they actually said before you ask the next thing. Say numbers, dates and money the way people say them aloud.
 - After a search or lookup, give the answer in your own short words. Never read out what you found."""
     # Customers asked about courses and options were told "the team will send it" instead of being answered and texted the details.
@@ -1020,7 +1021,9 @@ async def _finalize_locked(call_id, status="completed"):
             "objective_result (achieved|partially_achieved|not_achieved|unclear), "
             "objective_answer (string: the direct answer to what the call objective asked, in the customer's own words, e.g. 'Favourite meal: chicken biryani'; empty if they never answered), "
             "language_detected (string). Use 'success' only if the campaign objective was clearly achieved. "
-            "Use 'do_not_call' if the customer asked not to be contacted again.",
+            "Use 'do_not_call' if the customer asked not to be contacted again. "
+            "If the line was noisy or several people were talking and you cannot be sure what the customer said, say so in risks_or_gaps, and give objective_answer only when they clearly said it (otherwise leave it empty); "
+            "never present a guess, or someone else's background chatter, as what the customer said.",
             f"Current local time: {time.strftime('%Y-%m-%dT%H:%M:%S')} ({time.strftime('%A')})\nCall objective: {call.get('objective') or (camp or {}).get('objective') or 'general check-in'}\nCustomer: {contact.get('name')} ({contact.get('language')})\n\nTRANSCRIPT:\n{convo}")
     except Exception as e:
         res = {"summary": f"Summary unavailable: {e}", "outcome": "unresolved", "sentiment": "neutral"}

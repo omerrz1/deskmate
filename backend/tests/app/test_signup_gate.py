@@ -105,5 +105,67 @@ class SignupGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(directory.count(), before)
 
 
+class OpenSignupTests(unittest.IsolatedAsyncioTestCase):
+    """Anyone can create a company. That is only safe with limits: per address, in total, and companies that cannot see each other."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._keys = mock.patch.object(keys, "complete", lambda: True)
+        cls._keys.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._keys.stop()
+
+    def open_(self):
+        return mock.patch.multiple(directory, SIGNUP_CODE="", SIGNUPS_OPEN=True)
+
+    async def test_a_stranger_with_no_code_can_create_a_company_and_is_signed_in(self):
+        with self.open_():
+            s = (await Browser(main.app).get("/api/auth/status"))[1]
+            self.assertEqual((s["signup_public"], s["signup_code_required"]), (True, False))  # the public site shows its sign-up buttons
+            b = Browser(main.app)
+            st, r = await b.post("/api/auth/signup", body())
+            self.assertEqual(st, 200, r)
+            me = (await b.get("/api/me"))[1]
+            self.assertEqual(me["role"], "owner")
+
+    async def test_two_strangers_companies_cannot_see_each_other(self):
+        with self.open_():
+            a, c = Browser(main.app), Browser(main.app)
+            await a.post("/api/auth/signup", body(company="Alpha Training"))
+            await c.post("/api/auth/signup", body(company="Beta Traders"))
+            _, ca = await a.get("/api/company")
+            _, cc = await c.get("/api/company")
+            self.assertEqual((ca["name"], cc["name"]), ("Alpha Training", "Beta Traders"))
+            _, agents_a = await a.post("/api/agents", {"name": "Ava", "gender": "female", "role": "Caller"})
+            self.assertEqual([x["name"] for x in (await c.get("/api/agents"))[1]], [])  # Beta sees none of Alpha's team
+
+    async def test_one_address_cannot_create_more_than_five_companies_an_hour(self):
+        with self.open_():
+            b = Browser(main.app)  # one address
+            results = [(await b.post("/api/auth/signup", body()))[0] for _ in range(7)]
+            self.assertEqual(results[:5], [200] * 5)
+            self.assertEqual(results[5:], [429, 429])
+
+    async def test_a_crowd_of_addresses_is_held_to_a_total(self):
+        from app import security
+        with self.open_(), mock.patch.dict(security.LIMITS, {"signup_all": (3, 3600)}):
+            security._hits.pop(("*", "signup_all"), None)
+            try:
+                results = [(await Browser(main.app).post("/api/auth/signup", body()))[0] for _ in range(5)]  # every browser has its own address
+                self.assertEqual(results, [200, 200, 200, 429, 429])
+                st, r = await Browser(main.app).post("/api/auth/signup", body())
+                self.assertEqual(st, 429)
+                self.assertIn("a lot of sign-ups", r["detail"])
+            finally:
+                security._hits.pop(("*", "signup_all"), None)
+
+    async def test_the_total_is_a_setting_and_the_suites_own_ceiling_is_lifted(self):
+        from app import security
+        self.assertGreaterEqual(security.LIMITS["signup_all"][0], 10 ** 6)  # tests/app/__init__.py lifts it for the suite
+        self.assertEqual(security.LIMITS["signup"], (5, 3600))
+
+
 if __name__ == "__main__":
     unittest.main()

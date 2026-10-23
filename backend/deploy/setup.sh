@@ -69,8 +69,7 @@ fi
 say "Settings"
 if [ ! -f "$CONF/backend.env" ]; then
   install -m 0640 -o root -g deskmate "$HERE/backend.env.example" "$CONF/backend.env"
-  CODE_WORD="$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | cut -c1-20)"   # the team's access code for creating companies
-  sed -i "s|^ALLOWED_ORIGINS=.*|ALLOWED_ORIGINS=$APP_ORIGIN|; s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=https://$API_HOST|; s|^SIGNUP_CODE=.*|SIGNUP_CODE=$CODE_WORD|" "$CONF/backend.env"
+  sed -i "s|^ALLOWED_ORIGINS=.*|ALLOWED_ORIGINS=$APP_ORIGIN|; s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=https://$API_HOST|" "$CONF/backend.env"
   echo "Wrote $CONF/backend.env (edit it, then: systemctl restart deskmate)"
 else
   echo "Keeping your existing $CONF/backend.env"
@@ -107,6 +106,6 @@ The backend is running. Next:
   3. Tell Amplify to send /api to it (see deploy/README.md)
 Logs:        journalctl -u deskmate -f
 Settings:    $CONF/backend.env        (then: systemctl restart deskmate)
-The access code for creating companies is the SIGNUP_CODE line in that file.
+Anyone can create a company. To make that invitation-only, add a SIGNUP_CODE line to that file.
 Data:        $DATA     (back this up, including the .keyfile)
 MSG

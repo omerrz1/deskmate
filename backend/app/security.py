@@ -13,7 +13,7 @@ ALLOWED_ORIGINS = {o.strip().rstrip("/") for o in os.getenv("ALLOWED_ORIGINS", "
 TRUST_PROXY = os.getenv("TRUSTED_PROXY", "false").lower() == "true"
 MAX_BODY = int(os.getenv("MAX_BODY_MB", "60")) * 1024 * 1024
 EXPENSIVE = ("/api/tts", "/api/chat", "/api/transcribe", "/api/knowledge", "/api/kb/", "/api/datasets", "/api/voices/search", "/api/demo/website", "/api/meetings", "/api/agents", "/api/trainings", "/api/connectors", "/api/apps")
-LIMITS = {"login": (10, 60), "signup": (5, 3600), "contact": (5, 3600), "expensive": (60, 60), "default": (900, 60), "hook": (120, 60), "chathook": (900, 60)}  # (requests, per seconds)
+LIMITS = {"login": (10, 60), "signup": (5, 3600), "signup_all": (int(os.getenv("SIGNUP_GLOBAL_PER_HOUR", "60")), 3600), "contact": (5, 3600), "expensive": (60, 60), "default": (900, 60), "hook": (120, 60), "chathook": (900, 60)}  # (requests, per seconds)
 _hits = defaultdict(deque)
 
 
@@ -101,6 +101,9 @@ class Security:
                 ok, wait = _allow(ip, "signup")
                 if not ok:
                     return await deny(429, "Too many new accounts from this address. Try again later.", [(b"retry-after", str(wait).encode())])
+                ok, wait = _allow("*", "signup_all")  # sign-up is open to everyone, so a crowd of addresses is held to a total too: each company costs this server a database and files
+                if not ok:
+                    return await deny(429, "We are getting a lot of sign-ups right now. Please try again in a little while.", [(b"retry-after", str(wait).encode())])
             elif path == "/api/contact":
                 ok, wait = _allow(ip, "contact")
                 if not ok:

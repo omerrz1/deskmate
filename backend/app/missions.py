@@ -404,7 +404,7 @@ def render_report(m, s, kind="progress"):
     owner = (db.q1("SELECT name FROM agents WHERE id=?", (m["owner_id"],)) or {}).get("name", "the owner")
     lines.append("Team: " + ", ".join([f"{owner} (owner)"] + [f"{t['name']} ({t['role']})" for t in team]))
     if kind in ("launch", "final") and m.get("campaign_id"):
-        lines.append(f"Results workbook (one row per lead): /api/campaigns/{m['campaign_id']}/export.xlsx")
+        lines.append(f"Results workbook (one row per lead): /api/campaigns/{m['campaign_id']}/export.xlsx · as CSV: /api/campaigns/{m['campaign_id']}/export.csv")
     if kind == "launch":
         lines.append("Next report in " + _hours(m["report_every"] / 3600) + ". Ask me any time for the status; I will say straight away if something needs you.")
     return "\n".join(lines)
@@ -837,7 +837,8 @@ def _status(m):
     return {"mission_id": m["id"], "name": m["name"], "status": m["status"], "phase": m["phase"], "hold_reason": m.get("hold_reason") or "", "project_id": m["project_id"], "campaign_id": m["campaign_id"],
             "owner": (db.q1("SELECT name FROM agents WHERE id=?", (m["owner_id"],)) or {}).get("name"), "team": [{"name": t["name"], "role": t["role"]} for t in team], "numbers": s,
             "open_problems": [k for k, v in db.jload(m.get("alerts"), {}).items() if v.get("open")], "report": render_report(m, s, "now"),
-            "results_workbook": f"/api/campaigns/{m['campaign_id']}/export.xlsx" if m.get("campaign_id") else "", "notes": db.jload(m.get("notes"), [])[-5:]}
+            "results_workbook": f"/api/campaigns/{m['campaign_id']}/export.xlsx" if m.get("campaign_id") else "",
+            "results_csv": f"/api/campaigns/{m['campaign_id']}/export.csv" if m.get("campaign_id") else "", "notes": db.jload(m.get("notes"), [])[-5:]}
 
 
 def _pick(agent, a):

@@ -2,7 +2,7 @@
 Messages send automatically by default; the admin can explicitly switch the workspace to approval mode."""
 import re
 
-from . import db, integrations, voices
+from . import countries, db, integrations, voices
 
 db.run("CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT, to_addr TEXT, body TEXT, agent_id INTEGER, contact_id INTEGER, call_id INTEGER, "
        "status TEXT DEFAULT 'pending_approval', error TEXT DEFAULT '', provider TEXT DEFAULT '', created_at REAL, sent_at REAL)")
@@ -45,6 +45,8 @@ def normalise(num):
         n = "+" + n[2:]
     if n.startswith("0") and default_code():
         n = "+" + default_code() + n[1:]
+    elif n.isdigit() and countries.international(n):
+        n = "+" + n                       # 923001234567 already starts with Pakistan's code
     return n if re.fullmatch(r"\+[1-9]\d{6,14}", n) else ""
 
 

@@ -5,7 +5,7 @@ import re
 
 from openpyxl import load_workbook
 
-from . import countries, db, voices
+from . import countries, db, tabular, voices
 
 FIELD_HINTS = {
     "name": ["name", "full name", "customer", "client", "fullname", "שם", "الاسم", "nombre", "nom"],
@@ -26,39 +26,45 @@ LANG_ALIASES = {
 }
 
 
-def read_rows(filename, data: bytes):
-    name = (filename or "").lower()
-    if name.endswith(".csv"):
-        text = data.decode("utf-8-sig", errors="replace")
-        rows = list(csv.reader(io.StringIO(text)))
-        rows = [r for r in rows if any(c not in (None, "") for c in r)]
-        if not rows:
-            return [], []
-        header = [str(c).strip() if c is not None else f"col{i+1}" for i, c in enumerate(rows[0])][:200]
-        body = [{header[i]: ("" if c is None else str(c).strip()) for i, c in enumerate(r[:len(header)])} for r in rows[1:50001]]
-        return header, body
-    else:
+def read_rows_info(filename, data: bytes):
+    """-> (header, body, info). A CSV or TSV is read by tabular (encoding, separator, title lines, repeated headings); `info` says what it found and repaired."""
+    kind = tabular.kind_of(filename, data)
+    if kind in ("csv", "tsv"):
+        try:
+            t = tabular.read_table(filename, data, max_rows=50000, max_cols=200, overflow="cut")
+        except tabular.EmptyTable:
+            return [], [], {}
+        body = [{h: c.strip() for h, c in zip(t.columns, r)} for r in t.rows]
+        return t.columns, body, {"read_as": t.describe(), "notes": t.notes, "warnings": t.warnings}
+    if kind == "xls":
+        raise tabular.TableError(tabular.XLS_MESSAGE)
+    try:
         wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        header, body = [], []
-        for ws in wb.worksheets:
-            iterator = (list(r[:200]) for r in ws.iter_rows(values_only=True))
-            first = next((r for r in iterator if any(c not in (None, "") for c in r)), None)
-            if first is None:
+    except Exception:
+        raise tabular.TableError("I couldn't open that Excel file. It may be damaged or password-protected.")
+    header, body = [], []
+    for ws in wb.worksheets:
+        iterator = (list(r[:200]) for r in ws.iter_rows(values_only=True))
+        first = next((r for r in iterator if any(c not in (None, "") for c in r)), None)
+        if first is None:
+            continue
+        sheet_header = [str(c).strip() if c is not None else f"col{i+1}" for i, c in enumerate(first)]
+        for c in sheet_header:
+            if c not in header:
+                header.append(c)
+        for row in iterator:
+            if not any(c not in (None, "") for c in row):
                 continue
-            sheet_header = [str(c).strip() if c is not None else f"col{i+1}" for i, c in enumerate(first)]
-            for c in sheet_header:
-                if c not in header:
-                    header.append(c)
-            for row in iterator:
-                if not any(c not in (None, "") for c in row):
-                    continue
-                body.append({sheet_header[i]: ("" if c is None else str(c).strip()) for i, c in enumerate(row) if i < len(sheet_header)})
-                if len(body) >= 50000:
-                    break
+            body.append({sheet_header[i]: tabular._cell(c).strip() for i, c in enumerate(row) if i < len(sheet_header)})
             if len(body) >= 50000:
                 break
-    if not header:
-        return [], []
+        if len(body) >= 50000:
+            break
+    return header, body, {"read_as": f"XLSX, {len(body):,} rows × {len(header)} columns", "notes": [], "warnings": []}
+
+
+def read_rows(filename, data: bytes):
+    header, body, _info = read_rows_info(filename, data)
     return header, body
 
 
@@ -88,6 +94,8 @@ def norm_phone(v):
     keep = re.sub(r"[^\d+]", "", v)
     if keep.startswith("00"):
         keep = "+" + keep[2:]
+    elif keep.isdigit() and countries.international(keep):
+        keep = "+" + keep                 # 923001234567 -> +923001234567, so the country and language are found
     return keep
 
 

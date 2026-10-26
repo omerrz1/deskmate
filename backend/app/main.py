@@ -35,7 +35,7 @@ app.include_router(setup_api.router)
 from . import voice_library
 app.include_router(voice_library.router)
 from . import learning
-from . import missions, sheet_tools
+from . import missions, sheet_tools, tabular
 app.include_router(learning.router)
 app.add_middleware(CORSMiddleware, allow_origins=sorted(security.ALLOWED_ORIGINS), allow_credentials=True,
                    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Content-Type", "X-CSRF-Token"])
@@ -123,6 +123,11 @@ def purge_transcripts():
 @app.exception_handler(llm.NoKeyError)
 async def nokey(_, exc):
     return JSONResponse({"detail": "Connect your OpenAI key in Settings → Connections first.", "setup": "openai"}, status_code=428)
+
+
+@app.exception_handler(tabular.TableError)
+async def unreadable_table(_, exc):
+    return JSONResponse({"detail": str(exc)}, status_code=exc.status)
 
 
 @app.exception_handler(Exception)
@@ -472,17 +477,17 @@ def activity(limit: int = 60, kind: Optional[str] = None):
 # ---------- data ----------
 @app.post("/api/datasets/preview")
 async def ds_preview(file: UploadFile = File(...)):
-    header, body = importer.read_rows(file.filename, await read_limited(file, 15, (".xlsx", ".xls", ".csv")))
+    header, body, info = importer.read_rows_info(file.filename, await read_limited(file, 15, tabular.EXTENSIONS))
     if not header:
         raise HTTPException(400, "File is empty")
-    return {"columns": header, "mapping": importer.guess_mapping(header), "rows": len(body), "sample": body[:5]}
+    return {"columns": header, "mapping": importer.guess_mapping(header), "rows": len(body), "sample": body[:5], **info}
 
 
 @app.post("/api/datasets/import")
 async def ds_import(file: UploadFile = File(...), mapping: str = Form("{}"), name: str = Form("")):
-    header, body = importer.read_rows(file.filename, await read_limited(file, 15, (".xlsx", ".xls", ".csv")))
+    header, body, info = importer.read_rows_info(file.filename, await read_limited(file, 15, tabular.EXTENSIONS))
     m = {k: v for k, v in json.loads(mapping or "{}").items() if v in header} or importer.guess_mapping(header)
-    return importer.import_rows(name or file.filename, file.filename, header, body, m)
+    return {**importer.import_rows(name or file.filename, file.filename, header, body, m), **info}
 
 
 @app.get("/api/datasets")
@@ -616,11 +621,11 @@ def campaign_create(c: CampaignIn):
     return campaign_out(db.q1("SELECT * FROM campaigns WHERE id=?", (cid,)))
 
 
-@app.get("/api/campaigns/{cid}/export.xlsx")
-def campaign_export(cid: int):
-    from pathlib import Path
-    import tempfile
-    from openpyxl import Workbook
+CAMPAIGN_RESULT_HEADER = ["Name", "Phone", "Email", "Company", "Language", "Lead status", "Call status", "Outcome", "Sentiment", "Call summary", "Key points", "Callback / follow-up", "Attempts", "Last called", "Detailed call report"]
+
+
+def _campaign_audience(cid):
+    """-> (where, args) for the leads of a campaign; 404 for an unknown one, 413 for more than a workbook can hold."""
     campaign = db.q1("SELECT * FROM campaigns WHERE id=?", (cid,))
     if not campaign:
         raise HTTPException(404, "Campaign not found")
@@ -633,10 +638,12 @@ def campaign_export(cid: int):
         where, args = crm.build_filter(filters)
         audience = db.q1(f"SELECT COUNT(*) n FROM contacts WHERE {where}", args)["n"]
     if audience > 1_000_000:
-        raise HTTPException(413, "An Excel sheet can contain at most 1,000,000 lead rows. Export a smaller segment.")
-    wb = Workbook(write_only=True)
-    ws = wb.create_sheet("Call results")
-    ws.append(["Name", "Phone", "Email", "Company", "Language", "Lead status", "Call status", "Outcome", "Sentiment", "Call summary", "Key points", "Callback / follow-up", "Attempts", "Last called", "Detailed call report"])
+        raise HTTPException(413, "A results sheet can contain at most 1,000,000 lead rows. Export a smaller segment.")
+    return where, args
+
+
+def _campaign_result_rows(cid, where, args):
+    """One row per lead with the latest call's result, 1,000 leads at a time."""
     cursor, batch_size = 0, 1000
     while True:
         contacts = db.q(f"SELECT * FROM contacts WHERE ({where}) AND id>? ORDER BY id LIMIT ?", [*args, cursor, batch_size])
@@ -661,8 +668,24 @@ def campaign_export(cid: int):
                     if values:
                         sections.append(title + ": " + json.dumps(values, ensure_ascii=False))
                 report_text = "\n".join(str(s) for s in sections if s)[:32000]
-            ws.append([row.get("name"), row.get("phone"), row.get("email"), row.get("company"), row.get("language"), row.get("status"), call.get("status", "not called"), call.get("outcome"), call.get("sentiment"), call.get("summary"), "; ".join(db.jload(call.get("key_points"), [])), call.get("follow_up"), call.get("attempt", 0), call.get("ended_at") or call.get("created_at"), report_text])
+            when = call.get("ended_at") or call.get("created_at")
+            yield [row.get("name"), row.get("phone"), row.get("email"), row.get("company"), row.get("language"), row.get("status"), call.get("status", "not called"), call.get("outcome"),
+                   call.get("sentiment"), call.get("summary"), "; ".join(db.jload(call.get("key_points"), [])), call.get("follow_up"), call.get("attempt", 0),
+                   schedule.local(when).strftime("%Y-%m-%d %H:%M") if when else "", report_text]
         cursor = ids[-1]
+
+
+@app.get("/api/campaigns/{cid}/export.xlsx")
+def campaign_export(cid: int):
+    from pathlib import Path
+    import tempfile
+    from openpyxl import Workbook
+    where, args = _campaign_audience(cid)
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("Call results")
+    ws.append(CAMPAIGN_RESULT_HEADER)
+    for row in _campaign_result_rows(cid, where, args):
+        ws.append([tabular.xlsx_value(ws, c) for c in row])
     ws.freeze_panes = "A2"
     for col, width in {"A": 24, "B": 18, "C": 28, "D": 24, "F": 16, "G": 16, "H": 22, "J": 55, "K": 40, "L": 22}.items():
         ws.column_dimensions[col].width = width
@@ -680,6 +703,15 @@ def campaign_export(cid: int):
     return StreamingResponse(chunks(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition": f'attachment; filename="campaign-{cid}-results.xlsx"'},
                              background=BackgroundTask(Path(temp_name).unlink, missing_ok=True))
+
+
+@app.get("/api/campaigns/{cid}/export.csv")
+def campaign_export_csv(cid: int):
+    """The same call results as a CSV that opens correctly in Excel (UTF-8 with a BOM), streamed so a big campaign never sits in memory."""
+    where, args = _campaign_audience(cid)
+
+    return StreamingResponse(tabular.csv_stream(CAMPAIGN_RESULT_HEADER, _campaign_result_rows(cid, where, args)), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="campaign-{cid}-results.csv"'})
 
 
 @app.post("/api/campaigns/{cid}/start")
@@ -1465,7 +1497,7 @@ async def kb_add_doc(kid: int, d: KBDoc):
 async def kb_upload(kid: int, files: List[UploadFile] = File(...)):
     done = []
     for f in files:
-        text = knowledge.extract_text(f.filename, await read_limited(f, 15, (".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx"))).strip()
+        text = knowledge.extract_text(f.filename, await read_limited(f, 15, (".txt", ".md", ".csv", ".tsv", ".tab", ".pdf", ".docx", ".xlsx"))).strip()
         if not text:
             continue
         n = await knowledge.ingest(kid, f.filename.rsplit(".", 1)[0], text, f.filename)

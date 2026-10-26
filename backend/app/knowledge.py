@@ -321,6 +321,13 @@ def extract_text(filename, data: bytes):
     if name.endswith(".pdf"):
         from pypdf import PdfReader
         return "\n\n".join((p.extract_text() or "") for p in PdfReader(io.BytesIO(data)).pages[:300])
+    if name.endswith((".csv", ".tsv", ".tab")):
+        from . import tabular
+        try:
+            t = tabular.read_table(name, data, max_rows=200_000, max_cols=200, overflow="cut", cell_len=0)
+        except tabular.TableError:
+            return data.decode("utf-8", errors="replace")
+        return "\n".join(" | ".join(r) for r in [t.columns, *t.rows] if any(c.strip() for c in r))
     if name.endswith((".xlsx", ".xls")):
         from openpyxl import load_workbook
         wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)

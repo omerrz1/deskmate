@@ -9,6 +9,8 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 
+from . import countries
+
 MAX_ROWS = 50_000
 MAX_COLS = 40
 HEADER_LEN = 80
@@ -18,6 +20,8 @@ EXAMPLES = 3
 EMAIL_RE = re.compile(r"^[^@\s,;<>()\[\]]+@[^@\s,;<>()\[\]]+\.[A-Za-z]{2,}$")
 E164_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 YES_NO = {"yes", "no", "y", "n", "true", "false", "1", "0"}
+_MOJIBAKE = re.compile("Ã[\u0080-\u00bf]|â€")
+SCIENTIFIC = re.compile(r"^[+-]?\d\.\d{2,}[eE]\+(?:9|1[0-5])$")     # 4.47447E+11: a long number Excel shortened, whose real digits are gone
 
 
 # ---------- text ----------
@@ -40,8 +44,13 @@ def fold(v):
     return re.sub(r"[^\w]+", " ", "".join(c for c in t if not unicodedata.combining(c)).casefold()).strip()
 
 
+def whole(v):
+    """A number a spreadsheet or pandas wrote as 447447781753.0 is 447447781753."""
+    return re.sub(r"(?<=\d)\.0+$", "", clean_text(v))
+
+
 def key_phone(v):
-    d = digits(v)
+    d = digits(whole(v))
     return d[-9:] if len(d) >= 9 else ""
 
 
@@ -164,10 +173,13 @@ def fmt_number(x):
 
 
 def norm_phone(v, code=""):
-    """-> (E.164 number or '', why not). 07447 781753 with code '44' -> +447447781753. Never guesses a country: no code and a local-style number is a 'why not'."""
-    raw = clean_text(v)
+    """-> (E.164 number or '', why not). 07447 781753 with code '44' -> +447447781753. Never guesses a country: no code and a local-style number is a 'why not'.
+    A number that already carries its own country code keeps it (92 300 1234567 is +923001234567, never +4492…), and +44 92 300 1234567, the company's code put in front of one, is put right."""
+    raw = whole(v)
     if not raw:
         return "", ""
+    if SCIENTIFIC.match(raw):
+        return "", "Excel shortened it to scientific notation and the real digits are gone: ask for a fresh export"
     raw = re.sub(r"(?i)\s*(?:ext\.?|extension|x)\s*\d+$", "", raw)
     if re.search(r"[A-Za-z]{2,}", raw):
         return "", "it has letters in it"
@@ -190,12 +202,25 @@ def norm_phone(v, code=""):
         full = code + n[1:]
     elif code and n.startswith(code) and len(n) >= 11:
         full = n
+    elif countries.international(n):
+        full = n                                              # 92 300 1234567 is Pakistani: giving it the company's +44 makes a number nobody has
     elif code:
         if len(n) < 7:
             return "", "too short to be a phone number"      # 12345 must not become +4412345, which looks real and would be dialed
         full = code + n
     else:
         full = n
+    cc = countries.split_code(full)
+    top = countries.MAX_NATIONAL.get(cc)
+    if top and len(full) - len(cc) > top:
+        rest = full[len(cc):]
+        other = countries.split_code(rest)
+        whole_number = other in countries.MAX_NATIONAL and 7 <= len(rest) - len(other) <= countries.MAX_NATIONAL[other]
+        if cc == code and whole_number:
+            full = rest                                       # the company's code was put in front of a number that already had its own (+44 92 300…): a whole number of another country
+        else:
+            return "", (f"too long for a +{cc} number: {len(full) - len(cc)} digits after the code, and the most is {top}"
+                        + (f". It looks like +{rest} with +{cc} stuck in front: clean with country_code={cc} to repair it" if whole_number else ""))
     out = "+" + full
     if not E164_RE.match(out):
         return "", f"{'too short' if len(full) < 7 else 'too long' if len(full) > 15 else 'not a valid number'}"
@@ -771,25 +796,48 @@ def profile(cols, rows, code="", max_group=10):
         header_issues.append("two columns have the same header (the second is renamed with (2) when you clean)")
     if any(not clean_text(c) for c in cols):
         header_issues.append("a column has no header")
+    sample = rows[:20000]
+    garbled = sum(1 for r in sample for c in r if "\ufffd" in c)
+    mojibake = sum(1 for r in sample for c in r if _MOJIBAKE.search(c))
+    if garbled:
+        header_issues.append(f"{garbled} cell(s) contain � : the file was probably read with the wrong text encoding. Read it again with create_spreadsheet(from_file=…, encoding='windows-1252') "
+                             "(windows-1255 for Hebrew, windows-1256 for Arabic)")
+    if mojibake:
+        header_issues.append(f"{mojibake} cell(s) look like UTF-8 text read as Windows-1252 (Ã©, â€™). Read the file again with create_spreadsheet(from_file=…, encoding='utf-8')")
+    if len(cols) == 1 and n:
+        for sep, name in ((";", "semicolons"), ("\t", "tabs"), ("|", "pipes")):
+            if sum(1 for r in sample if r[0].count(sep) >= 2) >= 0.6 * len(sample):
+                header_issues.append(f"everything is in one column and its values are separated by {name}: the file was read with the wrong separator. "
+                                     f"Read it again with create_spreadsheet(from_file=…, delimiter='{ {';': 'semicolon', chr(9): 'tab', '|': 'pipe'}[sep] }')")
+                break
     whitespace_total = 0
     for ci, h in enumerate(cols):
         ty, role = types[ci]
         raw = [row[ci] for row in rows]
         filled = [v for v in raw if clean_text(v)]
         info = {"column": h, "type": ty, "role": role, "filled": len(filled), "blank": n - len(filled), "unique": len({fold(v) for v in filled}), "problems": []}
+        sci = sum(1 for v in filled if SCIENTIFIC.match(clean_text(v)))
+        if sci:
+            info["problems"].append(f"{sci} value(s) look like 4.47E+11: Excel shortened those long numbers when the file was saved and the real digits are gone (ask for a fresh export; do not dial them)")
         ws = sum(1 for v in filled if v != v.strip() or "  " in v or " " in v or "\n" in v or "\t" in v)
         if ws:
             info["problems"].append(f"{ws} cell(s) have extra spaces or hidden characters")
             whitespace_total += ws
         if ty == "phone":
             bad = [(v, norm_phone(v, code)) for v in filled]
-            invalid = [v for v, (p, why) in bad if why]
+            invalid = [(v, why) for v, (p, why) in bad if why]
             local = sum(1 for v, (p, why) in bad if not why and p != clean_text(v))
+            code_d = digits(code)
+            doubled = [v for v, (p, why) in bad if not why and code_d and clean_text(v).startswith("+" + code_d) and not p.startswith("+" + code_d)]
+            if doubled:
+                info["problems"].append(f"{len(doubled)} number(s) have +{code_d} in front of another country's number, for example {doubled[0]}: "
+                                        f"they cannot be dialled as they are, and sheet_clean's phone step puts them right")
+            if local - len(doubled) > 0:
+                info["problems"].append(f"{local - len(doubled)} number(s) are not written in the international +CC form")
             if local:
-                info["problems"].append(f"{local} number(s) are not written in the international +CC form")
-                suggestions.append({"op": "phone", "column": h, "why": "write every number as +countrycode…"})
+                suggestions.append({"op": "phone", "column": h, "why": "write every number as +countrycode…" + (f" and repair {len(doubled)} that have +{code_d} in front of another country's number" if doubled else "")})
             if invalid:
-                info["problems"].append(f"{len(invalid)} number(s) cannot be made valid, for example {', '.join(map(str, invalid[:3]))}")
+                info["problems"].append(f"{len(invalid)} number(s) cannot be made valid, for example " + "; ".join(f"{v} ({why})" for v, why in invalid[:3]))
         elif ty == "email":
             invalid = [v for v in filled if not key_email(v)]
             upper = sum(1 for v in filled if v != v.lower() and key_email(v))

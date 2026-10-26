@@ -15,11 +15,11 @@ class Browser:
         self.cookies = {}
         self.ip = f"10.{next(_ips) // 250}.{next(_ips) % 250}.7"  # every browser has its own address, so the sign-up and sign-in limits do not trip the tests
 
-    async def request(self, method, path, body=None, *, query="", headers=None):
-        raw = json.dumps(body).encode() if body is not None else b""
+    async def request(self, method, path, body=None, *, query="", headers=None, raw=None, content_type="application/json"):
+        raw = raw if raw is not None else (json.dumps(body).encode() if body is not None else b"")
         hdrs = [(b"host", b"test")] + [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
-        if body is not None:
-            hdrs += [(b"content-type", b"application/json"), (b"content-length", str(len(raw)).encode())]
+        if body is not None or raw:
+            hdrs += [(b"content-type", content_type.encode()), (b"content-length", str(len(raw)).encode())]
         if self.cookies:
             hdrs.append((b"cookie", "; ".join(f"{k}={v}" for k, v in self.cookies.items()).encode()))
         if method not in ("GET", "HEAD", "OPTIONS") and "deskmates_csrf" in self.cookies:
@@ -47,12 +47,21 @@ class Browser:
                         self.cookies[name] = morsel.value
                     elif morsel["max-age"] == "0":
                         self.cookies.pop(name, None)
+        self.last_headers = {k.decode().lower(): v.decode("latin-1") for k, v in start["headers"]}
         ctype = dict(start["headers"]).get(b"content-type", b"").decode()
         try:
             parsed = json.loads(data) if "json" in ctype and data else data
         except ValueError:
             parsed = data
         return start["status"], parsed
+
+    def upload(self, path, filename, content, fields=None, **kw):
+        """POST a file as a browser's multipart form would."""
+        boundary = "----deskmatestest"
+        parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode() for k, v in (fields or {}).items()]
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode() + content + b"\r\n")
+        parts.append(f"--{boundary}--\r\n".encode())
+        return self.request("POST", path, raw=b"".join(parts), content_type=f"multipart/form-data; boundary={boundary}", **kw)
 
     def get(self, path, **kw):
         return self.request("GET", path, **kw)

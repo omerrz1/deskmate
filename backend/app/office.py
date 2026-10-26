@@ -691,7 +691,7 @@ def init():
         "ALTER TABLE duties ADD COLUMN start_ts REAL", "ALTER TABLE duties ADD COLUMN attempts INTEGER DEFAULT 0",
         "ALTER TABLE duties ADD COLUMN stage TEXT DEFAULT ''", "ALTER TABLE duties ADD COLUMN plan TEXT DEFAULT ''", "ALTER TABLE duties ADD COLUMN plan_doc_id INTEGER", "ALTER TABLE duties ADD COLUMN next_at REAL",
         "ALTER TABLE duties ADD COLUMN fast INTEGER DEFAULT 0", "ALTER TABLE duties ADD COLUMN step_log TEXT DEFAULT '[]'", "ALTER TABLE emails ADD COLUMN attachments TEXT DEFAULT '[]'",
-        "ALTER TABLE documents ADD COLUMN folder_id INTEGER", "ALTER TABLE documents ADD COLUMN file_path TEXT DEFAULT ''", "ALTER TABLE documents ADD COLUMN mime TEXT DEFAULT ''",
+        "ALTER TABLE documents ADD COLUMN folder_id INTEGER", "ALTER TABLE documents ADD COLUMN file_path TEXT DEFAULT ''", "ALTER TABLE documents ADD COLUMN mime TEXT DEFAULT ''", "ALTER TABLE documents ADD COLUMN meta TEXT DEFAULT ''",
         "ALTER TABLE folders ADD COLUMN purpose TEXT DEFAULT ''",
     ):
         try:

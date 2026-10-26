@@ -30,8 +30,9 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"id": _I}, "required": ["id"]}},
     {"name": "make_chart", "description": "Draw a chart (bar, line or pie) from two columns of a spreadsheet and file it as an image in your files.",
      "parameters": {"type": "object", "properties": {"id": _I, "kind": {**_S, "enum": ["bar", "line", "pie"]}, "x": {**_S, "description": "label column"}, "y": {**_S, "description": "numbers column"}, "title": _S}, "required": ["id", "kind", "x", "y"]}},
-    {"name": "export_document", "description": "Turn a document into a file to send or keep: docx, pdf or html (documents), or xlsx, csv (spreadsheets). The new file appears in the same folder.",
-     "parameters": {"type": "object", "properties": {"id": _I, "format": {**_S, "enum": ["docx", "pdf", "html", "xlsx", "csv"]}}, "required": ["id", "format"]}},
+    {"name": "export_document", "description": "Turn a document into a file to send or keep: docx, pdf or html (documents), or xlsx, csv, tsv (spreadsheets). A CSV opens correctly in Excel (Hebrew, Arabic and £ included) and keeps the separator the sheet came with. "
+     "The new file appears in the same folder, and in a live team chat the admin gets it as a download button. Sheets already download as CSV or Excel from Files, so this is for a file you want to email or keep.",
+     "parameters": {"type": "object", "properties": {"id": _I, "format": {**_S, "enum": ["docx", "pdf", "html", "xlsx", "csv", "tsv"]}}, "required": ["id", "format"]}},
 ]
 NAMES = {t["name"] for t in TOOLS}
 
@@ -190,6 +191,10 @@ def _pdf(title, text):
     return bytes(pdf.output())
 
 
+def _base(title):
+    return re.sub(r"\.(csv|tsv|tab|xlsx|xlsm|xls)$", "", str(title), flags=re.I)
+
+
 def _save_file(agent, d, ext, mime, data):
     name = f"{uuid.uuid4().hex}.{ext}"
     path = file_dir() / name
@@ -199,7 +204,7 @@ def _save_file(agent, d, ext, mime, data):
     except OSError:
         pass
     did = db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,file_path,mime,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                 (d["agent_id"] if agent is None or d["agent_id"] == (agent or {}).get("id") else (agent or {}).get("id", 0), f"{d['title']}.{ext}", "file", "", d["folder_id"], name, mime, db.now(), db.now()))
+                 (d["agent_id"] if agent is None or d["agent_id"] == (agent or {}).get("id") else (agent or {}).get("id", 0), f"{_base(d['title']) if d['kind'] == 'sheet' else d['title']}.{ext}", "file", "", d["folder_id"], name, mime, db.now(), db.now()))
     return did
 
 
@@ -212,18 +217,11 @@ async def run_tool(agent, name, a):
     if name == "export_document":
         fmt = a.get("format")
         if d["kind"] == "sheet":
-            cols, rows = _table(d)
-            if fmt == "csv":
-                buf = io.StringIO(); w = csv.writer(buf); w.writerow(cols); w.writerows(rows)
-                return {"file_id": _save_file(agent, d, "csv", "text/csv", buf.getvalue().encode("utf-8"))}, "/settings/files"
-            if fmt == "xlsx":
-                from openpyxl import Workbook
-                wb = Workbook(); ws = wb.active; ws.append(cols)
-                for r in rows:
-                    ws.append(r)
-                b = io.BytesIO(); wb.save(b)
-                return {"file_id": _save_file(agent, d, "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", b.getvalue())}, "/settings/files"
-            return {"error": "Spreadsheets can be exported as xlsx or csv."}, None
+            if str(fmt).lower() not in ("csv", "tsv", "xlsx"):
+                return {"error": "Spreadsheets can be exported as xlsx, csv or tsv."}, None
+            name, mime, data = files.sheet_download(d, str(fmt).lower())
+            did = _save_file(agent, d, name.rsplit(".", 1)[1], mime, data)
+            return {"file_id": did, "file": f"{_base(d['title'])}.{name.rsplit('.', 1)[1]}", **files.delivery(agent, did)}, "/settings/files"
         text = d["body"]
         if fmt == "docx":
             return {"file_id": _save_file(agent, d, "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", _docx(d["title"], text))}, "/settings/files"

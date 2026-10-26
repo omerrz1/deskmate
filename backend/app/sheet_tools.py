@@ -12,7 +12,7 @@ import json
 import math
 import time
 
-from . import costs, db, files, llm
+from . import costs, db, files, llm, tabular
 from . import sheet_ops as ops
 from .files import _FOLDER, _PROJECT, _S, _SHARED
 
@@ -90,18 +90,29 @@ MASTER_SKILL = (
     "Never say 'done' without the numbers. "
     "(9) WHEN BLOCKED, do not stop: read the profile again, try another key or another tool, split the work, or save a partial result and say what is left. Ask the admin only for a decision that is theirs "
     "(which sheet wins when two disagree, whether to delete). "
-    "(10) KEEP GOING: after a long job, look at the sheet again to confirm the numbers and fix what failed, and carry on until the whole sheet is done. The cleaned sheet can be used straight away for calls (sheet_to_customers).")
+    "(10) KEEP GOING: after a long job, look at the sheet again to confirm the numbers and fix what failed, and carry on until the whole sheet is done. The cleaned sheet can be used straight away for calls (sheet_to_customers). "
+    "(11) CSV, TSV AND EXCEL ARE ONE THING: an uploaded CSV is already a sheet, read with its encoding and separator found (see `source` in sheet_profile). A CSV file that is not a sheet yet (an export, an attachment) opens by name in any sheet tool, "
+    "and pasted CSV text goes to create_spreadsheet(csv=…): never retype a list into rows. If names show � or Ã©, or everything sits in one column, read it again with create_spreadsheet(from_file=…, encoding=… or delimiter=…). "
+    "(12) PHONE NUMBERS ARE FRAGILE: a number that already has its own country code (92 300…, 971 50…) keeps it; the company's code is only for local numbers (07…). sheet_clean's phone step does this, and also puts right "
+    "numbers that wrongly have the company's code in front (+4492300… is +92300…). Numbers Excel turned into 4.47E+11 have lost their digits: say so and never dial them. Never retype a number by hand: a doubled digit makes it someone else's. "
+    "(13) HAND THE RESULT OVER: every sheet you make or change reaches the admin as a download button in the chat (CSV or Excel, the format it came in). Say it is there, with the numbers; do not paste links.")
 
 
 # ---------- finding and saving sheets ----------
 def _find(agent, ref):
-    if isinstance(ref, int) or (isinstance(ref, str) and ref.strip().isdigit()):
-        d, err = files.resolve_document(agent, int(ref), None, "sheet")
-    else:
-        d, err = files.resolve_document(agent, None, str(ref), "sheet")
-    if err:
-        raise ValueError(err)
-    return d
+    """The sheet a title or id names. A CSV, TSV or Excel file that is not a sheet yet (an export, an attachment) is opened as one the first time it is asked for."""
+    by_id = isinstance(ref, int) or (isinstance(ref, str) and ref.strip().isdigit())
+    d, err = files.resolve_document(agent, int(ref) if by_id else None, None if by_id else str(ref), "sheet")
+    if not err:
+        return d
+    other, why = files.resolve_document(agent, int(ref) if by_id else None, None if by_id else str(ref), None)
+    if not why and other["kind"] in ("file", "doc") and (tabular.is_table(other["title"]) or other["kind"] == "doc" and other["title"].lower().endswith((".txt", ".csv"))):
+        try:
+            opened = files.open_as_sheet(agent, {}, other)
+        except tabular.TableError as e:
+            raise ValueError(str(e))
+        return db.q1("SELECT * FROM documents WHERE id=?", (opened["document_id"],))
+    raise ValueError(err)
 
 
 def _which(agent, a):
@@ -125,11 +136,7 @@ def _code():
         return ""
 
 
-def _unique_title(title):
-    base, n = title[:150], 1
-    while db.q1("SELECT 1 FROM documents WHERE lower(title)=lower(?)", (base if n == 1 else f"{base} ({n})",)):
-        n += 1
-    return base if n == 1 else f"{base} ({n})"
+_unique_title = files.unique_title
 
 
 def _body(cols, rows):
@@ -137,23 +144,33 @@ def _body(cols, rows):
     return json.dumps({"columns": cols, "rows": [[ops.s(c)[:ops.CELL_LEN] for c in r[:ops.MAX_COLS]] for r in rows]}, ensure_ascii=False)
 
 
-def _save_new(agent, a, title, cols, rows):
+def _origin(*docs):
+    """What a result sheet is remembered as, so it downloads the way it came: CSV (with its separator) if what it was made from was CSV, Excel if it was Excel or a mixture."""
+    metas = [m for m in (files.sheet_meta(d) for d in docs) if m.get("format")]
+    formats = {m["format"] for m in metas}
+    if len(formats) == 1:
+        return {k: metas[0][k] for k in ("format", "delimiter") if metas[0].get(k)}
+    return {"format": "xlsx"} if formats else {}
+
+
+def _save_new(agent, a, title, cols, rows, origin=None):
     if len(rows) > ops.MAX_ROWS:
         raise ValueError(f"That would be {len(rows)} rows and a sheet holds at most {ops.MAX_ROWS}.")
     owner = files.resolve_owner(agent, a)
     fid = files.folder_id(owner, a.get("folder") or "Spreadsheets")
     title = _unique_title(title)
-    did = db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (owner, title, "sheet", _body(cols, rows), fid, db.now(), db.now()))
-    return {"id": did, "title": title, "saved_in": files.path_of(fid)}
+    did = db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,meta,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                 (owner, title, "sheet", _body(cols, rows), fid, json.dumps(origin or {}), db.now(), db.now()))
+    return {"id": did, "title": title, "saved_in": files.path_of(fid), **files.delivery(agent, did)}
 
 
 def _save_in_place(agent, d, cols, rows, why):
     if files._protected(agent, d):
         raise ValueError("The Company details document can only be edited by the admin or a manager.")
     backup = _unique_title(f"{d['title']} (backup before {why} {time.strftime('%Y-%m-%d %H:%M')})")
-    db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (d["agent_id"], backup, "sheet", d["body"], d["folder_id"], db.now(), db.now()))
+    db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,meta,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (d["agent_id"], backup, "sheet", d["body"], d["folder_id"], json.dumps(_origin(d)), db.now(), db.now()))
     db.update("documents", d["id"], body=_body(cols, rows), updated_at=db.now())
-    return {"id": d["id"], "title": d["title"], "backup": backup}
+    return {"id": d["id"], "title": d["title"], "backup": backup, **files.delivery(agent, d["id"])}
 
 
 def _preview(cols, rows, n=5):
@@ -165,7 +182,16 @@ def sheet_profile(agent, a):
     d = _which(agent, a)
     cols, rows = _table(d)
     out = ops.profile(cols, rows, _code())
-    return {"sheet": d["title"], "id": d["id"], **out, "next": "Tell the admin what you found in one or two lines. Fix it with sheet_clean (use suggested_operations)."}
+    meta = files.sheet_meta(d)
+    source = {"read_from": meta["filename"]} if meta.get("filename") else {}
+    if meta.get("read_as"):
+        source["read_as"] = meta["read_as"]
+    if meta.get("notes"):
+        source["fixed_on_the_way_in"] = meta["notes"]
+    if meta.get("warnings"):
+        source["check_these"] = meta["warnings"]
+    return {"sheet": d["title"], "id": d["id"], **({"source": source} if source else {}), **out,
+            "next": "Tell the admin what you found in one or two lines. Fix it with sheet_clean (use suggested_operations). Anything under source.check_these or header_problems goes in your report."}
 
 
 def sheet_clean(agent, a):
@@ -190,7 +216,7 @@ def sheet_clean(agent, a):
     if a.get("in_place"):
         out["saved_as"] = _save_in_place(agent, d, new_cols, new_rows, "clean")
     else:
-        out["saved_as"] = _save_new(agent, a, a.get("output_title") or f"{d['title']} (clean)", new_cols, new_rows)
+        out["saved_as"] = _save_new(agent, a, a.get("output_title") or f"{d['title']} (clean)", new_cols, new_rows, _origin(d))
     out["next"] = ("Report to the admin: rows before/after, what each step changed (with an example), the rows left in 'Needs checking', and the name of the sheet. "
                    "Open it with sheet_query to confirm.")
     return out
@@ -208,7 +234,7 @@ def sheet_merge(agent, a):
     out = {"left": left["title"], "right": right["title"], **report}
     if a.get("dry_run"):
         return {**out, "saved": False, "preview": _preview(cols, rows), "next": "Nothing was saved. Check the column mapping and the conflicts, then run again without dry_run."}
-    out["saved_as"] = _save_new(agent, a, a.get("output_title") or f"{left['title']} + {right['title']}", cols, rows)
+    out["saved_as"] = _save_new(agent, a, a.get("output_title") or f"{left['title']} + {right['title']}", cols, rows, _origin(left, right))
     out["next"] = ("Report to the admin: rows in each sheet and in the result, how many people were in both, the conflicts (and which sheet won), the columns added, and the sheet's name. "
                    "If rows were not matched, say how many. Run sheet_profile on the result to check it.")
     return out
@@ -231,7 +257,7 @@ def sheet_query(agent, a):
             idx = [i for i in reversed(idx) if ops.clean_text(rows[i][ci])] + [i for i in idx if not ops.clean_text(rows[i][ci])]
     pick = [ops.resolve_col(cols, c, types) for c in (a.get("columns") or [])] or list(range(len(cols)))
     if a.get("save_as"):
-        out["saved_as"] = _save_new(agent, a, a["save_as"], [cols[i] for i in pick], [[rows[i][c] for c in pick] for i in idx])
+        out["saved_as"] = _save_new(agent, a, a["save_as"], [cols[i] for i in pick], [[rows[i][c] for c in pick] for i in idx], _origin(d))
     limit = max(1, min(100, int(a.get("limit") or 25)))
     out["columns"] = [cols[i] for i in pick]
     out["rows"] = [[ops.clean_text(rows[i][c])[:80] for c in pick] for i in idx[:limit]]
@@ -441,6 +467,9 @@ def _announce(job, examples):
         else:
             text = (f"The row-by-row job on '{job['title']}' stopped after {job['done']} row(s): {job['last_error'] or 'an error'}. "
                     "The rows it filled are saved. Say 'continue' and I will carry on from where it stopped.")
+        doc = db.q1("SELECT * FROM documents WHERE id=?", (job["doc_id"],))
+        if doc and job["status"] == "done" and job["done"]:
+            files.deliver_to_chat({"id": job["agent_id"], "_meeting_id": job["meeting_id"]}, doc)   # the file first, so the words about it are the last thing in the chat
         agents.log_line(job["meeting_id"], "agent", job["agent_id"], text)
     except Exception:
         pass

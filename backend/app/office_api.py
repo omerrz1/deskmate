@@ -7,7 +7,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from . import access, agents, db, files, office, schedule, voices
+from . import access, agents, db, files, office, schedule, tabular, voices
 
 router = APIRouter(prefix="/api")
 
@@ -404,26 +404,20 @@ async def fs_upload(request: Request, owner: str = Form("shared"), folder_id: Op
     low = name.lower()
     o = _drive(request, owner)
     _folder_in(o, folder_id)
-    kind, body = "doc", ""
+    kind, body, meta, table = "doc", "", "", None
     try:
-        if low.endswith((".xlsx", ".xls", ".csv")):
-            import csv
-            if low.endswith(".csv"):
-                rows = list(csv.reader(io.StringIO(data.decode("utf-8", errors="replace"))))
-            else:
-                from openpyxl import load_workbook
-                ws = load_workbook(io.BytesIO(data), read_only=True, data_only=True).worksheets[0]
-                rows = [["" if c is None else str(c) for c in r] for r in ws.iter_rows(values_only=True)]
-            rows = [r for r in rows if any(str(c).strip() for c in r)]
-            if len(rows) > 50001:
-                raise HTTPException(413, "Split sheets larger than 50,000 data rows into separate files.")
-            kind, body = "sheet", json.dumps({"columns": [str(c)[:80] for c in (rows[0] if rows else [])][:40], "rows": [[str(c)[:500] for c in r[:40]] for r in rows[1:]]}, ensure_ascii=False)
+        if tabular.is_table(low):
+            table = tabular.read_table(name, data)           # CSV, TSV and Excel alike: encoding, separator, title lines and duplicate headings are dealt with here
+            kind, body = "sheet", table.body()
+            meta = json.dumps(table.meta(name, body_sha=tabular.sha(body)), ensure_ascii=False)
         elif low.endswith((".pdf", ".docx", ".txt", ".md", ".json")):
             body = knowledge.extract_text(name, data)
         else:
-            raise HTTPException(400, "Upload a Word document, PDF, text, markdown, CSV or Excel file")
+            raise HTTPException(400, "Upload a Word document, PDF, text, markdown, CSV, TSV or Excel file")
     except HTTPException:
         raise
+    except tabular.TableError as e:
+        raise HTTPException(e.status, str(e))
     except Exception:
         raise HTTPException(400, "I couldn't read that file")
     from pathlib import Path
@@ -437,8 +431,9 @@ async def fs_upload(request: Request, owner: str = Form("shared"), folder_id: Op
         stored_path.chmod(0o600)
     except OSError:
         pass
-    did = db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,file_path,mime,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (o, name[:160], kind, body, folder_id, stored_name, file.content_type or "application/octet-stream", db.now(), db.now()))
-    return {"id": did}
+    did = db.run("INSERT INTO documents(agent_id,title,kind,body,folder_id,file_path,mime,meta,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                 (o, name[:160], kind, body, folder_id, stored_name, file.content_type or "application/octet-stream", meta, db.now(), db.now()))
+    return {"id": did, "kind": kind, **({"summary": table.describe(), "notes": table.notes, "warnings": table.warnings} if table else {})}
 
 
 @router.put("/docs/{did}/table")
@@ -486,6 +481,8 @@ def docs(request: Request, q: str = ""):
 def doc_get(did: int, request: Request):
     _doc_row(request, did)
     r = dict(db.q1("SELECT d.*, g.name author FROM documents d LEFT JOIN agents g ON g.id=d.agent_id WHERE d.id=?", (did,)))
+    r["source"] = files.sheet_meta(r) if r["kind"] == "sheet" else {}
+    r.pop("meta", None)
     if r["kind"] == "sheet":
         r["table"] = json.loads(r["body"] or "{}")
     return r
@@ -543,13 +540,16 @@ def doc_delete(did: int, request: Request):
 
 
 @router.get("/docs/{did}/download")
-def doc_download(did: int, request: Request):
+def doc_download(did: int, request: Request, format: str = ""):
+    """Download a file. A sheet comes out as its current data in the format it came in; ?format=csv, tsv or xlsx chooses."""
     r = _doc_row(request, did)
+    if format and format.lower() not in files.SHEET_FORMATS:
+        raise HTTPException(400, "format must be csv, tsv or xlsx")
     try:
-        name, mime, data = files.download_parts(r)
+        name, mime, data = files.download_parts(r, fmt=format.lower() or None)
     except FileNotFoundError:
         raise HTTPException(404, "The file is missing")
-    return Response(data, media_type=mime, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    return Response(data, media_type=mime, headers={"Content-Disposition": files.content_disposition(name)})
 
 
 # ---------- calendar ----------

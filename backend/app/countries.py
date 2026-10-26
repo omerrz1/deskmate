@@ -34,6 +34,23 @@ def normalise(phone):
     return p
 
 
+MAX_NATIONAL = {"44": 10, "1": 10, "91": 10, "92": 10, "880": 10, "971": 9, "966": 9, "972": 9, "353": 9, "61": 9, "33": 9, "34": 9, "31": 9, "48": 9, "90": 10, "234": 10, "254": 9, "20": 10,
+                "962": 9, "965": 8, "974": 8, "968": 8, "973": 8}   # the most digits after the code, for countries where it is fixed; used to tell a real number from one with a code stuck on
+
+
+def split_code(digits):
+    """The calling code a run of digits starts with ('923001234567' -> '92'), or ''."""
+    d = "".join(ch for ch in str(digits or "") if ch.isdigit())
+    return next((pre for pre in _PREFIXES if d.startswith(pre)), "")
+
+
+def international(digits):
+    """True for a number written without + or 00 that already starts with a country code we know (923001234567 is Pakistani, 971501234567 is Emirati).
+    A local number is at most 10 digits (7447 781753), so 11 or more that begin with a calling code are international and must not be given the company's own code."""
+    d = "".join(ch for ch in str(digits or "") if ch.isdigit())
+    return 11 <= len(d) <= 15 and bool(split_code(d))
+
+
 def lookup(phone):
     """-> dict(code, iso, country, language, sure) or None for numbers without a recognisable international prefix."""
     p = normalise(phone)

@@ -6,7 +6,7 @@ import time
 
 from harness import RunContext
 
-from . import addressing, apps, costs, discuss, learning, live_help, capabilities, crm, db, files, llm, office, runtime, sheet_tools, team, voices  # live_help: importing it creates the live_questions table
+from . import addressing, apps, costs, discuss, learning, live_help, capabilities, crm, db, files, llm, office, runtime, sheet_tools, tabular, team, voices  # live_help: importing it creates the live_questions table
 from .runtime.policies import meeting_gate  # noqa: F401  main.py's live-meeting tool endpoint calls agents.meeting_gate
 
 for stmt in (
@@ -343,11 +343,20 @@ async def refine_call_args(args, text):
     return out
 
 
+def _file_hint(f):
+    """What an employee is told about a file the admin shared in the chat."""
+    if f.get("kind") == "sheet":
+        return "it is a spreadsheet: look at it with sheet_profile, then work on it with sheet_clean, sheet_merge, sheet_query or sheet_job"
+    if tabular.is_table(f.get("title")):
+        return "it is a CSV or Excel file: name it in sheet_profile and it opens as a spreadsheet, then work on it with sheet_clean, sheet_merge, sheet_query or sheet_job"
+    return "use read_document to inspect it"
+
+
 def _chat_history(mid, ag):
     """The last 30 lines of a chat as this employee sees them."""
     hist = []
     for r in db.q("SELECT role,agent_id,text,attachments FROM meeting_msgs WHERE meeting_id=? ORDER BY id DESC LIMIT 30", (mid,))[::-1]:
-        files_note = "\n".join(f"[File shared in chat: {f.get('title', 'file')} (document id {(f.get('agent_copies') or {}).get(str(ag['id']), f.get('doc_id'))}); {'it is a spreadsheet: look at it with sheet_profile, then work on it with sheet_clean, sheet_merge, sheet_query or sheet_job' if f.get('kind') == 'sheet' else 'use read_document to inspect it'}.]" for f in db.jload(r.get("attachments"), []))
+        files_note = "\n".join(f"[File shared in chat: {f.get('title', 'file')} (document id {(f.get('agent_copies') or {}).get(str(ag['id']), f.get('doc_id'))}); {_file_hint(f)}.]" for f in db.jload(r.get("attachments"), []))
         if r["role"] == "admin":
             hist.append({"role": "user", "content": (r["text"] or "") + ("\n" if r["text"] and files_note else "") + files_note or "[The admin shared a file in this chat.]"})
         elif r["agent_id"] == ag["id"]:

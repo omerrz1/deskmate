@@ -17,6 +17,30 @@ export async function apiFetch(url, init = {}) {
   return r
 }
 
+/** The file name in a Content-Disposition header (the server knows the real format: .csv, .xlsx...), including Hebrew and Arabic names. */
+export function fileNameFrom(header) {
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(header || '')
+  if (star) { try { return decodeURIComponent(star[1]) } catch { /* use the plain name */ } }
+  const plain = /filename="?([^";]+)"?/i.exec(header || '')
+  return plain ? plain[1] : ''
+}
+
+/** Download a file from the server under the name the server gives it. A failed request is an error message, never a "file" with the error text inside. */
+export async function downloadFile(url, fallbackName = 'download') {
+  const r = await apiFetch(url)
+  if (!r.ok) {
+    let msg = r.statusText
+    try { msg = (await r.json()).detail || msg } catch { /* ignore */ }
+    throw new Error(typeof msg === 'string' && msg ? msg : 'Could not download this file')
+  }
+  const blob = await r.blob()
+  const href = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = href; a.download = fileNameFrom(r.headers.get('Content-Disposition')) || fallbackName
+  document.body.appendChild(a); a.click(); a.remove()
+  setTimeout(() => URL.revokeObjectURL(href), 2000)
+}
+
 async function handle(r) {
   if (!r.ok) {
     let msg = r.statusText

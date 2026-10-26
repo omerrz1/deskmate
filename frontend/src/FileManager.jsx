@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, apiFetch, usePoll } from './api'
+import { api, downloadFile, usePoll } from './api'
 import Icon from './Icon'
 import { useConfirm, usePrompt, useToast } from './Feedback'
 import { useAuth } from './Auth'
@@ -126,12 +126,12 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
   const upload = async (list, folder = cur) => {
     for (const f of Array.from(list || [])) {
       const fd = new FormData(); fd.append('owner', place); if (folder) fd.append('folder_id', folder); fd.append('file', f)
-      try { const r = await api.form('/fs/upload', fd); setMsg(`Added ${f.name}.`); await refresh(); pickFile({ id: r.id }) } catch (e) { fail(e) }
+      try { const r = await api.form('/fs/upload', fd); setMsg(r.summary ? `Added ${f.name}: ${r.summary}.` : `Added ${f.name}.`); if (r.warnings?.length) fail({ message: r.warnings[0] }); await refresh(); pickFile({ id: r.id }) } catch (e) { fail(e) }
     }
   }
-  const download = async (d) => {
-    const r = await apiFetch(`/api/docs/${d.id}/download`); const b = await r.blob()
-    const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = d.kind === 'file' ? d.title : `${d.title}.${d.kind === 'sheet' ? 'xlsx' : d.kind === 'chart' ? 'svg' : 'md'}`; a.click()
+  // format: 'csv' | 'xlsx' for a sheet. The name comes from the server, which knows what the file really is (a CSV is never saved as .xlsx).
+  const download = async (d, format) => {
+    try { await downloadFile(`/api/docs/${d.id}/download${format ? `?format=${format}` : ''}`, d.title) } catch (e) { fail(e) }
   }
   const saveTable = async (t) => { setOpen({ ...open, table: t }); try { await api.put(`/docs/${open.id}/table`, t) } catch (e) { fail(e) } }
 
@@ -212,7 +212,7 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
         <button className="btn small" onClick={() => setCreating('doc')}><Icon name="plus" size={13} /> Document</button>
         <button className="btn small" onClick={() => setCreating('sheet')}><Icon name="plus" size={13} /> Sheet</button>
         <button className="btn small" onClick={() => fileInput.current.click()}><Icon name="upload" size={13} /> Upload</button>
-        <input ref={fileInput} type="file" multiple hidden accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.xls,.json" onChange={(e) => { upload(e.target.files); e.target.value = '' }} />
+        <input ref={fileInput} type="file" multiple hidden accept=".pdf,.docx,.txt,.md,.csv,.tsv,.tab,.xlsx,.xls,.json" onChange={(e) => { upload(e.target.files); e.target.value = '' }} />
       </div>
 
       <div className="fx-main">
@@ -232,15 +232,6 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
                 ))}
               </div>
             ))}
-            {places.length > 1 && (
-              <div className="fx-legend" aria-label="What the colours mean">
-                <h5>Colours</h5>
-                {places.some((p) => p.kind === 'agent' || p.kind === 'own') && <><span className="fx-k-admin"><i />Orange: for the admins to read</span><span className="fx-k-from"><i />Teal: what the admins gave them</span></>}
-                {places.some((p) => p.kind === 'person') && <span className="fx-k-person"><i />Green: your own files</span>}
-                {places.some((p) => p.kind === 'shared') && <span className="fx-k-company"><i />Blue: the company drive</span>}
-                {places.some((p) => p.kind === 'project') && <span className="fx-k-project"><i />Purple: a project</span>}
-              </div>
-            )}
           </aside>
         )}
 
@@ -323,6 +314,7 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
                 <div className="actions">
                   {open.kind === 'doc' && <button className="btn solid small" disabled={edit === open.body} onClick={async () => { try { await api.patch(`/docs/${open.id}`, { body: edit }); setOpen({ ...open, body: edit }); setMsg('Saved.'); refresh() } catch (e) { fail(e) } }}>Save</button>}
                   <button className="btn small" onClick={() => download(open)}><Icon name="download" size={13} /> Download</button>
+                  {open.kind === 'sheet' && <><button className="btn small" title="Save as a CSV file" onClick={() => download(open, 'csv')}>CSV</button><button className="btn small" title="Save as an Excel workbook" onClick={() => download(open, 'xlsx')}>Excel</button></>}
                   <button className="btn small" onClick={() => setRenaming({ t: 'd', id: open.id, v: open.title })}>Rename</button>
                   <button className="btn small danger" onClick={() => remove('d', open.id, open.title)}>Delete</button>
                 </div>
@@ -342,6 +334,7 @@ export default function FileManager({ owner = 'shared', title, agentId, fill = f
               {menu.it.t === 'f' && <button onClick={() => { openFolder(menu.it); setMenu(null) }}>Open</button>}
               {!menu.it.purpose && <button onClick={() => { setRenaming({ t: menu.it.t, id: menu.it.id, v: menu.it.name }); setMenu(null) }}>Rename</button>}
               {menu.it.t === 'd' && <button onClick={() => { download({ id: menu.it.id, title: menu.it.name, kind: menu.it.kind }); setMenu(null) }}>Download</button>}
+              {menu.it.t === 'd' && menu.it.kind === 'sheet' && <><button onClick={() => { download({ id: menu.it.id, title: menu.it.name }, 'csv'); setMenu(null) }}>Download as CSV</button><button onClick={() => { download({ id: menu.it.id, title: menu.it.name }, 'xlsx'); setMenu(null) }}>Download as Excel</button></>}
               {menu.it.t === 'd' && copyTargets.map((p) => <button key={p.owner} onClick={() => { copyTo(menu.it.id, p.owner, p.label); setMenu(null) }}>Copy to {p.label}</button>)}
               {cur && !menu.it.purpose && <button onClick={() => { move({ t: menu.it.t, id: menu.it.id }, byId[cur]?.parent_id ?? null); setMenu(null) }}>Move up a folder</button>}
               {!menu.it.purpose && <button className="bad" onClick={() => { remove(menu.it.t, menu.it.id, menu.it.name); setMenu(null) }}>Delete</button>}

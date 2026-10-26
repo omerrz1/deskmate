@@ -46,7 +46,7 @@ export function Tasks({ team, initialAgent, fixed }) {
       setF({ ...f, title: '', detail: '', due: '', checklist: '', recur: '', run_now: false }); setAdding(false); setMsg(''); reload()
     } catch (e) { setMsg(e.message) }
   }
-  const cols = [['todo', 'To do'], ['plan', 'Planning'], ['doing', 'Executing'], ['done', 'Done']]
+  const cols = [['todo', 'To do'], ['plan', 'Making a plan'], ['doing', 'Working on it'], ['done', 'Done']]
   const colOf = (t) => (t.status === 'doing' ? (t.stage === 'planning' ? 'plan' : 'doing') : t.status)
   return (
     <>

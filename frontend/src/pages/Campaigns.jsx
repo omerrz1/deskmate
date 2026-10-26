@@ -160,6 +160,7 @@ export default function Campaigns() {
                 {c.status === 'active' && <button className="btn small ghost" onClick={() => act(`/campaigns/${c.id}/stop`, 'Campaign stopped.')}>Stop</button>}
                 <button className="btn small ghost" onClick={() => nav(`/calls?campaign=${c.id}`)}>Results</button>
                 <a className="btn small ghost" href={`/api/campaigns/${c.id}/export.xlsx`}>Excel report</a>
+                <a className="btn small ghost" href={`/api/campaigns/${c.id}/export.csv`}>CSV report</a>
                 <button className="link" onClick={async () => { await api.del(`/campaigns/${c.id}`); reload() }}>Delete</button>
               </div>
             </Panel>

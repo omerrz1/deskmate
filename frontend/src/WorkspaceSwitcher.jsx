@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { api, usePoll } from './api'
+import Icon from './Icon'
 
-export default function WorkspaceSwitcher() {
+/** One button that says which workspace you are in. It opens the list of workspaces, where you can switch or create one. `compact` is just the first letter, for the slim side bar. */
+export default function WorkspaceSwitcher({ compact = false }) {
   const [data, reload, loadError] = usePoll('/workspaces', 15000)
   const [open, setOpen] = useState(false)
   const dialog = useRef(null)
@@ -17,9 +19,11 @@ export default function WorkspaceSwitcher() {
   useEffect(() => { const sync = e => { if (e.key === 'workspace-changed') window.location.assign('/') }; window.addEventListener('storage', sync); return () => window.removeEventListener('storage', sync) }, [])
   async function enter(id) { await api.post(`/workspaces/${id}/switch`); localStorage.setItem('workspace-changed', String(Date.now())); window.location.assign('/') }
   const current = data?.workspaces.find(w => w.id === data.current)
+  const label = current?.name || data?.company || 'Company'
   return <div className="workspace-switcher">
-    <button className="workspace-trigger" onClick={() => setOpen(!open)} aria-expanded={!!open}><span><small>WORKSPACE</small><b>{current?.name || data?.company || 'Company'}</b></span><span>Switch ⌄</span></button>
-    <button className="workspace-create" onClick={() => setOpen('create')}>＋ Create workspace</button>
+    {compact
+      ? <button className="ws-btn ws-compact" onClick={() => setOpen(!open)} aria-expanded={!!open} title={`${label}: switch or create a workspace`}><span className="ws-initial">{label.slice(0, 1).toUpperCase()}</span></button>
+      : <button className="ws-btn" onClick={() => setOpen(!open)} aria-expanded={!!open} title="Switch or create a workspace"><span className="ws-initial">{label.slice(0, 1).toUpperCase()}</span><b>{label}</b><Icon name="chevD" size={14} /></button>}
     {open && createPortal(<dialog ref={dialog} className="workspace-panel" aria-labelledby="workspace-title" onCancel={() => setOpen(false)}><button className="workspace-close" onClick={() => setOpen(false)} aria-label="Close workspaces">×</button>
       <h3 id="workspace-title">Your workspaces</h3><p className="muted small">Separate files, AI teammates and projects. Company connections are available in every workspace.</p>
       <button className="workspace-choice" disabled={busy || !data} onClick={() => act(() => enter(data.company_id))}>{data?.company} <small>{data?.current === data?.company_id ? '✓ Current · Company' : 'Company'}</small></button>

@@ -36,7 +36,7 @@ function useChat(id) {
 }
 
 export default function Chats() {
-  useTitle('Chats')
+  useTitle('Customer chats')
   const toast = useToast()
   const [sp, setSp] = useSearchParams()
   const open = Number(sp.get('open')) || 0
@@ -52,10 +52,10 @@ export default function Chats() {
   const none = settings && !Object.values(settings.connected || {}).some((c) => c.connected)
   return (
     <div className="page wide chats-page">
-      <PageHeader title="Chats" sub="Customers who write to you on WhatsApp, Instagram, Messenger, text or Telegram, and the replies your team sends."
-        actions={<><Link className="btn big" to="/settings/chats">Set up</Link>{(settings?.connected?.twilio?.connected || settings?.connected?.whatsapp_cloud?.connected) && <button className="btn solid big" onClick={() => setAdding(true)}><Icon name="plus" size={15} /> New WhatsApp chat</button>}</>} />
+      <PageHeader title="Customer chats" sub="Customers who write to you on WhatsApp, Instagram, Messenger, text or Telegram, and the replies your team sends."
+        actions={<><Link className="btn big" to="/settings/chats">Settings</Link>{(settings?.connected?.twilio?.connected || settings?.connected?.whatsapp_cloud?.connected) && <button className="btn solid big" onClick={() => setAdding(true)}><Icon name="plus" size={15} /> New WhatsApp chat</button>}</>} />
       {none && (
-        <EmptyState title="Connect a messaging app to get started" hint="Connect WhatsApp Business, Instagram, a Facebook Page, Twilio or Telegram, then point it at Deskmates in Settings → Chats. Your employees answer, and you stay in charge of what is sent."
+        <EmptyState title="Connect a messaging app to get started" hint="Connect WhatsApp, Instagram, Messenger, text messages or Telegram. Your team answers your customers, and you stay in charge of what is sent."
           action={<><Link className="btn solid" to="/apps">Connect an app</Link> <Link className="btn" to="/settings/chats">How it works</Link></>} />
       )}
       {!none && (

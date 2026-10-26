@@ -21,7 +21,7 @@ export default function Data() {
   const doImport = async (f, m) => {
     const fd = new FormData(); fd.append('file', f); fd.append('mapping', JSON.stringify(m)); fd.append('name', f.name)
     const r = await api.form('/datasets/import', fd)
-    setMsg(`Added ${r.imported} customers.`); setPrev(null); reload()
+    setMsg(`Added ${r.imported} customers.${r.warnings?.length ? ' ' + r.warnings.join(' ') : ''}`); setPrev(null); reload()
   }
   const pick = async (f) => {
     if (!f) return
@@ -39,14 +39,15 @@ export default function Data() {
       <header className="page-h">
         <h1>Customers</h1>
         <div className="actions">
-          <button className="btn solid" onClick={() => input.current.click()}>Upload Excel</button>
-          <input ref={input} type="file" hidden accept=".xlsx,.xls,.csv" onChange={(e) => pick(e.target.files[0])} />
+          <button className="btn solid" onClick={() => input.current.click()}>Upload Excel or CSV</button>
+          <input ref={input} type="file" hidden accept=".xlsx,.xls,.csv,.tsv,.tab" onChange={(e) => pick(e.target.files[0])} />
         </div>
       </header>
       {msg && <div className="notice" onClick={() => setMsg('')}>{msg}</div>}
 
       {prev && (
         <Panel title="Which columns are which?">
+          {prev.read_as && <p className="muted small">Read as {prev.read_as}.{(prev.notes || []).map((n) => ` ${n}`).join('')}{(prev.warnings || []).map((n) => ` ${n}`).join('')}</p>}
           <div className="map">
             {FIELDS.map((f) => (
               <label key={f}><span>{f}</span>
@@ -64,7 +65,7 @@ export default function Data() {
       )}
 
       {list && list.total === 0 && !search && !language ? (
-        <Empty title="No customers yet" hint="Upload your Excel sheet. Names, phones and languages are detected automatically." />
+        <Empty title="No customers yet" hint="Upload your Excel or CSV sheet. Names, phones and languages are detected automatically." />
       ) : (
         <Panel pad={false}>
           <div className="filters">

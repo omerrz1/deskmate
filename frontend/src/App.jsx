@@ -1,6 +1,6 @@
 import WorkspaceSwitcher from './WorkspaceSwitcher'
 import { Component, lazy, Suspense, useEffect, useState } from 'react'
-import { Link, Navigate, NavLink, Route, Routes, useLocation } from 'react-router-dom'
+import { Link, Navigate, NavLink, Route, Routes, useLocation, useSearchParams } from 'react-router-dom'
 import { api, usePoll } from './api'
 import { AuthGate, JoinPage, useAuth } from './Auth'
 import Icon from './Icon'
@@ -41,8 +41,10 @@ const MyWork = lazy(() => import('./pages/MyWork'))
 const Directory = lazy(() => import('./pages/Directory'))
 const Account = lazy(() => import('./pages/Account'))
 
+// Screens you work inside (chat, files, mail, an employee's computer) fill the whole window: a slim rail replaces the sidebar and top bar.
+const FOCUS = ['/team-chat', '/chats', '/files', '/inbox']
 const LEGACY = ['/data', '/campaigns', '/calls', '/clients', '/knowledge', '/overview', '/activity']
-const TITLES = { '/': 'Team', '/performance': 'Performance', '/templates': 'Templates', '/projects': 'Projects', '/apps': 'Apps', '/inbox': 'Inbox', '/chats': 'Customer chats', '/team-chat': 'Team chat', '/settings': 'Settings', '/people': 'People', '/files': 'Files' }
+const TITLES = { '/': 'Team', '/performance': 'Performance', '/templates': 'Templates', '/projects': 'Projects', '/apps': 'Apps', '/inbox': 'Inbox', '/chats': 'Customer chats', '/team-chat': 'Chat', '/settings': 'Settings', '/people': 'People', '/files': 'Files' }
 
 class Boundary extends Component {
   state = { err: null }
@@ -81,6 +83,8 @@ function Shell() {
   const auth = useAuth()
   const toast = useToast()
   const loc = useLocation()
+  const [sp] = useSearchParams()
+  const focus = FOCUS.some((p) => loc.pathname === p || loc.pathname.startsWith(p + '/')) || (/^\/agents\/\d+\/?$/.test(loc.pathname) && sp.get('tab') === 'computer')
   const legacy = LEGACY.some((p) => loc.pathname.startsWith(p))
   const badge = att ? att.unread + att.approvals + att.meetings.length : 0
   const on = (p) => (p === '/' ? loc.pathname === '/' || loc.pathname.startsWith('/agents') : loc.pathname.startsWith(p))
@@ -98,19 +102,20 @@ function Shell() {
   }, [])
   const section = legacy ? 'Settings' : TITLES['/' + loc.pathname.split('/')[1]] || (loc.pathname.startsWith('/agents') ? 'Team' : '')
   const crew = (team || []).filter((a) => a.is_manager)  // the sidebar lists managers only; everyone else is on the Team page
-  const link = (to, icon, label, count) => <NavLink to={to} className={on(to) ? 'on' : ''}><span><Icon name={icon} size={17} />{label}</span>{count > 0 && <i className="badge">{count}</i>}</NavLink>
+  const link = (to, icon, label, count, short) => <NavLink to={to} className={on(to) ? 'on' : ''}><span><Icon name={icon} size={17} />{short ? <><span className="l-full">{label}</span><span className="l-short">{short}</span></> : label}</span>{count > 0 && <i className="badge">{count}</i>}</NavLink>
   return (
-    <div className="shell">
+    <div className={`shell ${focus ? 'focus' : ''}`}>
       <aside className="sidebar">
-        <Link to="/" className="brand"><span className="mark"><i /></span><span className="t"><b>Deskmates</b>{company?.name && <small>{company.name}</small>}</span></Link>
+        <Link to="/" className="brand" title="Deskmates"><span className="mark"><i /></span><span className="t"><b>Deskmates</b>{company?.name && <small>{company.name}</small>}</span></Link>
+        {focus && <div className="rail-ws"><WorkspaceSwitcher compact /></div>}
         <nav className="nav" aria-label="Main">
           {link('/', 'users', 'Team')}
           {!auth.subworkspace && link('/people', 'person', 'People')}
           {link('/projects', 'projects', 'Projects')}
           {link('/files', 'folder', 'Files')}
           {link('/inbox', 'inbox', 'Inbox', badge)}
-          {link('/team-chat', 'chat', 'Team chat')}
-          {link('/chats', 'chat', 'Customer chats', att ? att.chats_unread || 0 : 0)}
+          {link('/team-chat', 'chat', 'Chat')}
+          {link('/chats', 'users', 'Customer chats', att ? att.chats_unread || 0 : 0, 'Customers')}
           {link('/apps', 'apps', 'Apps')}
           {link('/settings', 'sliders', 'Settings')}
         </nav>
@@ -126,22 +131,30 @@ function Shell() {
             ))}
           </div>
         )}
+        {focus ? (
+          <div className="side-foot rail-foot">
+            <button onClick={() => setPalette(true)} title="Search (⌘K)"><Icon name="search" size={18} /><span>Search</span></button>
+            {central && <button className={`pause ${paused ? 'paused' : ''}`} onClick={flip} title={paused ? 'Resume the team' : 'Pause all work'}><Icon name={paused ? 'play' : 'pause'} size={18} /><span>{paused ? 'Resume' : 'Pause'}</span></button>}
+            <Link to="/settings/account" className="rail-me" title={`${auth.name || auth.username}: your account`}><PersonAvatar name={auth.name || auth.username} size={28} /></Link>
+          </div>
+        ) : (
         <div className="side-foot">
-          {health && !health.openai && <div className="mode"><Icon name="alert" size={14} /> No API key set</div>}
+          {health && !health.openai && <Link to="/settings" className="mode"><Icon name="alert" size={14} /> Connect your AI account</Link>}
           {central && <button className={`pause ${paused ? 'paused' : ''}`} onClick={flip} title={paused ? 'Resume the team' : 'Pause all work'}><i className={`dot ${paused ? '' : 'ok'}`} />{paused ? 'Paused' : 'Team working'}<Icon name={paused ? 'play' : 'pause'} size={13} /></button>}
           <div className="who-row"><PersonAvatar name={auth.name || auth.username} size={26} /><span className="u-n">{auth.name || auth.username}</span><button onClick={auth.logout} title="Sign out" aria-label="Sign out"><Icon name="logout" size={16} /></button></div>
         </div>
+        )}
       </aside>
       <main className="main">
         <header className="topbar">
           <WorkspaceSwitcher />
-          <div className="crumb"><span>{company?.name || 'Deskmates'}</span>{section && <><i>/</i><b>{section}</b></>}</div>
-          <button className="search-trigger" onClick={() => setPalette(true)} ><Icon name="search" size={14} /><span>Search or jump to…</span><kbd>⌘K</kbd></button>
+          <div className="crumb">{section && <b>{section}</b>}</div>
+          <button className="search-trigger" onClick={() => setPalette(true)} ><Icon name="search" size={14} /><span>Search</span><kbd>⌘K</kbd></button>
           <Link to="/settings/account" className="bell shell-mobile-only" aria-label="Your account" title="Your account"><span className="u-av" style={{ width: 28, height: 28, fontSize: 12 }}>{(auth.username || '?').slice(0, 1).toUpperCase()}</span></Link>
           <button className="bell" onClick={() => setTheme(theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system')} title={`Theme: ${theme === 'system' ? 'matches your computer' : theme}. Click to change.`} aria-label={`Theme: ${theme}. Click to change.`}><Icon name={theme === 'dark' ? 'moon' : theme === 'light' ? 'sun' : 'monitor'} size={17} /></button>
           <Link to="/inbox" className={`bell ${badge > 0 ? 'has' : ''}`} aria-label={badge > 0 ? `${badge} items need you` : 'Inbox'} title={badge > 0 ? `${badge} need you` : 'Inbox'}><Icon name="inbox" size={17} />{badge > 0 && <i>{badge > 99 ? '99+' : badge}</i>}</Link>
         </header>
-        <div className={`content ${legacy ? 'legacy' : ''}`}>
+        <div className={`content ${legacy ? 'legacy' : ''} ${focus ? 'focus' : ''}`}>
         {legacy && <Link to="/settings/calling" className="back"><Icon name="back" size={14} /> Settings</Link>}
         <Boundary key={loc.pathname}>
           <Suspense fallback={<div className="page"><Skeleton rows={4} /></div>}>

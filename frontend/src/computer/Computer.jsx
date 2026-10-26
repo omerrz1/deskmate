@@ -10,13 +10,11 @@ import './computer.css'
 import { APPS, appOf, composeMs, sceneOf, sleep, typeMs } from './director'
 import { ActivityApp, AppTile, BrowserApp, CalendarApp, ComposeSheet, NotesApp, PhoneApp, ProjectsApp, SceneBanner, Spotlight, TextApp } from './apps'
 
-const BAR = 28 // height of the menu bar
 const STICKY = new Set(['text', 'web']) // scenes that stay on screen after they finish (the document, the open page)
 
 /**
- * A whole computer on a big screen. A real-looking desktop: menu bar, dock, windows you can drag, resize and minimise,
- * Spotlight search, notifications, and a lock screen. It shows what the employee is doing: a cursor with their name moves to
- * the app, opens it, and types what they typed ("follow along").
+ * An employee's computer, filling the screen. One app at a time, switched from the list on the left. It shows what the employee
+ * is doing: a cursor with their name moves to the app, opens it and types what they typed ("follow along").
  */
 export default function Computer({ a, startFull = false }) {
   const id = a.id
@@ -25,8 +23,7 @@ export default function Computer({ a, startFull = false }) {
   const dock = useRef({})
   const [team] = usePoll('/agents', 0)
   const [status] = usePoll(`/agents/${id}/status`, 2500, [id])
-  const [recent] = usePoll(`/agents/${id}/recent-files?limit=6`, 9000, [id])
-  const [wins, setWins] = useState([{ k: 'files', x: 90, y: 24, w: 900, h: 520, z: 1 }])
+  const [wins, setWins] = useState([{ k: 'files', x: 0, y: 0, w: 900, h: 520, z: 1, max: true }])
   const winsRef = useRef(wins)
   winsRef.current = wins
   const zref = useRef(1)
@@ -42,10 +39,6 @@ export default function Computer({ a, startFull = false }) {
   const [cur, setCur] = useState({ x: 120, y: 160, dur: 0, show: false, click: 0 })
   const [bounce, setBounce] = useState(null)
   const [spot, setSpot] = useState(false)
-  const [now, setNow] = useState(new Date())
-  const bootKey = `ox-boot-${id}`
-  const [booting, setBooting] = useState(() => { try { return !sessionStorage.getItem(bootKey) } catch { return false } })
-  const [woke, setWoke] = useState(() => { try { return !!sessionStorage.getItem(`ox-woke-${id}`) } catch { return false } })
   const [urlParams] = useSearchParams()
   const last = useRef(0)
   const first = useRef(true)
@@ -56,12 +49,6 @@ export default function Computer({ a, startFull = false }) {
   const nextZ = () => { zref.current += 1; return zref.current }
 
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
-  useEffect(() => { const t = setInterval(() => setNow(new Date()), 15000); return () => clearInterval(t) }, [])
-  useEffect(() => {
-    if (!booting) return undefined
-    const t = setTimeout(() => { setBooting(false); try { sessionStorage.setItem(bootKey, '1') } catch { /* private mode */ } }, 1900)
-    return () => clearTimeout(t)
-  }, [booting, bootKey])
   useEffect(() => { setFeed([]); last.current = 0; first.current = true; queue.current = []; setScenes({}) }, [id])
   useEffect(() => {
     const onFs = () => { if (!document.fullscreenElement) setFull(false) }
@@ -106,29 +93,12 @@ export default function Computer({ a, startFull = false }) {
     setWins((ws) => {
       const ex = ws.find((w) => w.k === k)
       if (ex) return ws.map((w) => (w.k === k ? { ...w, min: false, anim: '', z } : w))
-      return [...ws, { k, ...geometry(app, ws.length), z }]
+      return [...ws, { k, ...geometry(app, ws.length), z, max: true }]
     })
     if (launch) { setBounce(k); setTimeout(() => setBounce((b) => (b === k ? null : b)), 900) }
   }, []) // eslint-disable-line
   const focus = (k) => { const z = nextZ(); setWins((ws) => ws.map((w) => (w.k === k ? { ...w, z } : w))) }
-  const close = (k) => setWins((ws) => ws.filter((w) => w.k !== k))
   const patch = (k, p) => setWins((ws) => ws.map((w) => (w.k === k ? { ...w, ...p } : w)))
-  const minimise = (k) => { patch(k, { anim: 'min' }); setTimeout(() => patch(k, { min: true, anim: '' }), 260) }
-  const drag = (e, k, mode) => {
-    if (e.button !== 0) return
-    e.preventDefault(); e.stopPropagation()
-    focus(k)
-    const w = winsRef.current.find((x) => x.k === k)
-    if (!w || w.max) return
-    const sx = e.clientX, sy = e.clientY, { W, H } = size()
-    const move = (ev) => {
-      const dx = ev.clientX - sx, dy = ev.clientY - sy
-      if (mode === 'move') patch(k, { x: Math.max(0, Math.min(W - w.w, w.x + dx)), y: Math.max(0, Math.min(H - w.h - 70, w.y + dy)) })
-      else patch(k, { w: Math.min(W - w.x, Math.max(240, w.w + dx)), h: Math.min(H - w.y - 70, Math.max(180, w.h + dy)) })
-    }
-    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
-    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up)
-  }
   useEffect(() => { const want = Number(urlParams.get('doc')); if (want) setTimeout(() => showDoc(want), 400) }, []) // eslint-disable-line
   const showDoc = (docId, title = '') => { setOpenDoc(docId); setDocTitle(title); setScenes((s) => ({ ...s, text: null })); open('text', false) }
 
@@ -228,30 +198,12 @@ export default function Computer({ a, startFull = false }) {
     return () => window.removeEventListener('keydown', k)
   }, [full, spot])
 
-  /* ---------- dock magnification ---------- */
-  const magnify = (e) => {
-    const x = e.clientX
-    Object.values(dock.current).forEach((el) => {
-      if (!el) return
-      const r = el.getBoundingClientRect(), d = Math.abs(x - (r.left + r.width / 2))
-      el.style.transform = `scale(${1 + 0.55 * Math.exp(-(d * d) / (2 * 55 * 55))})`
-    })
-  }
-  const unmagnify = () => Object.values(dock.current).forEach((el) => { if (el) el.style.transform = '' })
-
   const sorted = wins.filter((w) => !w.min).sort((x, y) => y.z - x.z)
   const focused = sorted[0]
   const working = status?.working
-  const state = working ? `Working on: ${status.task}` : status?.in_meeting ? 'In a meeting' : 'At their desk'
-  const asleep = status && !working && !status.in_meeting && (status.idle_for || 0) > 3600 && !woke
+  const away = !!status && !working && !status.in_meeting && (status.idle_for || 0) > 3600
+  const state = working ? `Working on: ${status.task}` : status?.in_meeting ? 'In a meeting' : away ? 'Away from their desk' : 'Free right now'
   const hasScene = useMemo(() => feed.some((e) => sceneOf(e)), [feed])
-  const lights = (k) => (
-    <span className="ox-lights" onPointerDown={(e) => e.stopPropagation()}>
-      <button className="r" onClick={() => close(k)} aria-label="Close"><svg viewBox="0 0 10 10"><path d="M2.5 2.5l5 5M7.5 2.5l-5 5" /></svg></button>
-      <button className="y" onClick={() => minimise(k)} aria-label="Minimise"><svg viewBox="0 0 10 10"><path d="M2 5h6" /></svg></button>
-      <button className="g" onClick={() => patch(k, { max: !winsRef.current.find((w) => w.k === k)?.max })} aria-label="Zoom"><svg viewBox="0 0 10 10"><path d="M2.5 7.5l5-5M3 2.5h4.5V7" /></svg></button>
-    </span>
-  )
   const body = (k) => {
     const s = scenes[k]
     switch (k) {
@@ -269,69 +221,46 @@ export default function Computer({ a, startFull = false }) {
     }
   }
   const titleOf = (w) => (w.k === 'text' ? scenes.text?.title || (openDoc ? docTitle || 'Document' : 'Documents') : appOf(w.k).n)
-  const clock = `${now.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}  ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
 
   return (
     <div className={`ox ${full ? 'full' : ''}`} style={{ '--c': a.color || '#7c4a8b' }} ref={root} tabIndex={0}
       onKeyDown={(e) => { if (e.key === '/' && !/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) { e.preventDefault(); setSpot(true) } }}>
-      <div className="ox-wall" />
 
-      <div className="ox-menu" onPointerDown={(e) => e.stopPropagation()}>
-        <span className="logo"><i /></span>
-        <b className="app">{focused ? appOf(focused.k).n : 'Desktop'}</b>
-        {['File', 'Edit', 'View', 'Window', 'Help'].map((m) => <span key={m} className="m">{m}</span>)}
+      <div className="ox-bar" onPointerDown={(e) => e.stopPropagation()}>
+        <span className="ox-state" title={state}><i className={`dot ${working ? 'live' : status?.in_meeting ? 'ok' : ''}`} /><b>{a.name}</b><span>{state}</span></span>
         <span className="grow" />
-        <span className="status" title={state}>{working && <i className="dot live" />}{state}</span>
-        <label className="watch" title="Open the app they use, and show their cursor"><input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /><span>Watching</span></label>
-        {hasScene && <button onClick={replay} title="Replay what they just did" aria-label="Replay what they just did"><Icon name="play" size={12} /></button>}
-        <svg className="ico" viewBox="0 0 24 24" aria-hidden><path d="M2 9a15 15 0 0120 0M5 12.5a10.5 10.5 0 0114 0M8.5 16a5.5 5.5 0 017 0" /><circle cx="12" cy="19" r="1.2" /></svg>
-        <svg className="ico bat" viewBox="0 0 28 14" aria-hidden><rect x="1" y="1" width="22" height="12" rx="3.2" /><rect x="3" y="3" width="15" height="8" rx="1.6" className="lvl" /><path d="M25 5v4" /></svg>
-        <button onClick={() => setSpot(true)} title="Spotlight search (or press /)" aria-label="Search"><Icon name="search" size={13} /></button>
-        <span className="clock">{clock}</span>
-        <button onClick={toggleFull} title={full ? 'Exit full screen' : 'Full screen'} aria-label="Full screen"><Icon name={full ? 'shrink' : 'expand'} size={13} /></button>
+        <label className="ox-follow" title="Follow along: opens the app they are using and shows where they click"><input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /><span>Follow along</span></label>
+        {hasScene && <button className="ox-act" onClick={replay} title="Watch what they just did again"><Icon name="play" size={13} /><span>Replay</span></button>}
+        <button className="ox-act" onClick={() => setSpot(true)} title="Search this computer (or press /)"><Icon name="search" size={14} /><span>Search</span></button>
+        <button className="ox-act" onClick={toggleFull} title={full ? 'Leave full screen' : 'Use the whole screen'}><Icon name={full ? 'shrink' : 'expand'} size={14} /><span>{full ? 'Leave full screen' : 'Full screen'}</span></button>
       </div>
 
-      <div className="ox-desk" ref={desk} style={{ top: BAR }} onPointerDown={(e) => { if (e.target === e.currentTarget) setOpenDoc((d) => d) }}>
-        <div className="ox-icons">
-          {(recent || []).map((f) => (
-            <button key={f.id} className="ox-file" onDoubleClick={() => showDoc(f.id, f.title)} onClick={(e) => e.currentTarget.focus()} title={`${f.title}${f.path ? ` · ${f.path}` : ''}`}>
-              <span className={`pg ${f.kind}`}><Icon name={f.kind === 'sheet' ? 'sheet' : 'doc'} size={22} /></span><span className="lb">{f.title}</span>
+      <div className="ox-body">
+        <nav className="ox-apps" aria-label="Apps" onPointerDown={(e) => e.stopPropagation()}>
+          {APPS.map((x) => (
+            <button key={x.k} className={`ox-app ${focused?.k === x.k ? 'on' : ''}`} onClick={() => open(x.k, true)} title={x.n}>
+              <span className={`ox-ico ${bounce === x.k ? 'bounce' : ''}`} ref={(el) => { dock.current[x.k] = el }}><AppTile k={x.k} size={34} /></span>
+              <span className="lb">{x.n}</span>
             </button>
           ))}
-        </div>
+        </nav>
 
-        {wins.map((w) => {
-          const style = w.max ? { inset: 0, width: 'auto', height: 'auto', zIndex: w.z } : { left: w.x, top: w.y, width: w.w, height: w.h, zIndex: w.z }
-          const on = focused?.k === w.k
-          return (
-            <div key={w.k} className={`ox-win ${on ? 'focus' : ''} ${w.anim || ''}`} style={{ ...style, display: w.min ? 'none' : 'flex' }} onPointerDown={() => focus(w.k)}>
-              <div className="ox-title" onPointerDown={(e) => drag(e, w.k, 'move')} onDoubleClick={() => patch(w.k, { max: !w.max })}>
-                {lights(w.k)}
-                <span className="ttl"><AppTile k={w.k} size={16} />{titleOf(w)}</span>
+        <div className="ox-desk" ref={desk}>
+          {wins.map((w) => {
+            const on = focused?.k === w.k
+            return (
+              <div key={w.k} className={`ox-win max ${on ? 'focus' : ''}`} style={{ zIndex: w.z, display: w.min || !on ? 'none' : 'flex' }} onPointerDown={() => focus(w.k)} aria-label={titleOf(w)}>
+                <div className="ox-wbody">{body(w.k)}</div>
               </div>
-              <div className="ox-wbody">{body(w.k)}</div>
-              {!w.max && <div className="ox-resize" onPointerDown={(e) => drag(e, w.k, 'resize')} />}
-            </div>
-          )
-        })}
+            )
+          })}
+        </div>
       </div>
 
       <div className="ox-notes" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.nid} className="ox-note"><AppTile k={t.app} size={34} /><div><b>{t.title}</b><p>{t.text}</p></div><small>now</small></div>
         ))}
-      </div>
-
-      <div className="ox-dock" onMouseMove={magnify} onMouseLeave={unmagnify} onPointerDown={(e) => e.stopPropagation()}>
-        {APPS.map((x) => {
-          const w = wins.find((y) => y.k === x.k)
-          return (
-            <button key={x.k} className="ox-dk" title={x.n} onClick={() => (w && !w.min && focused?.k === x.k ? minimise(x.k) : open(x.k, true))}>
-              <span className={`ox-ico ${bounce === x.k ? 'bounce' : ''}`} ref={(el) => { dock.current[x.k] = el }}><AppTile k={x.k} size={46} /></span>
-              {w && <i className="run" />}
-            </button>
-          )
-        })}
       </div>
 
       <div className={`ox-cur ${cur.show ? 'show' : ''}`} style={{ transform: `translate(${cur.x}px, ${cur.y}px)`, '--dur': `${cur.dur}ms` }} aria-hidden>
@@ -341,19 +270,6 @@ export default function Computer({ a, startFull = false }) {
       </div>
 
       {spot && <Spotlight id={id} onClose={() => setSpot(false)} onApp={(k) => open(k)} onDoc={showDoc} />}
-
-      {asleep && (
-        <div className="ox-lock" onClick={() => { setWoke(true); try { sessionStorage.setItem(`ox-woke-${id}`, '1') } catch { /* private mode */ } }}>
-          <div className="t">{now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
-          <div className="d">{now.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' })}</div>
-          <span className="av" style={{ background: a.color || '#7c4a8b' }}>{a.name.slice(0, 1)}</span>
-          <b>{a.name}</b><small>Away from the desk. Click to wake the screen.</small>
-        </div>
-      )}
-
-      {booting && (
-        <div className="ox-boot"><span className="mark"><i /></span><div className="bar"><i /></div></div>
-      )}
     </div>
   )
 }

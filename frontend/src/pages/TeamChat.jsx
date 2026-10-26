@@ -1,16 +1,28 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, apiFetch, stream, usePoll } from '../api'
+import { api, downloadFile, stream, usePoll } from '../api'
 import Avatar from '../Avatar'
+import Icon from '../Icon'
 import { useTitle } from '../ui'
 import { useConfirm, usePrompt, useToast } from '../Feedback'
 
-function initials(title = '') { return title.replace(/^Chat: /, '').split(/[ ,]/).filter(Boolean).slice(0, 2).map((x) => x[0]).join('').toUpperCase() }
 function chatTitle(title = '') { return title.startsWith('Chat: ') ? `Chat with ${title.slice(6)}` : title || 'New chat' }
 function stamp(ts) { return ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '' }
+function day(ts) {
+  if (!ts) return ''
+  const d = new Date(ts * 1000), t = new Date()
+  if (d.toDateString() === t.toDateString()) return stamp(ts)
+  return d.toLocaleDateString([], { day: 'numeric', month: 'short' })
+}
+const idsOf = (c) => { try { const v = typeof c.agent_ids === 'string' ? JSON.parse(c.agent_ids) : c.agent_ids; return Array.isArray(v) ? v : [] } catch { return [] } }
+
+/** Overlapping faces of the teammates in a chat. */
+function Faces({ people, size = 32 }) {
+  return <span className="chat-faces">{people.slice(0, 3).map((a) => <Avatar key={a.id} agent={a} size={size} />)}{people.length > 3 && <i style={{ width: size, height: size }}>+{people.length - 3}</i>}</span>
+}
 
 export default function TeamChat() {
-  useTitle('Team chat')
+  useTitle('Chat')
   const confirm = useConfirm()
   const prompt = usePrompt()
   const toast = useToast()
@@ -27,16 +39,19 @@ export default function TeamChat() {
   const [uploading, setUploading] = useState(false)
   const [partial, setPartial] = useState(null)
   const [error, setError] = useState('')
+  const [menu, setMenu] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [dragging, setDragging] = useState(false)
   const abort = useRef(null)
   const lock = useRef(false)
   const bottom = useRef(null)
   const uploadLock = useRef(false)
   const picker = useRef(null)
   const composer = useRef(null)
-  useEffect(() => { if (composer.current) { composer.current.style.height = 'auto'; composer.current.style.height = `${Math.min(240, Math.max(112, composer.current.scrollHeight))}px` } }, [text, room?.id])
+  useEffect(() => { if (composer.current) { composer.current.style.height = 'auto'; composer.current.style.height = `${Math.min(200, Math.max(24, composer.current.scrollHeight))}px` } }, [text, room?.id])
   useEffect(() => {
     let alive = true
-    setRoom(null); setPartial(null); setError(''); setText('')
+    setRoom(null); setPartial(null); setError(''); setText(''); setMenu(false)
     if (id) api.get(`/meetings/${id}`).then((r) => { if (alive) { if (r.kind === 'admin_chat') setRoom(r); else setError('Choose a team chat from the list.') } }).catch((e) => { if (alive) setError(e.message) })
     return () => { alive = false; abort.current?.abort() }
   }, [id])
@@ -58,7 +73,7 @@ export default function TeamChat() {
   async function create() {
     if (!selected.length || lock.current) return
     lock.current = true; setBusy(true); setError('')
-    try { const r = await api.post('/meetings', { agent_ids: selected, title: newTitle.trim(), chat: true }); await reload(); setParams({ id: r.id }); setSelected([]); setNewTitle('') }
+    try { const r = await api.post('/meetings', { agent_ids: selected, title: newTitle.trim(), chat: true }); await reload(); setParams({ id: r.id }); setSelected([]); setNewTitle(''); setCreating(false) }
     catch (e) { setError(e.message) } finally { lock.current = false; setBusy(false) }
   }
   async function renameCurrent() {
@@ -106,55 +121,85 @@ export default function TeamChat() {
     } catch (e) { setError(e.message) }
     finally { uploadLock.current = false; setUploading(false); if (picker.current) picker.current.value = '' }
   }
-  async function download(docId) {
-    try {
-      const r = await apiFetch(`/api/docs/${docId}/download`)
-      if (!r.ok) throw new Error('Could not download this file')
-      const blob = await r.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a')
-      a.href = url; a.download = ''; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
-    } catch (e) { setError(e.message) }
+  // the server names the file (a CSV is saved as .csv, an Excel file as .xlsx); format: 'csv' | 'xlsx' picks one for a sheet
+  async function download(docId, title, format) {
+    try { await downloadFile(`/api/docs/${docId}/download${format ? `?format=${format}` : ''}`, title || 'download') } catch (e) { setError(e.message) }
   }
   const who = (aid) => room?.agents.find((a) => a.id === aid)?.name || 'Teammate'
-  const filteredChats = (chats || []).filter((c) => c.title.toLowerCase().includes(filter.toLowerCase()))
-  const fileOnly = (m) => !m.text && m.attachments?.length
-  return <div className="page wide team-chat-page">
-    <div className="team-chat-layout">
-      <aside className="team-chat-list">
-        <div className="tc-list-top"><div><span className="tc-eyebrow">WORKSPACE</span><h1>Messages</h1></div><button className="tc-new" onClick={() => { setSelected([]); setParams({}) }} title="New chat" aria-label="New chat">＋</button></div>
-        <label className="tc-search"><span>⌕</span><input aria-label="Search chats" placeholder="Search chats" value={filter} onChange={(e) => setFilter(e.target.value)} /></label>
-        <div className="tc-section-label">CHATS</div>
-        <div className="tc-threads">
-          {filteredChats.map((c) => <div key={c.id} className={`tc-thread-row ${String(c.id) === id ? 'active' : ''}`}><button className="tc-thread" onClick={() => setParams({ id: c.id })}>
-            <span className="tc-thread-icon">{initials(chatTitle(c.title)) || '•'}</span><span className="tc-thread-copy"><b>{chatTitle(c.title)}</b><small>{stamp(c.created_at)}</small></span>
-          </button><button className="tc-thread-delete" onClick={() => removeChat(c.id, c.title)} aria-label={`Delete ${chatTitle(c.title)}`} title="Delete chat">×</button></div>)}
-          {!filteredChats.length && <div className="tc-no-chats">{filter ? 'No matching chats' : 'Your conversations will show here'}</div>}
+  const filteredChats = (chats || []).filter((c) => chatTitle(c.title).toLowerCase().includes(filter.toLowerCase()))
+  const peopleOf = (c) => { const ids = idsOf(c); return (agents || []).filter((a) => ids.includes(a.id)) }
+  const ended = room?.status === 'ended'
+  const startNew = () => { setSelected([]); setCreating(true); setParams({}) }
+  const dropFiles = (e) => { setDragging(false); if (e.dataTransfer.files.length) { e.preventDefault(); upload(e.dataTransfer.files) } }
+  // a message starts a new group when the sender changes or a few minutes have passed
+  const startsGroup = (m, i, all) => { const prev = all[i - 1]; return !prev || prev.role !== m.role || prev.agent_id !== m.agent_id || (m.created_at && prev.created_at && m.created_at - prev.created_at > 300) }
+  return <div className="page chat-page">
+    <div className={`chat-layout ${id ? 'in-room' : creating ? 'creating' : ''}`}>
+      <aside className="chat-side">
+        <div className="chat-side-head"><h1>Chat</h1><button className="btn solid small" onClick={startNew}><Icon name="plus" size={14} /> New chat</button></div>
+        <label className="chat-search"><Icon name="search" size={15} /><input aria-label="Search chats" placeholder="Search chats" value={filter} onChange={(e) => setFilter(e.target.value)} /></label>
+        <div className="chat-list">
+          {filteredChats.map((c) => <button key={c.id} className={`chat-item ${String(c.id) === id ? 'on' : ''}`} onClick={() => { setCreating(false); setParams({ id: c.id }) }}>
+            <Faces people={peopleOf(c)} size={30} /><span className="chat-item-text"><b>{chatTitle(c.title)}</b><small>{peopleOf(c).map((a) => a.name).join(', ') || 'Your team'}</small></span><time>{day(c.created_at)}</time>
+          </button>)}
+          {!filteredChats.length && <p className="chat-none">{filter ? 'No chats match that.' : 'Your chats will show up here.'}</p>}
         </div>
-        <button className="tc-create-link" onClick={() => { setSelected([]); setParams({}) }}>＋ <span>Start a new chat</span></button>
       </aside>
-      <section className="team-chat-room" onDragOver={e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault() }} onDrop={e => { if (e.dataTransfer.files.length) { e.preventDefault(); upload(e.dataTransfer.files) } }}>
-        {!room && error && <div className="tc-error" role="alert">{error}</div>}
-        {!id ? <div className="tc-new-room"><span className="tc-eyebrow">NEW CONVERSATION</span><h2>Who would you like to chat with?</h2><p>Pick one or more teammates. You can share files in the conversation.</p>
-          <div className="tc-agent-picker">{(agents || []).map((a) => <label key={a.id} className={selected.includes(a.id) ? 'picked' : ''}><input type="checkbox" checked={selected.includes(a.id)} disabled={!selected.includes(a.id) && selected.length >= 6} onChange={(e) => setSelected((s) => e.target.checked ? [...s, a.id] : s.filter((i) => i !== a.id))} /><Avatar agent={a} size={36} /><span><b>{a.name}</b><small>{a.role}</small></span><i>{selected.includes(a.id) ? '✓' : ''}</i></label>)}</div>
-          {selected.length > 0 && <label className="tc-title-field">Name this chat <span className="muted">(optional)</span><input maxLength={80} placeholder={selected.length === 1 ? `Chat with ${agents?.find(a => a.id === selected[0])?.name || 'your teammate'}` : 'e.g. Product launch planning'} value={newTitle} onChange={e => setNewTitle(e.target.value)}/></label>}
-          {agents?.length === 0 && <p><Link to="/">Add teammates first</Link></p>}<button className="btn solid tc-start" onClick={create} disabled={busy || !selected.length}>Start chat</button>
-        </div> : !room ? <div className="team-chat-loading"><i/><span>Opening chat…</span></div> : <>
-          <header className="tc-room-head"><div className="tc-room-avatars">{room.agents.slice(0, 4).map((a) => <Avatar key={a.id} agent={a} size={34}/>)}</div><div className="tc-room-heading"><h2>{chatTitle(room.title)}</h2><span>{room.agents.map((a) => a.name).join(', ')}</span></div><button className="tc-room-action" onClick={renameCurrent}>Rename</button><button className="tc-room-action danger" onClick={() => removeChat(room.id, room.title)}>Delete</button><span className="tc-room-status"><i/> Team chat</span></header>
-          <div className="tc-transcript" aria-live="polite" aria-relevant="additions text">
-            {!room.messages.length && <div className="tc-empty"><div className="tc-empty-icon">✳</div><h3>Start with a message</h3><p>Ask a question, share a document, or work through an idea together.</p></div>}
-            {room.messages.map((m, i) => <article key={m.id} className={`tc-message ${m.role === 'admin' ? 'mine' : ''} ${fileOnly(m) ? 'attachment-only' : ''}`}>
-              {m.role !== 'admin' && <Avatar agent={room.agents.find((a) => a.id === m.agent_id)} size={28}/>}
-              <div className="tc-bubble-wrap"><div className="tc-meta"><b>{m.role === 'admin' ? 'You' : who(m.agent_id)}</b><time>{stamp(m.created_at) || (i === room.messages.length - 1 ? 'Now' : '')}</time></div>
-                {m.text && <div className="tc-bubble">{m.text}</div>}
-                {m.attachments?.length > 0 && <div className="tc-files">{m.attachments.map((f) => <button className="tc-file" key={f.doc_id} onClick={() => download(f.doc_id)}><span className="tc-file-icon">↧</span><span className="tc-file-info"><b>{f.title}</b><small>{(f.kind || 'file').toUpperCase()} · {f.size ? `${Math.max(1, Math.round(f.size / 1024))} KB` : 'Shared file'}{f.saved_in ? ` · Saved in ${f.saved_in}` : ''}</small></span><span className="tc-file-download">↓</span></button>)}</div>}
-              </div>
-            </article>)}
-            {partial && <article className="tc-message"><Avatar agent={room.agents.find((a) => a.id === partial.agent_id)} size={28}/><div className="tc-bubble-wrap"><div className="tc-meta"><b>{who(partial.agent_id)}</b></div><div className="tc-bubble">{partial.text || <span className="tc-typing"><i/><i/><i/> {partial.status}…</span>}</div></div></article>}
-            <div ref={bottom}/>
+      <section className={`chat-main ${dragging ? 'dragging' : ''}`} onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); if (id) setDragging(true) } }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false) }} onDrop={dropFiles}>
+        {!room && error && <div className="chat-error" role="alert">{error}</div>}
+        {!id ? <div className="chat-new">
+          <button className="chat-back" onClick={() => setCreating(false)} aria-label="Back to all chats"><Icon name="back" size={18} /></button>
+          <h2>Who do you want to talk to?</h2>
+          <p>Pick one or more people from your team. You can share files in the chat.</p>
+          <div className="chat-pick">{(agents || []).map((a) => {
+            const on = selected.includes(a.id)
+            return <label key={a.id} className={on ? 'picked' : ''}><input type="checkbox" checked={on} disabled={!on && selected.length >= 6} onChange={(e) => setSelected((x) => e.target.checked ? [...x, a.id] : x.filter((i) => i !== a.id))} /><Avatar agent={a} size={40} /><span className="pick-text"><b>{a.name}</b><small>{a.role}</small></span><i>{on ? <Icon name="check" size={14} /> : null}</i></label>
+          })}</div>
+          {selected.length > 0 && <label className="chat-name">Name this chat <span className="muted">(optional)</span><input maxLength={80} placeholder={selected.length === 1 ? `Chat with ${agents?.find((a) => a.id === selected[0])?.name || 'your teammate'}` : 'e.g. Spring campaign'} value={newTitle} onChange={(e) => setNewTitle(e.target.value)} /></label>}
+          {agents?.length === 0 && <p><Link to="/">Add someone to your team first</Link></p>}
+          <button className="btn solid chat-go" onClick={create} disabled={busy || !selected.length}>Start chatting</button>
+        </div> : !room ? <div className="chat-loading"><i /><span>Opening chat…</span></div> : <>
+          <header className="chat-head">
+            <button className="chat-back" onClick={() => setParams({})} aria-label="Back to all chats"><Icon name="back" size={18} /></button>
+            <Faces people={room.agents} size={34} />
+            <div className="chat-head-text"><h2>{chatTitle(room.title)}</h2><span>{room.agents.map((a) => a.name).join(', ')}</span></div>
+            <div className="chat-menu-wrap">
+              <button className="chat-more" onClick={() => setMenu(!menu)} aria-label="More" aria-expanded={menu}><Icon name="more" size={18} /></button>
+              {menu && <><div className="chat-menu-bg" onClick={() => setMenu(false)} /><div className="chat-menu"><button onClick={() => { setMenu(false); renameCurrent() }}>Rename chat</button><button className="danger" onClick={() => { setMenu(false); removeChat(room.id, room.title) }}>Delete chat</button></div></>}
+            </div>
+          </header>
+          <div className="chat-scroll" aria-live="polite" aria-relevant="additions text">
+            <div className="chat-thread">
+              {!room.messages.length && <div className="chat-empty"><h3>Say hello</h3><p>Ask a question, share a file, or give them some work.</p></div>}
+              {room.messages.map((m, i, all) => {
+                const mine = m.role === 'admin', first = startsGroup(m, i, all), agent = room.agents.find((a) => a.id === m.agent_id)
+                return <article key={m.id} className={`chat-msg ${mine ? 'mine' : ''} ${first ? 'first' : ''}`}>
+                  {!mine && <span className="chat-msg-av">{first && agent && <Avatar agent={agent} size={32} />}</span>}
+                  <div className="chat-msg-body">
+                    {first && <div className="chat-meta"><b>{mine ? 'You' : who(m.agent_id)}</b><time>{stamp(m.created_at) || (i === all.length - 1 ? 'Now' : '')}</time></div>}
+                    {m.text && <div className="chat-bubble">{m.text}</div>}
+                    {m.attachments?.length > 0 && <div className="chat-files">{m.attachments.map((f) => <div className="chat-file" key={f.doc_id}>
+                      <button className="chat-file-main" onClick={() => download(f.doc_id, f.title)} title="Download"><span className="chat-file-ico"><Icon name={f.kind === 'sheet' ? 'sheet' : 'file'} size={20} /></span><span className="chat-file-info"><b>{f.title}</b><small>{(f.format || (f.kind === 'sheet' ? 'sheet' : f.kind) || 'file').toUpperCase()}{f.size ? ` · ${Math.max(1, Math.round(f.size / 1024))} KB` : ''}</small></span><Icon name="download" size={16} /></button>
+                      {f.kind === 'sheet' && <span className="chat-file-formats"><button title="Download as a CSV file" onClick={() => download(f.doc_id, f.title, 'csv')}>CSV</button><button title="Download as an Excel file" onClick={() => download(f.doc_id, f.title, 'xlsx')}>Excel</button></span>}
+                    </div>)}</div>}
+                  </div>
+                </article>
+              })}
+              {partial && <article className="chat-msg first"><span className="chat-msg-av"><Avatar agent={room.agents.find((a) => a.id === partial.agent_id)} size={32} /></span><div className="chat-msg-body"><div className="chat-meta"><b>{who(partial.agent_id)}</b></div><div className="chat-bubble">{partial.text || <span className="chat-typing"><i /><i /><i /> {partial.status}…</span>}</div></div></article>}
+              <div ref={bottom} />
+            </div>
           </div>
-          {error && <div className="tc-error" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss">×</button></div>}
-          <form className="tc-compose" onSubmit={send}><div className="tc-compose-box"><textarea ref={composer} aria-label="Message your teammates" placeholder={room.status === 'ended' ? 'This chat has ended' : 'Write a message…'} value={text} onChange={(e) => setText(e.target.value)} rows={4} maxLength={4000} disabled={room.status === 'ended'} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form.requestSubmit() } }}/>
-            <div className="tc-compose-actions"><input ref={picker} type="file" multiple accept=".pdf,.docx,.txt,.md,.json,.csv,.xlsx,.xls" hidden onChange={(e) => upload(e.target.files)}/><button type="button" className="tc-attach" onClick={() => picker.current?.click()} disabled={uploading || room.status === 'ended'} title="Attach a file">{uploading ? '…' : '＋'} <span>{uploading ? 'Saving files…' : 'Attach'}</span></button><span className="tc-hint">{text.length > 3500 ? `${text.length}/4000 · ` : ''}Drop files here · Saved on teammates’ computers</span><button className="tc-send" disabled={busy || uploading || !text.trim() || room.status === 'ended'} aria-label="Send message">↑</button></div>
-          </div></form>
+          {error && <div className="chat-error" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss">×</button></div>}
+          {ended ? <p className="chat-ended">This chat has ended. Start a new one to keep talking.</p> : <form className="chat-compose" onSubmit={send}>
+            <div className="chat-box">
+              <textarea ref={composer} aria-label="Message your team" placeholder="Write a message…" value={text} onChange={(e) => setText(e.target.value)} rows={1} maxLength={4000} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form.requestSubmit() } }} />
+              <input ref={picker} type="file" multiple accept=".pdf,.docx,.txt,.md,.json,.csv,.tsv,.tab,.xlsx,.xls" hidden onChange={(e) => upload(e.target.files)} />
+              <button type="button" className="chat-attach" onClick={() => picker.current?.click()} disabled={uploading} title="Attach a file" aria-label="Attach a file"><Icon name="upload" size={18} /><span>{uploading ? 'Saving…' : 'Attach'}</span></button>
+              <button className="chat-send" disabled={busy || uploading || !text.trim()} aria-label="Send message"><Icon name="up" size={18} /></button>
+            </div>
+            <p className="chat-hint">{text.length > 3500 ? `${text.length} of 4,000 letters · ` : ''}Press Enter to send. Shift + Enter starts a new line. Drop a file anywhere to share it.</p>
+          </form>}
+          {dragging && <div className="chat-drop">Drop to share with this chat</div>}
         </>}
       </section>
     </div>

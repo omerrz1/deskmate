@@ -63,12 +63,12 @@ export default function CommandPalette({ open, onClose, paused, onTogglePause })
   const items = useMemo(() => {
     const all = [
       { g: 'Actions', label: 'New agent', hint: 'Hire someone', icon: 'plus', run: () => go('/?new=1') },
-      { g: 'Actions', label: 'Team meeting', hint: 'Start a meeting', icon: 'users', run: () => go('/?meet=1') },
+      { g: 'Actions', label: 'Talk to the team', hint: 'Start a voice meeting', icon: 'users', run: () => go('/?meet=1') },
       { g: 'Actions', label: paused ? 'Resume the team' : 'Pause all work', hint: paused ? 'Let everyone work again' : 'Stop work everywhere', icon: paused ? 'play' : 'pause', run: () => { onClose(); onTogglePause() } },
       ...PAGES.map(([label, to, icon]) => ({ g: 'Go to', label, icon, run: () => go(to) })),
       ...data.agents.flatMap((a) => [
         { g: 'People', label: a.name, hint: a.role || 'Team member', agent: a, run: () => go(`/agents/${a.id}`) },
-        { g: 'People', label: `Meet ${a.name}`, hint: 'One-to-one meeting', agent: a, run: () => meet(a) },
+        { g: 'People', label: `Talk to ${a.name}`, hint: 'Voice conversation', agent: a, run: () => meet(a) },
       ]),
       ...data.projects.map((p) => ({ g: 'Projects', label: p.name, hint: p.status === 'done' ? 'Done' : 'Active', icon: 'projects', run: () => go(`/projects/${p.id}`) })),
       ...data.apps.map((a) => ({ g: 'Apps', label: a.installed && !a.multi ? a.name : `Connect ${a.name}`, hint: a.category, app: a, run: () => go(a.installed && !a.multi ? '/apps' : `/apps?connect=${a.id}`) })),

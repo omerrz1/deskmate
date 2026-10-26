@@ -148,7 +148,7 @@ export function Mail({ team, fixedBox, comfy = false }) {
     return g
   }, [rows])
 
-  const folders = [['inbox', 'Inbox', counts?.unread || 0], ['sent', 'Sent', 0], ['pending', 'To approve', (counts?.pending || 0) + outbox.length]]
+  const folders = [['inbox', 'Inbox', counts?.unread || 0], ['sent', 'Sent', 0], ['pending', 'Waiting for your OK', (counts?.pending || 0) + outbox.length]]
   const allSel = rows.length > 0 && rows.every((r) => sel.has(r.id))
   const toggle = (id) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
   const showingTexts = folder === 'pending' && outbox.length > 0
@@ -159,9 +159,9 @@ export function Mail({ team, fixedBox, comfy = false }) {
       <aside className="mx-rail">
         {admin && <button className="btn solid mx-write" onClick={() => startCompose()}><Icon name="edit" size={14} /> Write</button>}
         {!fixedBox && (
-          <label className="mx-box"><span>Mailbox</span>
+          <label className="mx-box"><span>Whose mail</span>
             <select value={box} onChange={(e) => { setBox(e.target.value); setOpen(null); setCompose(null); setFolder('inbox') }}>
-              <option value="admin">Mine (admin)</option>{team.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              <option value="admin">Me</option>{team.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
           </label>
         )}
@@ -172,7 +172,6 @@ export function Mail({ team, fixedBox, comfy = false }) {
             </button>
           ))}
         </nav>
-        <p className="mx-keys faint">Shortcuts: <kbd>j</kbd> <kbd>k</kbd> move, <kbd>c</kbd> write, <kbd>r</kbd> reply, <kbd>#</kbd> delete</p>
       </aside>
 
       <section className="mx-list">
@@ -187,7 +186,7 @@ export function Mail({ team, fixedBox, comfy = false }) {
             {folder === 'inbox' && <><button className="link" onClick={() => act([...sel], 'read')}>Mark read</button><button className="link" onClick={() => act([...sel], 'unread')}>Mark unread</button></>}
             <button className="link danger" onClick={() => remove([...sel])}>Delete</button>
           </div>
-        ) : rows.length > 0 && <div className="mx-bulk quiet"><label className="mx-ck"><input type="checkbox" checked={false} onChange={() => setSel(new Set(rows.map((r) => r.id)))} aria-label="Select all" /></label><span className="faint small">{rows.length}{rows.length >= limit ? '+' : ''} {dq ? 'found' : 'emails'}</span></div>}
+        ) : rows.length > 0 && <div className="mx-bulk quiet"><label className="mx-ck"><input type="checkbox" checked={false} onChange={() => setSel(new Set(rows.map((r) => r.id)))} aria-label="Select all" /></label><span className="faint small">{rows.length}{rows.length >= limit ? '+' : ''} {dq ? 'found' : rows.length === 1 ? 'email' : 'emails'}</span></div>}
         <div className="mx-scroll">
           {showingTexts && (
             <div className="mx-texts">

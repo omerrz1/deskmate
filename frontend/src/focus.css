@@ -1,0 +1,216 @@
+/* ==========================================================================
+   Focus layout: the screens you work inside (chat, files, mail, an employee's computer)
+   fill the whole window. A slim rail replaces the sidebar and top bar; nothing floats in a card.
+   Loaded last, so it is the one place that decides how these screens are laid out.
+   ========================================================================== */
+
+/* ----- the workspace button: one control, the same everywhere ----- */
+.workspace-switcher { position: relative; margin: 0; display: block; flex-shrink: 0; }
+.ws-btn { display: inline-flex; align-items: center; gap: 8px; height: 34px; max-width: 220px; padding: 0 10px 0 5px; background: var(--surface); border: 1px solid var(--line2); border-radius: 10px; color: var(--text); cursor: pointer; font-size: 13.5px; }
+.ws-btn:hover { border-color: var(--line3); background: var(--hover); }
+.ws-btn b { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-btn svg { color: var(--text3); flex: none; }
+.ws-initial { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border-radius: 7px; background: var(--text); color: var(--bg); font-size: 12px; font-weight: 700; }
+.ws-btn.ws-compact { width: 40px; height: 40px; padding: 0; justify-content: center; border-radius: 12px; }
+.ws-btn.ws-compact .ws-initial { width: 28px; height: 28px; border-radius: 8px; font-size: 14px; }
+.topbar .workspace-switcher { margin: 0; gap: 0; }
+.topbar .crumb b { font-size: 14px; }
+.side-foot .mode { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--bad); padding: 6px 10px; border-radius: var(--r); }
+.side-foot .mode:hover { background: var(--bad-bg); }
+
+/* ----- the slim rail (computers and tablets; phones keep their bottom tab bar) ----- */
+.shell.focus { height: 100dvh; min-height: 0; overflow: hidden; }
+.shell.focus .main { height: 100dvh; min-height: 0; max-width: none; overflow: hidden; }
+.shell.focus .content, .shell.focus .content.legacy { flex: 1; min-height: 0; max-width: none; width: 100%; padding: 0; display: flex; flex-direction: column; overflow: hidden; }
+@media (min-width: 761px) {
+  .shell.focus { grid-template-columns: 78px minmax(0, 1fr); }
+  .shell.focus .sidebar { height: 100dvh; padding: 12px 8px 10px; gap: 2px; align-items: stretch; overflow-y: auto; overflow-x: hidden; scrollbar-width: none; }
+  .shell.focus .sidebar::-webkit-scrollbar { display: none; }
+  .shell.focus .brand { justify-content: center; padding: 2px 0 10px; }
+  .shell.focus .brand .t, .shell.focus .side-team { display: none; }
+  .shell.focus .rail-ws { display: flex; justify-content: center; padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
+  .shell.focus .nav { gap: 2px; }
+  .shell.focus .nav a { position: relative; flex-direction: column; justify-content: center; align-items: center; padding: 8px 2px 7px; border-radius: 11px; font-size: 10.5px; line-height: 1.15; text-align: center; font-weight: 500; }
+  .shell.focus .nav a > span { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .shell.focus .nav a.on { font-weight: 600; }
+  .shell.focus .nav a.on svg { color: var(--accent); }
+  .shell.focus .nav .badge { position: absolute; top: 3px; right: 9px; font-size: 10px; padding: 0 5px; line-height: 16px; }
+  .shell.focus .rail-foot { margin-top: auto; gap: 2px; align-items: stretch; padding-top: 8px; border-top: 1px solid var(--line); }
+  .shell.focus .rail-foot button { flex-direction: column; justify-content: center; align-items: center; gap: 4px; padding: 8px 2px; font-size: 10.5px; border-radius: 11px; width: 100%; }
+  .shell.focus .rail-foot button, .shell.focus .rail-foot .pause { text-align: center !important; border: 0 !important; background: none !important; color: var(--text2) !important; padding: 8px 2px !important; justify-content: center !important; }
+  .shell.focus .rail-foot button:hover { background: var(--hover) !important; color: var(--text) !important; }
+  .shell.focus .rail-foot .pause svg, .shell.focus .rail-foot button svg { margin: 0 !important; }
+  .shell.focus .rail-foot .pause.paused { color: var(--accent-text) !important; background: var(--accent-bg) !important; }
+  .shell.focus .rail-me { display: grid; place-items: center; padding: 8px 0 2px; }
+  .shell.focus .topbar { display: none; }
+}
+
+/* ----- a page inside the focus frame fills it ----- */
+.shell.focus .content > .page, .shell.focus .content > div > .page { flex: 1; min-height: 0; width: 100%; max-width: none; margin: 0; padding: 16px 22px 22px; display: flex; flex-direction: column; animation: none; }
+.shell.focus .page-h { margin: 0 0 14px; align-items: center; flex: none; }
+.shell.focus .page-h h1 { font-size: 20px; letter-spacing: -.02em; }
+.shell.focus .page-h .muted { display: none; }
+.shell.focus .page-h .actions { width: auto; }
+/* the main panel of each page takes all the height that is left (scoped to the pages themselves, not to a mail app inside a computer) */
+.shell.focus .files-page .files-box, .shell.focus .inbox-page .mx-wrap, .shell.focus .chats-page .ch-wrap { flex: 1; min-height: 0; height: auto; }
+.shell.focus .inbox-page .mx, .shell.focus .inbox-page .mx.mx-lg, .shell.focus .chats-page .ch { height: 100%; min-height: 0; }
+@media (max-width: 760px) {
+  .sidebar .rail-ws, .sidebar .rail-foot { display: none; }
+  .topbar .ws-btn { padding: 0 5px; } .topbar .ws-btn b, .topbar .ws-btn > svg { display: none; }
+  .topbar .workspace-switcher { flex: none; }
+  .shell.focus .content.focus { padding: 0; }
+  .shell.focus .content > .page, .shell.focus .content > div > .page { padding: 12px 12px calc(76px + env(safe-area-inset-bottom)); }
+}
+
+/* ==========================================================================
+   Chat: a list of conversations, and one conversation that fills the rest of the window
+   ========================================================================== */
+.chat-page, .shell.focus .content > .chat-page { padding: 0 !important; }
+.chat-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 330px minmax(0, 1fr); background: var(--surface); }
+.chat-back { display: none; width: 36px; height: 36px; flex: none; place-items: center; border: 0; background: none; color: var(--text2); border-radius: 10px; cursor: pointer; }
+.chat-back:hover { background: var(--hover); }
+
+.chat-side { min-height: 0; display: flex; flex-direction: column; background: var(--side); border-right: 1px solid var(--line); }
+.chat-side-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 16px 12px; }
+.chat-side-head h1 { font-size: 20px; }
+.chat-search { flex: none; display: flex; align-items: center; gap: 8px; margin: 0 14px 10px; padding: 0 12px; height: 38px; background: var(--surface); border: 1px solid var(--line2); border-radius: 10px; color: var(--text3); }
+.chat-search:focus-within { border-color: var(--accent); box-shadow: var(--ring, 0 0 0 3px rgba(244,81,30,.18)); }
+.chat-search input { flex: 1; min-width: 0; min-height: 0; height: 100%; padding: 0; border: 0; outline: 0; box-shadow: none; background: none; font-size: 14px; }
+.chat-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px 14px; display: flex; flex-direction: column; gap: 2px; }
+.chat-item { width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px; border: 0; background: none; border-radius: 12px; text-align: left; cursor: pointer; color: var(--text); }
+.chat-item:hover { background: var(--hover); }
+.chat-item.on { background: var(--sel); }
+.chat-item-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.chat-item-text b { font-size: 14.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-item-text small { font-size: 12.5px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-item time { align-self: flex-start; margin-top: 2px; font-size: 12px; color: var(--text3); white-space: nowrap; }
+.chat-none { padding: 24px 14px; color: var(--text3); font-size: 14px; text-align: center; }
+.chat-faces { display: inline-flex; align-items: center; flex: none; }
+.chat-faces .avatar { border: 2px solid var(--surface); margin-left: -10px; }
+.chat-faces .avatar:first-child { margin-left: 0; }
+.chat-item.on .chat-faces .avatar { border-color: var(--sel); }
+.chat-faces i { margin-left: -10px; display: grid; place-items: center; border-radius: 24%; background: var(--sel); color: var(--text2); font-style: normal; font-size: 11px; font-weight: 600; border: 2px solid var(--surface); }
+
+.chat-main { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); }
+.chat-head { flex: none; min-height: 66px; display: flex; align-items: center; gap: 12px; padding: 10px 20px; border-bottom: 1px solid var(--line); }
+.chat-head-text { flex: 1; min-width: 0; display: grid; }
+.chat-head-text h2 { font-size: 16px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-head-text span { font-size: 13px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-menu-wrap { position: relative; }
+.chat-more { width: 38px; height: 38px; display: grid; place-items: center; border: 0; background: none; color: var(--text); border-radius: 10px; cursor: pointer; }
+.chat-more:hover { background: var(--hover); color: var(--text); }
+.chat-menu-bg { position: fixed; inset: 0; z-index: 29; }
+.chat-menu { position: absolute; right: 0; top: 44px; z-index: 30; min-width: 190px; padding: 6px; background: var(--surface); border: 1px solid var(--line2); border-radius: 12px; box-shadow: var(--shadow-md, 0 8px 24px rgba(0,0,0,.14)); }
+.chat-menu button { display: block; width: 100%; padding: 10px 12px; border: 0; background: none; border-radius: 8px; text-align: left; cursor: pointer; font-size: 14.5px; }
+.chat-menu button:hover { background: var(--hover); }
+.chat-menu .danger { color: var(--bad); }
+
+.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+.chat-thread { max-width: 840px; margin: 0 auto; padding: 22px 24px 10px; display: flex; flex-direction: column; }
+.chat-msg { display: flex; align-items: flex-start; gap: 10px; margin-top: 3px; }
+.chat-msg.first { margin-top: 18px; }
+.chat-msg:first-child { margin-top: 0; }
+.chat-msg-av { width: 32px; flex: none; }
+.chat-msg-body { min-width: 0; max-width: min(700px, 100%); display: flex; flex-direction: column; gap: 4px; }
+.chat-meta { display: flex; align-items: baseline; gap: 8px; font-size: 13px; color: var(--text3); }
+.chat-meta b { color: var(--text); font-weight: 650; font-size: 14px; }
+.chat-bubble { padding: 10px 14px; background: var(--soft); border-radius: 14px; font-size: 15px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-msg.first:not(.mine) .chat-bubble { border-top-left-radius: 5px; }
+.chat-msg.mine { flex-direction: row-reverse; }
+.chat-msg.mine .chat-msg-body { align-items: flex-end; margin-left: auto; }
+.chat-msg.mine .chat-meta { justify-content: flex-end; }
+.chat-msg.mine .chat-bubble { background: var(--accent-bg); color: var(--text); }
+.chat-msg.mine.first .chat-bubble { border-top-right-radius: 5px; }
+.chat-typing { display: inline-flex; align-items: center; gap: 4px; color: var(--text2); }
+.chat-typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--text3); animation: pulse 1s infinite; }
+.chat-typing i:nth-child(2) { animation-delay: .15s; } .chat-typing i:nth-child(3) { animation-delay: .3s; }
+
+.chat-files { display: flex; flex-direction: column; gap: 6px; }
+.chat-msg.mine .chat-files { align-items: flex-end; }
+.chat-file { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chat-file-main { min-width: 270px; max-width: 440px; display: flex; align-items: center; gap: 12px; padding: 10px 14px 10px 10px; background: var(--surface); border: 1px solid var(--line2); border-radius: 14px; color: var(--text); text-align: left; cursor: pointer; }
+.chat-file-main:hover { border-color: var(--line3); background: var(--hover); }
+.chat-file-ico { width: 38px; height: 38px; flex: none; display: grid; place-items: center; border-radius: 11px; background: var(--accent-bg); color: var(--accent-text); }
+.chat-file-info { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.chat-file-info b { font-size: 14.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-file-info small { font-size: 12.5px; color: var(--text3); }
+.chat-file-main > svg { color: var(--text3); flex: none; }
+.chat-file-formats { display: inline-flex; gap: 6px; }
+.chat-file-formats button { height: 34px; padding: 0 13px; background: var(--surface); border: 1px solid var(--line2); border-radius: 10px; font-size: 13.5px; font-weight: 600; color: var(--text2); cursor: pointer; }
+.chat-file-formats button:hover { background: var(--hover); color: var(--text); border-color: var(--line3); }
+
+.chat-empty { margin: 60px auto; text-align: center; color: var(--text2); }
+.chat-empty h3 { font-size: 20px; color: var(--text); margin-bottom: 6px; }
+.chat-loading { margin: auto; display: flex; align-items: center; gap: 10px; color: var(--text2); }
+.chat-loading i { width: 16px; height: 16px; border: 2px solid var(--line2); border-top-color: var(--accent); border-radius: 50%; animation: chatSpin .7s linear infinite; }
+@keyframes chatSpin { to { transform: rotate(360deg); } }
+.chat-error { flex: none; display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 8px 24px; padding: 10px 14px; background: var(--bad-bg); color: var(--bad); border-radius: 10px; font-size: 14px; }
+.chat-error button { border: 0; background: none; color: inherit; font-size: 18px; cursor: pointer; }
+.chat-ended { flex: none; margin: 0; padding: 18px; text-align: center; color: var(--text3); border-top: 1px solid var(--line); }
+
+.chat-compose { flex: none; width: 100%; max-width: 840px; margin: 0 auto; padding: 8px 24px 16px; }
+.chat-box { display: flex; align-items: flex-end; gap: 6px; padding: 8px 8px 8px 16px; background: var(--surface); border: 1px solid var(--line3); border-radius: 18px; box-shadow: var(--shadow-sm, 0 1px 2px rgba(0,0,0,.05)); }
+.chat-box:focus-within { border-color: var(--accent); box-shadow: var(--ring, 0 0 0 3px rgba(244,81,30,.18)); }
+.chat-box textarea { flex: 1; min-width: 0; min-height: 24px; max-height: 200px; padding: 8px 0; border: 0; outline: 0; box-shadow: none; background: none; resize: none; font-size: 15px; line-height: 1.5; }
+.chat-attach { height: 38px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border: 0; background: none; color: var(--text2); border-radius: 12px; cursor: pointer; font-size: 14px; }
+.chat-attach:hover { background: var(--hover); color: var(--text); }
+.chat-attach:disabled { opacity: .5; cursor: wait; }
+.chat-send { width: 38px; height: 38px; flex: none; display: grid; place-items: center; border: 0; border-radius: 12px; background: var(--accent-solid); color: #fff; cursor: pointer; }
+.chat-send:disabled { opacity: .3; cursor: not-allowed; }
+.chat-hint { margin: 8px 6px 0; font-size: 12.5px; color: var(--text3); }
+.chat-drop { position: absolute; inset: 12px; z-index: 20; display: grid; place-items: center; border: 2px dashed var(--accent); border-radius: 18px; background: color-mix(in srgb, var(--surface) 90%, transparent); color: var(--accent-text); font-size: 18px; font-weight: 600; pointer-events: none; }
+
+.chat-new { margin: auto; width: min(700px, 100%); padding: 32px 28px; display: flex; flex-direction: column; gap: 12px; }
+.chat-new h2 { font-size: 28px; letter-spacing: -.025em; }
+.chat-new > p { font-size: 15.5px; color: var(--text2); }
+.chat-pick { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 8px 0; }
+.chat-pick label { position: relative; display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line2); border-radius: 14px; cursor: pointer; }
+.chat-pick label:hover { border-color: var(--line3); }
+.chat-pick label.picked { border-color: var(--accent); background: var(--accent-bg); }
+.chat-pick input { position: absolute; opacity: 0; pointer-events: none; }
+.chat-pick .pick-text { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.chat-pick .pick-text b { font-size: 15px; }
+.chat-pick .pick-text small { font-size: 13px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-pick i { width: 22px; height: 22px; flex: none; display: grid; place-items: center; border: 1.5px solid var(--line3); border-radius: 50%; color: #fff; }
+.chat-pick .picked i { background: var(--accent-solid); border-color: var(--accent-solid); }
+.chat-name { display: grid; gap: 6px; font-size: 14px; font-weight: 500; }
+.chat-name input { height: 44px; font-size: 15px; }
+.chat-go { align-self: flex-start; height: 46px; padding: 0 24px; font-size: 15.5px; }
+.chat-new .chat-back { position: absolute; top: 12px; left: 12px; }
+
+@media (max-width: 1000px) { .chat-layout { grid-template-columns: 270px minmax(0, 1fr); } }
+@media (max-width: 760px) {
+  .chat-page, .shell.focus .content > .chat-page { padding: 0 0 calc(62px + env(safe-area-inset-bottom)) !important; }
+  .chat-layout { grid-template-columns: 1fr; }
+  .chat-layout.in-room .chat-side, .chat-layout.creating .chat-side { display: none; }
+  .chat-layout:not(.in-room):not(.creating) .chat-main { display: none; }
+  .chat-back { display: grid; }
+  .chat-head { padding: 8px 10px; gap: 8px; }
+  .chat-thread { padding: 16px 14px 8px; }
+  .chat-compose { padding: 6px 10px 10px; }
+  .chat-hint, .chat-attach span { display: none; }
+  .chat-pick { grid-template-columns: 1fr; }
+  .chat-new { padding: 56px 18px 24px; }
+  .chat-file-main { min-width: 0; width: 100%; }
+}
+
+/* ==========================================================================
+   An employee's computer: one slim bar with their name and the tabs, then the computer fills the rest
+   ========================================================================== */
+.computer-page, .shell.focus .content > .computer-page { padding: 0 !important; gap: 0; }
+.agent-bar { flex: none; display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.agent-back { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border-radius: 10px; color: var(--text2); }
+.agent-back:hover { background: var(--hover); color: var(--text); }
+.agent-bar-name { min-width: 0; display: grid; margin-right: 8px; }
+.agent-bar-name h1 { font-size: 16px; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.agent-bar-name small { color: var(--text3); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-bar .tabs { flex: 1; min-width: 0; margin: 0; border: 0; padding: 0; overflow-x: auto; }
+.agent-bar .actions { flex: none; margin: 0; }
+@media (max-width: 760px) { .agent-bar { flex-wrap: wrap; gap: 8px; padding: 8px 10px; } .agent-bar .tabs { order: 5; flex-basis: 100%; } .agent-bar-name small { display: none; } .computer-page, .shell.focus .content > .computer-page { padding: 0 0 calc(62px + env(safe-area-inset-bottom)) !important; } }
+
+/* a shorter name for the one tab that is too long for a phone's bottom bar */
+.nav .l-short { display: none; }
+@media (max-width: 760px) { .nav .l-full { display: none; } .nav .l-short { display: inline; } }
+
+/* the global dark-theme rule for inputs would paint a box inside these; they sit inside a styled field already */
+.chat-layout .chat-box textarea, .chat-layout .chat-search input { background: none; }
